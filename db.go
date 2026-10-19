@@ -25,14 +25,14 @@ func New(path string) (*DB, error) {
 }
 
 func (db *DB) Set(key []byte, val []byte) error {
-	i, slot, err := db.index.prepareSet(db.log, key, val)
+	change, err := db.index.prepareSet(db.log, key, val)
 	if err != nil {
 		return fmt.Errorf("prepare set: %s", err)
 	}
 	if err := db.log.write('s', key, val); err != nil {
 		return fmt.Errorf("write log: %s", err)
 	}
-	db.index.commit(i, slot)
+	db.index.commit(change)
 	return nil
 }
 
@@ -45,14 +45,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
-	i, slot, err := db.index.prepareDelete(db.log, key)
+	change, err := db.index.prepareDelete(db.log, key)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %s", err)
 	}
 	if err := db.log.write('d', key, nil); err != nil {
 		return fmt.Errorf("write log: %s", err)
 	}
-	db.index.commit(i, slot)
+	db.index.commit(change)
 	return nil
 }
 
