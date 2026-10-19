@@ -33,7 +33,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (uint64, uint64, 
 	pos := idx.hash(key) % uint64(len(idx.slots))
 	slot := idx.slots[pos]
 	for slot&occupiedMask > 0 {
-		k, v, err := log.read(slot&segmentMask, slot&offsetMask>>26)
+		k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
 		if err != nil {
 			return 0, 0, fmt.Errorf("log read: %w", err)
 		}
@@ -54,7 +54,7 @@ func (idx *Index) prepareDelete(log *Log, key []byte) (uint64, uint64, error) {
 	pos := idx.hash(key) % uint64(len(idx.slots))
 	slot := idx.slots[pos]
 	for slot&occupiedMask > 0 {
-		k, _, err := log.read(slot&segmentMask, slot&offsetMask>>26)
+		k, _, err := log.read(slot&segmentMask>>26, slot&offsetMask)
 		if err != nil {
 			return 0, 0, fmt.Errorf("log read: %w", err)
 		}
@@ -71,7 +71,7 @@ func (idx *Index) get(log *Log, key []byte) ([]byte, error) {
 	pos := idx.hash(key) % uint64(len(idx.slots))
 	slot := idx.slots[pos]
 	for slot&occupiedMask > 0 {
-		k, v, err := log.read(slot&segmentMask, slot&offsetMask>>26)
+		k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
 		if err != nil {
 			return nil, fmt.Errorf("log read: %w", err)
 		}
