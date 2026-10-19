@@ -9,6 +9,7 @@ import (
 const (
 	offsetMask    uint64 = (1 << 26) - 1
 	segmentMask   uint64 = ((1 << 20) - 1) << 26
+	hashtagMask   uint64 = ((1 << 16) - 1) << 46
 	occupiedMask  uint64 = 1 << 63
 	tombstoneMask uint64 = 1 << 62
 )
@@ -40,20 +41,24 @@ func (idx *Index) grow() {
 func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (uint64, uint64, error) {
 	idx.grow()
 	n := uint64(len(idx.slots))
-	pos := idx.hash(key) % n
+	hash := idx.hash(key)
+	hashtag := hash & hashtagMask
+	pos := hash % n
 	slot := idx.slots[pos]
 	tombstone := n
 	for slot&occupiedMask > 0 {
 		if slot&tombstoneMask == 0 {
-			k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
-			if err != nil {
-				return 0, 0, fmt.Errorf("log read: %w", err)
-			}
-			if bytes.Equal(k, key) {
-				if bytes.Equal(val, v) {
-					return pos, slot, nil
+			if slot&hashtagMask == hashtag {
+				k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
+				if err != nil {
+					return 0, 0, fmt.Errorf("log read: %w", err)
 				}
-				return pos, log.size | occupiedMask, nil
+				if bytes.Equal(k, key) {
+					if bytes.Equal(val, v) {
+						return pos, slot, nil
+					}
+					return pos, log.size | occupiedMask | hashtag, nil
+				}
 			}
 		} else if tombstone == n {
 			tombstone = pos
@@ -62,19 +67,21 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (uint64, uint64, 
 		slot = idx.slots[pos]
 	}
 	if tombstone != n {
-		return tombstone, log.size | occupiedMask, nil
+		return tombstone, log.size | occupiedMask | hashtag, nil
 	}
-	return pos, log.size | occupiedMask, nil
+	return pos, log.size | occupiedMask | hashtag, nil
 }
 
 func (idx *Index) prepareDelete(log *Log, key []byte) (uint64, uint64, error) {
 	n := uint64(len(idx.slots))
-	pos := idx.hash(key) % n
+	hash := idx.hash(key)
+	hashtag := hash & hashtagMask
+	pos := hash % n
 	originalPos := pos
 	slot := idx.slots[pos]
 	originalSlot := slot
 	for slot&occupiedMask > 0 {
-		if slot&tombstoneMask == 0 {
+		if slot&tombstoneMask == 0 && slot&hashtagMask == hashtag {
 			k, _, err := log.read(slot&segmentMask>>26, slot&offsetMask)
 			if err != nil {
 				return 0, 0, fmt.Errorf("log read: %w", err)
@@ -91,10 +98,12 @@ func (idx *Index) prepareDelete(log *Log, key []byte) (uint64, uint64, error) {
 
 func (idx *Index) get(log *Log, key []byte) ([]byte, error) {
 	n := uint64(len(idx.slots))
-	pos := idx.hash(key) % n
+	hash := idx.hash(key)
+	hashtag := hash & hashtagMask
+	pos := hash % n
 	slot := idx.slots[pos]
 	for slot&occupiedMask > 0 {
-		if slot&tombstoneMask == 0 {
+		if slot&tombstoneMask == 0 && slot&hashtagMask == hashtag {
 			k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
 			if err != nil {
 				return nil, fmt.Errorf("log read: %w", err)
