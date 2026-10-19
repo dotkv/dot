@@ -33,9 +33,13 @@ func (idx *Index) hash(key []byte) uint64 {
 }
 
 func (idx *Index) grow() {
-	if float64(idx.population)/float64(len(idx.slots)) > 0.75 {
-		panic("unimplemented index grow")
+	if float64(idx.population)/float64(len(idx.slots)) < 0.75 {
+		return
 	}
+	// doubled := make([]uint64, 2*len(idx.slots))
+	// // move
+	// idx.slots = doubled
+	panic("unimplemented index grow")
 }
 
 func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (uint64, uint64, error) {
