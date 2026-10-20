@@ -255,7 +255,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (indexChange, err
 		idx.grow()
 		return indexChange{
 			home: int(hash & uint64(len(idx.slots)-1)),
-			slot: log.size | hashtag(hash),
+			slot: hashtag(hash),
 			kind: indexInsert,
 		}, nil
 	}
@@ -264,7 +264,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (indexChange, err
 	}
 	return indexChange{
 		pos:  pos,
-		slot: log.size | idx.slots[pos]&^(segmentMask|offsetMask),
+		slot: idx.slots[pos] &^ (segmentMask | offsetMask),
 		kind: indexUpdate,
 	}, nil
 }

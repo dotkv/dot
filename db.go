@@ -33,9 +33,12 @@ func (db *DB) Set(key []byte, val []byte) error {
 	if err != nil {
 		return fmt.Errorf("prepare set: %s", err)
 	}
-	if err := db.log.write('s', key, val); err != nil {
+	segment, off, err := db.log.write('s', key, val)
+	if err != nil {
 		return fmt.Errorf("write log: %s", err)
 	}
+	// The append may rotate, so use its actual address when committing.
+	change.slot |= segment<<26 | off
 	db.index.commit(change)
 	return nil
 }
@@ -60,7 +63,7 @@ func (db *DB) Delete(key []byte) error {
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	if err := db.log.write('d', key, nil); err != nil {
+	if _, _, err := db.log.write('d', key, nil); err != nil {
 		return fmt.Errorf("write log: %s", err)
 	}
 	db.index.commit(change)

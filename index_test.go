@@ -308,9 +308,10 @@ func TestDBGrow(t *testing.T) {
 		t.Fatalf("capacity: got %d, want %d", len(db.index.slots), 4*n)
 	}
 	for i := 0; i < 2*n; i++ {
-		if i%3 == 0 {
+		switch i % 3 {
+		case 0:
 			err = db.Delete(keyFor(i))
-		} else if i%3 == 1 {
+		case 1:
 			err = db.Set(keyFor(i), []byte("updated"))
 		}
 		if err != nil {
@@ -319,9 +320,10 @@ func TestDBGrow(t *testing.T) {
 	}
 	for i := 0; i < 2*n; i++ {
 		want := value
-		if i%3 == 0 {
+		switch i % 3 {
+		case 0:
 			want = nil
-		} else if i%3 == 1 {
+		case 1:
 			want = []byte("updated")
 		}
 		got, err := db.Get(keyFor(i))

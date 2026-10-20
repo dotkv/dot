@@ -1,0 +1,273 @@
+package dot
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+func newSealingDB(t *testing.T) *DB {
+	t.Helper()
+	db, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.log.headFile.Close() })
+	return db
+}
+
+// Leave existing records intact and reach the boundary without writing 64 MiB.
+func padLog(t *testing.T, log *Log, size uint64) {
+	t.Helper()
+	if err := log.headFile.Truncate(int64(size)); err != nil {
+		t.Fatal(err)
+	}
+	log.size = size
+}
+
+func TestLogSealingBoundary(t *testing.T) {
+	for _, extra := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
+			log := newSealingDB(t).log
+			key, value := []byte("boundary"), []byte("value spanning the boundary")
+			offset := logSegmentSize - uint64(13+len(key)+len(value)) + extra
+			padLog(t, log, offset)
+			segment, off, err := log.write('s', key, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if segment != 0 || off != offset {
+				t.Fatalf("boundary record address: got (%d, %d), want (0, %d)", segment, off, offset)
+			}
+			old := log.headFile
+			newKey, newValue := []byte("new"), []byte("v")
+			newSegment, newOff, err := log.write('s', newKey, newValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if newSegment != 1 || newOff != 0 {
+				t.Fatalf("next record address: got (%d, %d), want (1, 0)", newSegment, newOff)
+			}
+			if _, err := old.Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("sealed head was not closed: %v", err)
+			}
+			for _, record := range []struct {
+				segment, offset uint64
+				key, value      []byte
+			}{
+				{segment, off, key, value},
+				{newSegment, newOff, newKey, newValue},
+			} {
+				k, v, err := log.read(record.segment, record.offset)
+				if err != nil || !bytes.Equal(k, record.key) || !bytes.Equal(v, record.value) {
+					t.Fatalf("record (%d, %d): key=%q value=%q error=%v", record.segment, record.offset, k, v, err)
+				}
+			}
+			info, err := os.Stat(old.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != logSegmentSize+int64(extra) {
+				t.Fatalf("sealed file grew: got %d bytes", info.Size())
+			}
+		})
+	}
+}
+
+func TestDBLogSealing(t *testing.T) {
+	db := newSealingDB(t)
+	set := func(key, value string) {
+		t.Helper()
+		if err := db.Set([]byte(key), []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(key, want string) {
+		t.Helper()
+		got, err := db.Get([]byte(key))
+		if err != nil || string(got) != want {
+			t.Fatalf("key %q: got %q, want %q, error %v", key, got, want, err)
+		}
+	}
+	set("keep", "a longer value from segment zero")
+	set("update", "original")
+	set("delete", "remove me")
+	padLog(t, db.log, logSegmentSize)
+	set("new", "segment one")
+	get("keep", "a longer value from segment zero")
+	get("update", "original")
+	get("new", "segment one")
+	set("update", "middle")
+	if err := db.Delete([]byte("delete")); err != nil {
+		t.Fatal(err)
+	}
+	get("delete", "")
+	padLog(t, db.log, logSegmentSize)
+	set("update", "latest")
+	set("newest", "segment two")
+	get("keep", "a longer value from segment zero")
+	get("new", "segment one")
+	get("update", "latest")
+	get("newest", "segment two")
+	// A delete can also trigger rotation, including when its key is sealed.
+	padLog(t, db.log, logSegmentSize)
+	for _, key := range []string{"keep", "new", "update"} {
+		if err := db.Delete([]byte(key)); err != nil {
+			t.Fatal(err)
+		}
+		get(key, "")
+	}
+	get("newest", "segment two")
+	if db.log.headSegment != 3 {
+		t.Fatalf("got head segment %d, want 3", db.log.headSegment)
+	}
+}
+
+func TestDBLogSealingOpenFailure(t *testing.T) {
+	for _, operation := range []string{"insert", "update", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			db := newSealingDB(t)
+			key, value := []byte("existing"), []byte("original")
+			if err := db.Set(key, value); err != nil {
+				t.Fatal(err)
+			}
+			padLog(t, db.log, logSegmentSize)
+			head := db.log.headFile
+			before := slices.Clone(db.index.slots)
+			blocker := filepath.Join(db.path, "0000001.log")
+			if err := os.Mkdir(blocker, 0700); err != nil {
+				t.Fatal(err)
+			}
+			write := func() error {
+				switch operation {
+				case "insert":
+					return db.Set([]byte("new"), []byte("inserted"))
+				case "update":
+					return db.Set(key, []byte("updated"))
+				default:
+					return db.Delete(key)
+				}
+			}
+			if err := write(); err == nil {
+				t.Fatal("rotation unexpectedly succeeded")
+			}
+			if db.log.headFile != head || db.log.headSegment != 0 || db.log.size != logSegmentSize {
+				t.Fatal("failed rotation changed the head")
+			}
+			if !slices.Equal(before, db.index.slots) || db.index.population != 1 {
+				t.Fatal("failed rotation changed the index")
+			}
+			info, err := head.Stat()
+			if err != nil || info.Size() != logSegmentSize {
+				t.Fatalf("failed rotation changed the file: stat=%v, error=%v", info, err)
+			}
+			got, err := db.Get(key)
+			if err != nil || !bytes.Equal(got, value) {
+				t.Fatalf("existing value after failed rotation: got %q, error %v", got, err)
+			}
+			if err := os.Remove(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if err := write(); err != nil {
+				t.Fatalf("retry after removing blocker: %v", err)
+			}
+			want := value
+			switch operation {
+			case "insert":
+				key, want = []byte("new"), []byte("inserted")
+			case "update":
+				want = []byte("updated")
+			default:
+				want = nil
+			}
+			got, err = db.Get(key)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("value after retry: got %q, want %q, error %v", got, want, err)
+			}
+		})
+	}
+}
+
+func TestDBLogSealingSyncFailure(t *testing.T) {
+	db := newSealingDB(t)
+	if err := db.Set([]byte("existing"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	padLog(t, db.log, logSegmentSize)
+	before := slices.Clone(db.index.slots)
+	head := db.log.headFile
+	if err := head.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Set([]byte("new"), []byte("value")); err == nil {
+		t.Fatal("sync on closed head unexpectedly succeeded")
+	}
+	if db.log.headFile != head || db.log.headSegment != 0 || db.log.size != logSegmentSize {
+		t.Fatal("failed sync changed the head")
+	}
+	if !slices.Equal(before, db.index.slots) || db.index.population != 1 {
+		t.Fatal("failed sync changed the index")
+	}
+	var err error
+	db.log.headFile, err = os.OpenFile(head.Name(), os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Set([]byte("new"), []byte("value")); err != nil {
+		t.Fatalf("retry after reopening head: %v", err)
+	}
+	for _, key := range []string{"existing", "new"} {
+		got, err := db.Get([]byte(key))
+		if err != nil || string(got) != "value" {
+			t.Fatalf("key %q after retry: got %q, error %v", key, got, err)
+		}
+	}
+}
+
+func TestLogSealedReadsCloseFiles(t *testing.T) {
+	log := newSealingDB(t).log
+	if _, _, err := log.write('s', []byte("old"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	sealedPath := log.headFile.Name()
+	padLog(t, log, logSegmentSize)
+	if _, _, err := log.write('s', []byte("new"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	countOpen := func() int {
+		t.Helper()
+		fds, err := os.ReadDir("/proc/self/fd")
+		if os.IsNotExist(err) {
+			t.Skip("file descriptor inspection requires /proc/self/fd")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, fd := range fds {
+			name, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+			if err == nil && name == sealedPath {
+				count++
+			}
+		}
+		return count
+	}
+	for range 8 {
+		if _, _, err := log.read(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := countOpen(); got != 0 {
+			t.Fatalf("successful read left %d sealed descriptors open", got)
+		}
+		if _, _, err := log.read(0, logSegmentSize); err == nil {
+			t.Fatal("reading past sealed EOF unexpectedly succeeded")
+		}
+		if got := countOpen(); got != 0 {
+			t.Fatalf("failed read left %d sealed descriptors open", got)
+		}
+	}
+}
