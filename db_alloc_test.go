@@ -247,3 +247,29 @@ func TestDBSetScalarAllocations(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, false, true)
 	})
 }
+
+func TestDBUpdateUint64Allocations(t *testing.T) {
+	db := newInternalDB(t)
+	key := []byte("counter")
+	if err := db.Set(key, uint64(0)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		fn   func(uint64) uint64
+	}{
+		{"increment", func(v uint64) uint64 { return v + 1 }},
+		{"unchanged", func(v uint64) uint64 { return v }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocations := testing.AllocsPerRun(100, func() {
+				if err := db.Update(key, tc.fn); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if allocations != 0 {
+				t.Fatalf("got %g allocations, want 0", allocations)
+			}
+		})
+	}
+}

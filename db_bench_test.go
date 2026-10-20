@@ -3,6 +3,7 @@ package dot
 import (
 	"bytes"
 	"encoding/binary"
+	"sync/atomic"
 	"testing"
 )
 
@@ -183,6 +184,73 @@ func BenchmarkSetUint64(b *testing.B) {
 		}
 		b.StopTimer()
 		done += n
+	}
+}
+
+func BenchmarkUpdateUint64(b *testing.B) {
+	f := newPrimitiveFixture(b)
+	for done := 0; done < b.N; {
+		f.resetValue(b, true, uint64(0))
+		n := min(benchmarkKeyCount, b.N-done)
+		b.StartTimer()
+		for i := range n {
+			if err := f.db.Update(f.keys[i][:], func(v uint64) uint64 { return v + 1 }); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		done += n
+	}
+}
+
+func BenchmarkUpdateUint64Unchanged(b *testing.B) {
+	f := newPrimitiveFixture(b)
+	f.resetValue(b, true, uint64(42))
+	b.StartTimer()
+	for i := 0; b.Loop(); i++ {
+		if err := f.db.Update(f.keys[i%benchmarkKeyCount][:], func(v uint64) uint64 { return v }); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUpdateUint64Parallel(b *testing.B) {
+	for _, hotKey := range []bool{false, true} {
+		name := "distributed"
+		if hotKey {
+			name = "hot-key"
+		}
+		b.Run(name, func(b *testing.B) {
+			f := newPrimitiveFixture(b)
+			f.resetValue(b, true, uint64(0))
+			var workerID atomic.Uint64
+			b.StartTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				// Spread worker starting points across the populated keys.
+				for i := int(workerID.Add(1)) * 257; pb.Next(); i++ {
+					key := i % benchmarkKeyCount
+					if hotKey {
+						key = 0
+					}
+					if err := f.db.Update(f.keys[key][:], func(v uint64) uint64 { return v + 1 }); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+			b.StopTimer()
+			var total uint64
+			for i := range benchmarkKeyCount {
+				value, err := f.db.Get[uint64](f.keys[i][:])
+				if err != nil {
+					b.Fatal(err)
+				}
+				total += value
+			}
+			if total != uint64(b.N) {
+				b.Fatalf("got %d increments, want %d", total, b.N)
+			}
+		})
 	}
 }
 

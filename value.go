@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// Value lists the encodings supported by Get and Set.
+// Value lists the encodings supported by Get, Set, and Update.
 // Integers use eight little-endian bytes; float64 uses its IEEE 754 bits in the
 // same byte order. A bool uses one byte, either 0 or 1. Values have no type tags.
 type Value interface {
@@ -21,6 +21,29 @@ var ErrInvalidValue = errors.New("invalid value encoding")
 type scalarValue struct {
 	bits uint64
 	size int
+}
+
+// encodeValue borrows buf for scalars and passes byte slices through unchanged.
+func encodeValue[T Value](value T, buf *[8]byte) ([]byte, error) {
+	switch v := any(value).(type) {
+	case []byte:
+		return v, nil
+	case int64:
+		binary.LittleEndian.PutUint64(buf[:], uint64(v))
+	case uint64:
+		binary.LittleEndian.PutUint64(buf[:], v)
+	case float64:
+		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
+	case bool:
+		buf[0] = 0
+		if v {
+			buf[0] = 1
+		}
+		return buf[:1], nil
+	default:
+		return nil, ErrInvalidValue
+	}
+	return buf[:], nil
 }
 
 func scalarBytes(value []byte) scalarValue {

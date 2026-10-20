@@ -1,10 +1,9 @@
 package dot
 
 import (
-	"encoding/binary"
+	"bytes"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,7 +17,7 @@ const (
 	shardCount = 1 << shardBits
 )
 
-// ErrNotFound is returned directly by Get when the key does not exist.
+// ErrNotFound is returned directly by Get and Update when the key does not exist.
 var ErrNotFound = errors.New("key not found")
 
 type DB struct {
@@ -108,26 +107,9 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 		expiration = options.expiration
 	}
 	var encoded [8]byte
-	var value []byte
-	switch v := any(val).(type) {
-	case []byte:
-		value = v
-	case int64:
-		binary.LittleEndian.PutUint64(encoded[:], uint64(v))
-		value = encoded[:]
-	case uint64:
-		binary.LittleEndian.PutUint64(encoded[:], v)
-		value = encoded[:]
-	case float64:
-		binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(v))
-		value = encoded[:]
-	case bool:
-		if v {
-			encoded[0] = 1
-		}
-		value = encoded[:1]
-	default:
-		return ErrInvalidValue
+	value, err := encodeValue(val, &encoded)
+	if err != nil {
+		return err
 	}
 	s, hash := db.shard(key)
 	s.lock.Lock()
@@ -139,14 +121,19 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
+	return s.appendSet(key, value, change)
+}
+
+// appendSet requires the shard's exclusive lock. Commit only after the append
+// succeeds, using its actual address because writing may rotate the log.
+func (s *shard) appendSet(key, value []byte, change indexChange) error {
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	segment, off, err := s.log.write('s', key, value, expiration)
+	segment, off, err := s.log.write('s', key, value, change.expiration)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
-	// The append may rotate, so use its actual address when committing.
 	change.slot |= segment<<26 | off
 	s.index.commit(change)
 	return nil
@@ -191,6 +178,65 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 		return zero, ErrNotFound
 	}
 	return value, nil
+}
+
+// Update atomically replaces an existing value with fn's result, preserving its
+// expiration. Missing or expired keys return ErrNotFound without calling fn;
+// invalid scalar encodings also leave the value unchanged without calling fn.
+// The callback runs once under the shard's exclusive lock. It must be short and
+// must not call methods on this DB. A panic propagates without changing the value.
+// Byte slices passed to fn are owned by the caller and may be mutated or retained.
+// Returned slices are copied before Update returns; nil stores an empty value.
+// An unchanged encoding does not append a record. A write error leaves the index
+// unchanged, but cannot undo any external effects of the callback.
+func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
+	s, hash := db.shard(key)
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if s.closed {
+		return os.ErrClosed
+	}
+	var value T
+	var pos int
+	var expiration int64
+	var err error
+	var previous []byte
+	var raw scalarValue
+	out, byteValue := any(&value).(*[]byte)
+	if byteValue {
+		// Keep the original in the write scratch space for no-op detection,
+		// and give the callback a separate copy it can mutate or retain.
+		pos, previous, expiration, err = s.index.lookupPayload(s.log, key, hash, s.log.writeBuffer[:], true)
+	} else {
+		pos, raw, expiration, err = s.index.findScalar(s.log, key, hash)
+	}
+	if err != nil {
+		return fmt.Errorf("index update: %w", err)
+	}
+	if pos < 0 || isExpired(expiration) {
+		return ErrNotFound
+	}
+	if byteValue {
+		*out = bytes.Clone(previous)
+	} else {
+		value, err = decodeScalar[T](raw)
+		if err != nil {
+			return fmt.Errorf("index update: %w", err)
+		}
+	}
+	var encoded [8]byte
+	payload, err := encodeValue(fn(value), &encoded)
+	if err != nil {
+		return err
+	}
+	if byteValue {
+		if bytes.Equal(payload, previous) {
+			return nil
+		}
+	} else if scalarBytes(payload) == raw {
+		return nil
+	}
+	return s.appendSet(key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration))
 }
 
 // Delete removes key. Deleting a missing key succeeds.

@@ -97,11 +97,12 @@ func command(ctx context.Context) error {
 	}
 	var cases []caseConfig
 	for repetition := range *repeat {
+		configuration := 0
 		for _, workload := range workloadNames {
 			for _, size := range sizes {
 				for _, workers := range concurrency {
 					// Rotate engine order to distribute effects of run order.
-					offset := (len(cases)/len(names) + repetition) % len(names)
+					offset := (configuration + repetition) % len(names)
 					for i := range names {
 						c := caseConfig{
 							Engine: names[(i+offset)%len(names)], Workload: workload,
@@ -114,6 +115,7 @@ func command(ctx context.Context) error {
 						}
 						cases = append(cases, c)
 					}
+					configuration++
 				}
 			}
 		}

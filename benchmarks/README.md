@@ -50,7 +50,7 @@ the workload/value-size/worker-count matrix are marked in the generated section.
 
 <!-- benchmark-results:start -->
 
-Completed cases: **12**, covering **6 configurations**.
+Completed cases: **36**, covering **6 configurations**.
 
 Configuration: **16,384 initial keys**, **300,000 measured operations**, **30,000 warmup operations**, seed **1**.
 
@@ -66,43 +66,43 @@ Columns summarize all operation types. Each cell is the median across the indica
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 2.437 | 34.047 | 6,171,877 | 61.7 | 1.50 |
-| Pebble | 1 | 3.063 | 28.287 | 4,795,546 | 36.6 | 18.54 |
+| Dot | 3 | 2.407 | 33.535 | 6,167,402 | 57.5 | 1.50 |
+| Pebble | 3 | 3.065 | 26.239 | 4,795,192 | 38.6 | 18.54 |
 
 ### read heavy · 1,024 B values · 16 workers
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 6.280 | 86.015 | 2,398,767 | 70.9 | 28.11 |
-| Pebble | 1 | 52.296 | 301.055 | 302,804 | 50.8 | 36.56 |
+| Dot | 3 | 5.738 | 78.847 | 2,652,177 | 70.8 | 28.11 |
+| Pebble | 3 | 50.195 | 284.671 | 315,296 | 50.8 | 36.56 |
 
 ### mixed · 8 B uint64 values · 16 workers
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 5.538 | 45.567 | 2,793,480 | 62.2 | 7.49 |
-| Pebble | 1 | 5.898 | 63.231 | 2,583,255 | 45.3 | 19.01 |
+| Dot | 3 | 5.764 | 47.615 | 2,667,896 | 60.2 | 7.49 |
+| Pebble | 3 | 5.921 | 63.999 | 2,576,548 | 45.3 | 19.01 |
 
 ### mixed · 1,024 B values · 16 workers
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 10.420 | 96.767 | 1,486,959 | 65.4 | 129.95 |
-| Pebble | 1 | 79.203 | 481.279 | 197,288 | 51.4 | 38.99 |
+| Dot | 3 | 10.831 | 92.159 | 1,431,149 | 65.7 | 129.95 |
+| Pebble | 3 | 79.358 | 471.039 | 195,931 | 51.1 | 38.96 |
 
 ### write heavy · 8 B uint64 values · 16 workers
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 9.307 | 62.463 | 1,677,652 | 60.3 | 13.48 |
-| Pebble | 1 | 9.624 | 72.703 | 1,622,606 | 44.4 | 18.99 |
+| Dot | 3 | 9.345 | 64.767 | 1,674,509 | 60.2 | 13.48 |
+| Pebble | 3 | 9.705 | 71.679 | 1,605,759 | 44.3 | 18.98 |
 
 ### write heavy · 1,024 B values · 16 workers
 
 | Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 1 | 17.861 | 102.399 | 879,443 | 63.5 | 231.73 |
-| Pebble | 1 | 149.889 | 155.647 | 104,691 | 55.8 | 39.73 |
+| Dot | 3 | 17.551 | 110.591 | 891,505 | 65.1 | 231.73 |
+| Pebble | 3 | 150.051 | 137.215 | 104,478 | 50.9 | 39.94 |
 
 
 <!-- benchmark-results:end -->

@@ -308,6 +308,12 @@ func (idx *Index) remove(home, pos int) {
 // for a miss. A nil buf gives Get owned storage; Set and Delete lend their
 // write buffer. Consume the value before reusing that buffer. The hash is computed by DB.
 func (idx *Index) findPayload(log *Log, key []byte, hash uint64, buf []byte) (int, []byte, int64, error) {
+	return idx.lookupPayload(log, key, hash, buf, buf == nil)
+}
+
+// lookupPayload can skip expired entries even when a caller borrows scratch
+// storage. Set and Delete must locate expired entries to replace or remove them.
+func (idx *Index) lookupPayload(log *Log, key []byte, hash uint64, buf []byte, liveOnly bool) (int, []byte, int64, error) {
 	mask := len(idx.slots) - 1
 	home := int(hash & uint64(mask))
 	if idx.slots[home]&occupiedMask == 0 {
@@ -317,7 +323,7 @@ func (idx *Index) findPayload(log *Log, key []byte, hash uint64, buf []byte) (in
 	pos := idx.run(home)
 	for {
 		slot := idx.slots[pos]
-		if slot&hashtagMask == tag && (buf != nil || !idx.slotExpired(slot)) {
+		if slot&hashtagMask == tag && (!liveOnly || !idx.slotExpired(slot)) {
 			k, v, expiration, err := log.readPayload(slot&segmentMask>>26, slot&offsetMask, buf)
 			if err != nil {
 				return 0, nil, 0, fmt.Errorf("log read: %w", err)
@@ -356,6 +362,11 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64, expi
 	if prevExp == expiration && !isExpired(prevExp) && bytes.Equal(val, previous) {
 		return indexChange{}, nil
 	}
+	return idx.prepareUpdate(pos, hash, expiration, prevExp), nil
+}
+
+// prepareUpdate reuses a successful lookup under the shard's exclusive lock.
+func (idx *Index) prepareUpdate(pos int, hash uint64, expiration, prevExp int64) indexChange {
 	return indexChange{
 		pos:        pos,
 		slot:       idx.slots[pos] &^ addressMask,
@@ -364,7 +375,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64, expi
 		expiration: expiration,
 		hasPrevExp: prevExp != 0,
 		kind:       indexUpdate,
-	}, nil
+	}
 }
 
 func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange, error) {
