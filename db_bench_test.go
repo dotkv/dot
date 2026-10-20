@@ -18,6 +18,7 @@ type primitiveFixture struct {
 
 func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 	b.Helper()
+	// Callers must start the timer after setup, even when using b.Loop.
 	b.StopTimer()
 	db := newInternalDB(b)
 	f := &primitiveFixture{db: db}
@@ -113,7 +114,7 @@ func BenchmarkReplace(b *testing.B) {
 		f.reset(b, true)
 		n := min(benchmarkKeyCount, b.N-done)
 		b.StartTimer()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if err := f.db.Set(f.keys[i][:], replacement[:]); err != nil {
 				b.Fatal(err)
 			}
@@ -127,7 +128,7 @@ func BenchmarkSetUnchanged(b *testing.B) {
 	f := newPrimitiveFixture(b)
 	f.reset(b, true)
 	b.StartTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		if err := f.db.Set(f.keys[i%benchmarkKeyCount][:], f.value[:]); err != nil {
 			b.Fatal(err)
 		}

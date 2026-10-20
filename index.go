@@ -239,6 +239,9 @@ func (idx *Index) find(log *Log, key []byte, buf []byte) (uint64, int, []byte, e
 			if bytes.Equal(k, key) {
 				return hash, pos, v, nil
 			}
+			// Reuse this payload for later fingerprint matches, including when
+			// read allocated because buf was nil or too small.
+			buf = k[:cap(k)]
 		}
 		pos = (pos + 1) & mask
 		if idx.slots[pos]&continuationMask == 0 {
@@ -286,6 +289,8 @@ func (idx *Index) prepareDelete(log *Log, key []byte) (indexChange, error) {
 }
 
 func (idx *Index) get(log *Log, key []byte) ([]byte, error) {
+	// Keep the payload private to this lookup: Get calls share a read lock
+	// and the returned value must survive subsequent reads and writes.
 	_, _, val, err := idx.find(log, key, nil)
 	return val, err
 }
