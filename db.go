@@ -49,6 +49,9 @@ func (db *DB) Delete(key []byte) error {
 	if err != nil {
 		return fmt.Errorf("prepare delete: %s", err)
 	}
+	if change.kind == indexUnchanged {
+		return nil
+	}
 	if err := db.log.write('d', key, nil); err != nil {
 		return fmt.Errorf("write log: %s", err)
 	}

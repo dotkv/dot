@@ -331,6 +331,49 @@ func TestDBGrow(t *testing.T) {
 	}
 }
 
+func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
+	db, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.log.head.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkMissingDelete := func(key []byte) {
+		t.Helper()
+		before, err := db.log.head.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		size := db.log.size
+		for range 2 {
+			if err := db.Delete(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		after, err := db.log.head.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Size() != before.Size() || db.log.size != size {
+			t.Fatalf("deleting missing key %q grew log: file %d -> %d, counter %d -> %d",
+				key, before.Size(), after.Size(), size, db.log.size)
+		}
+	}
+	key, value := []byte("key"), []byte("value")
+	checkMissingDelete(key)
+	if err := db.Set(key, value); err != nil {
+		t.Fatal(err)
+	}
+	checkMissingDelete([]byte("missing"))
+	if err := db.Delete(key); err != nil {
+		t.Fatal(err)
+	}
+	checkMissingDelete(key)
+}
+
 func TestIndexLogFailure(t *testing.T) {
 	db, err := New(t.TempDir())
 	if err != nil {
