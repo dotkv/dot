@@ -6,31 +6,6 @@ import (
 	"testing"
 )
 
-/*
-goos: linux
-goarch: amd64
-pkg: dot
-cpu: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
-BenchmarkSet-16             	 1400335	       841.5 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetHit-16          	 1514816	       794.5 ns/op	     144 B/op	       1 allocs/op
-BenchmarkReplace-16         	  810716	      1526 ns/op	       0 B/op	       0 allocs/op
-BenchmarkSetUnchanged-16    	 1593102	       750.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetMiss-16         	89616434	        12.73 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/bytes/hit-16         	 1453092	       827.1 ns/op	      24 B/op	       1 allocs/op
-BenchmarkGetScalar/int64/hit-16         	 1484664	       919.3 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/uint64/hit-16        	 1000000	      1072 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/float64/hit-16       	 1390905	       836.3 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/bool/hit-16          	 1476885	       811.5 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/bytes/miss-16        	91962274	        12.64 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/int64/miss-16        	100000000	        11.13 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/uint64/miss-16       	100000000	        11.13 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/float64/miss-16      	97737777	        11.80 ns/op	       0 B/op	       0 allocs/op
-BenchmarkGetScalar/bool/miss-16         	96750692	        11.35 ns/op	       0 B/op	       0 allocs/op
-BenchmarkDeleteHit-16                   	  847647	      1459 ns/op	       0 B/op	       0 allocs/op
-BenchmarkDeleteMiss-16                  	80069713	        14.72 ns/op	       0 B/op	       0 allocs/op
-PASS
-ok  	dot	25.871s
-*/
 const benchmarkKeyCount = 4096
 
 // Use 16-byte keys and 128-byte values. The second half of keys is never
@@ -100,8 +75,8 @@ func BenchmarkSet(b *testing.B) {
 	}
 }
 
-func BenchmarkGetHit(b *testing.B) {
-	benchmarkGet(b, true, nil)
+func BenchmarkGetBytesHit(b *testing.B) {
+	benchmarkGetBytes(b, true)
 }
 
 func BenchmarkReplace(b *testing.B) {
@@ -134,18 +109,15 @@ func BenchmarkSetUnchanged(b *testing.B) {
 	b.StopTimer()
 }
 
-func BenchmarkGetMiss(b *testing.B) {
-	benchmarkGet(b, false, nil)
+func BenchmarkGetBytesMiss(b *testing.B) {
+	benchmarkGetBytes(b, false)
 }
 
-func benchmarkGet(b *testing.B, hit bool, value []byte) {
+func benchmarkGetBytes(b *testing.B, hit bool) {
 	b.Helper()
 	f := newPrimitiveFixture(b)
-	if value == nil {
-		value = f.value[:]
-	}
-	f.resetValue(b, true, value)
-	offset, want := 0, value
+	f.reset(b, true)
+	offset, want := 0, f.value[:]
 	var wantErr error
 	if !hit {
 		offset, want = benchmarkKeyCount, nil
@@ -164,109 +136,47 @@ func benchmarkGet(b *testing.B, hit bool, value []byte) {
 	b.StopTimer()
 }
 
-// Compare owned bytes and scalar decoding with the same small records. Setup,
-// including binary encoding, stays outside the timed loops.
-func BenchmarkGetScalar(b *testing.B) {
-	var encoded [8]byte
-	binary.LittleEndian.PutUint64(encoded[:], 42)
-	for _, hit := range []bool{true, false} {
-		name := "hit"
-		if !hit {
-			name = "miss"
-		}
-		b.Run("bytes/"+name, func(b *testing.B) {
-			benchmarkGet(b, hit, encoded[:])
-		})
-		b.Run("int64/"+name, func(b *testing.B) {
-			benchmarkScalarGet(b, hit, int64(42))
-		})
-		b.Run("uint64/"+name, func(b *testing.B) {
-			benchmarkScalarGet(b, hit, uint64(42))
-		})
-		b.Run("float64/"+name, func(b *testing.B) {
-			benchmarkScalarGet(b, hit, 1.5)
-		})
-		b.Run("bool/"+name, func(b *testing.B) {
-			benchmarkScalarGet(b, hit, true)
-		})
-	}
-}
-
-func benchmarkScalarGet[T interface {
-	Value
-	comparable
-}](b *testing.B, hit bool, want T) {
-	b.Helper()
+func BenchmarkGetUint64Hit(b *testing.B) {
 	f := newPrimitiveFixture(b)
+	want := uint64(42)
 	f.resetValue(b, true, want)
-	offset := 0
-	var wantErr error
-	if !hit {
-		offset = benchmarkKeyCount
-		var zero T
-		want = zero
-		wantErr = ErrNotFound
-	}
 	b.StartTimer()
 	for i := 0; b.Loop(); i++ {
-		got, err := f.db.Get[T](f.keys[offset+i%benchmarkKeyCount][:])
-		if err != wantErr {
+		got, err := f.db.Get[uint64](f.keys[i%benchmarkKeyCount][:])
+		if err != nil {
 			b.Fatal(err)
 		}
 		if got != want {
-			b.Fatalf("get: got %v, want %v", got, want)
+			b.Fatalf("get: got %d, want %d", got, want)
 		}
 	}
 	b.StopTimer()
 }
 
-func BenchmarkSetScalar(b *testing.B) {
-	var initial, replacement [8]byte
-	binary.LittleEndian.PutUint64(initial[:], 42)
-	binary.LittleEndian.PutUint64(replacement[:], 43)
-	for _, operation := range []string{"insert", "replace", "unchanged"} {
-		b.Run("bytes/"+operation, func(b *testing.B) {
-			benchmarkScalarSet(b, operation, initial[:], replacement[:])
-		})
-		b.Run("int64/"+operation, func(b *testing.B) {
-			benchmarkScalarSet(b, operation, int64(42), int64(43))
-		})
-		b.Run("uint64/"+operation, func(b *testing.B) {
-			benchmarkScalarSet(b, operation, uint64(42), uint64(43))
-		})
-		b.Run("float64/"+operation, func(b *testing.B) {
-			benchmarkScalarSet(b, operation, 1.5, 2.5)
-		})
-		b.Run("bool/"+operation, func(b *testing.B) {
-			benchmarkScalarSet(b, operation, false, true)
-		})
+func BenchmarkGetUint64Miss(b *testing.B) {
+	f := newPrimitiveFixture(b)
+	f.resetValue(b, true, uint64(42))
+	b.StartTimer()
+	for i := 0; b.Loop(); i++ {
+		got, err := f.db.Get[uint64](f.keys[benchmarkKeyCount+i%benchmarkKeyCount][:])
+		if err != ErrNotFound {
+			b.Fatal(err)
+		}
+		if got != 0 {
+			b.Fatalf("get: got %d, want 0", got)
+		}
 	}
+	b.StopTimer()
 }
 
-func benchmarkScalarSet[T Value](b *testing.B, operation string, initial, replacement T) {
-	b.Helper()
+func BenchmarkSetUint64(b *testing.B) {
 	f := newPrimitiveFixture(b)
-	if operation == "unchanged" {
-		f.resetValue(b, true, initial)
-		b.StartTimer()
-		for i := 0; b.Loop(); i++ {
-			if err := f.db.Set(f.keys[i%benchmarkKeyCount][:], initial); err != nil {
-				b.Fatal(err)
-			}
-		}
-		b.StopTimer()
-		return
-	}
-	value := initial
-	if operation == "replace" {
-		value = replacement
-	}
 	for done := 0; done < b.N; {
-		f.resetValue(b, operation == "replace", initial)
+		f.reset(b, false)
 		n := min(benchmarkKeyCount, b.N-done)
 		b.StartTimer()
 		for i := range n {
-			if err := f.db.Set(f.keys[i][:], value); err != nil {
+			if err := f.db.Set(f.keys[i][:], uint64(42)); err != nil {
 				b.Fatal(err)
 			}
 		}
