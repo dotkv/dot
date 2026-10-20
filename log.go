@@ -9,13 +9,18 @@ import (
 	"syscall"
 )
 
-const logSegmentSize = 1 << 26
+const (
+	logSegmentSize     = 1 << 26
+	logWriteBufferSize = 4 << 10
+)
 
 type Log struct {
 	path        string
 	headFile    *os.File
 	headSegment uint64
 	size        uint64
+	// Each shard serializes writes with its lock; readers never use this buffer.
+	writeBuffer [logWriteBufferSize]byte
 }
 
 func newLog(name string) (*Log, error) {
@@ -73,28 +78,26 @@ func (l *Log) write(ty byte, key []byte, val []byte) (uint64, uint64, error) {
 		}
 	}
 	segment, off := l.headSegment, l.size
-	var header [13]byte // [crc 4][type 1][keylen 4][vallen 4]
-	header[4] = ty
-	binary.BigEndian.PutUint32(header[5:], uint32(len(key)))
-	binary.BigEndian.PutUint32(header[9:], uint32(len(val)))
-	binary.BigEndian.PutUint32(header[:], l.crc(header, key, val))
-	var err error
-	var n int
-	n, err = l.headFile.Write(header[:])
-	if err != nil {
-		return 0, 0, fmt.Errorf("write header: %w", err)
+	size := 13 + len(key) + len(val)
+	var record []byte
+	if size <= len(l.writeBuffer) {
+		record = l.writeBuffer[:size]
+	} else {
+		// Keep oversized records temporary instead of growing the shard buffer.
+		record = make([]byte, size)
 	}
+	// [crc 4][type 1][keylen 4][vallen 4][key][value]
+	record[4] = ty
+	binary.BigEndian.PutUint32(record[5:], uint32(len(key)))
+	binary.BigEndian.PutUint32(record[9:], uint32(len(val)))
+	copy(record[13:], key)
+	copy(record[13+len(key):], val)
+	binary.BigEndian.PutUint32(record[:], crc32.ChecksumIEEE(record[4:]))
+	n, err := l.headFile.Write(record)
 	l.size += uint64(n)
-	n, err = l.headFile.Write(key)
 	if err != nil {
-		return 0, 0, fmt.Errorf("write key: %w", err)
+		return 0, 0, fmt.Errorf("write record: %w", err)
 	}
-	l.size += uint64(n)
-	n, err = l.headFile.Write(val)
-	if err != nil {
-		return 0, 0, fmt.Errorf("write val: %w", err)
-	}
-	l.size += uint64(n)
 	return segment, off, nil
 }
 

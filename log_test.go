@@ -31,6 +31,51 @@ func TestLogCRCCompatibility(t *testing.T) {
 	}
 }
 
+func TestLogBufferedWrites(t *testing.T) {
+	log := newInternalDB(t).shards[0].log
+	key := []byte("key")
+	records := []struct {
+		ty         byte
+		key, value []byte
+		offset     uint64
+	}{
+		{ty: 's'},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'a'}, logWriteBufferSize-13-len(key)-1)},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'b'}, logWriteBufferSize-13-len(key))},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'c'}, logWriteBufferSize-13-len(key)+1)},
+		{ty: 's', key: bytes.Repeat([]byte{'k'}, 2*logWriteBufferSize), value: []byte("large key")},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'v'}, 16*logWriteBufferSize)},
+		{ty: 's', key: key, value: []byte("small again")},
+		{ty: 'd', key: key},
+	}
+	var size uint64
+	for i := range records {
+		r := &records[i]
+		segment, off, err := log.write(r.ty, r.key, r.value)
+		if err != nil {
+			t.Fatalf("write record %d: %v", i, err)
+		}
+		if segment != 0 || off != size {
+			t.Fatalf("record %d: got address (%d, %d), want (0, %d)", i, segment, off, size)
+		}
+		r.offset = off
+		size += uint64(13 + len(r.key) + len(r.value))
+	}
+	data, err := os.ReadFile(log.headFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if log.size != size || uint64(len(data)) != size {
+		t.Fatalf("log size: counter %d, file %d, want %d", log.size, len(data), size)
+	}
+	for i, r := range records {
+		k, v, err := log.read(0, r.offset)
+		if err != nil || !bytes.Equal(k, r.key) || !bytes.Equal(v, r.value) || data[r.offset+4] != r.ty {
+			t.Fatalf("record %d: key/value/type mismatch or read error: %v", i, err)
+		}
+	}
+}
+
 func TestLogReadRejectsCorruption(t *testing.T) {
 	log := newInternalDB(t).shards[0].log
 	key, value := []byte("key"), []byte("value")

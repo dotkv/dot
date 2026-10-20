@@ -16,6 +16,11 @@ Indexes grow independently as their shards fill. Reading a sealed log opens
 one additional file for the duration of that read; rotation also opens the new
 head before closing the old one. These temporary files are not cached.
 
+Each shard's log also owns a fixed 4 KiB write buffer (256 KiB in total).
+Writes assemble the header, key, and value into one record and append it with
+one file write. Records larger than the buffer use a temporary heap allocation.
+Reads keep their own payload allocations.
+
 `New` currently starts with empty in-memory indexes; reopening and replaying an
 existing database is not implemented. Existing flat log directories are not
 migrated to the sharded layout. Changing the shard count also changes key
