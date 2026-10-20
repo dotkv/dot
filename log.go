@@ -1,15 +1,21 @@
 package dot
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 const (
@@ -23,12 +29,14 @@ type Log struct {
 	headFile    *os.File
 	headSegment uint64
 	size        uint64
+	// A failed rollback blocks further appends until the log is reopened.
+	writeErr error
 	// Writes and their index lookups share this buffer under the shard's
 	// exclusive lock. Concurrent Get calls use their own read buffers.
 	writeBuffer [logWriteBufferSize]byte
 }
 
-func newLog(name string) (*Log, error) {
+func newLog(name string, idx *Index) (*Log, error) {
 	var l Log
 	if err := os.MkdirAll(name, 0700); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
@@ -40,10 +48,127 @@ func newLog(name string) (*Log, error) {
 	case !os.IsPathSeparator(l.path[len(l.path)-1]):
 		l.path += string(os.PathSeparator)
 	}
-	if err := l.openHead(0); err != nil {
+	entries, err := os.ReadDir(name)
+	if err != nil {
+		return nil, fmt.Errorf("read directory: %w", err)
+	}
+	var segments []uint64
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		seg, err := strconv.ParseUint(strings.TrimSuffix(entry.Name(), ".log"), 10, 20)
+		if err != nil || entry.Name() != filepath.Base(l.segmentPath(seg)) || !entry.Type().IsRegular() {
+			return nil, fmt.Errorf("invalid log segment %q", entry.Name())
+		}
+		segments = append(segments, seg)
+	}
+	slices.Sort(segments)
+	var head uint64
+	for i, seg := range segments {
+		if err := l.replaySegment(idx, seg, i == len(segments)-1); err != nil {
+			return nil, fmt.Errorf("replay segment %d: %w", seg, err)
+		}
+		head = seg
+	}
+	if err := l.openHead(head); err != nil {
 		return nil, fmt.Errorf("open head: %w", err)
 	}
 	return &l, nil
+}
+
+// replaySegment streams records into the index without retaining their values.
+// Make this file the temporary head so index lookups can reuse its descriptor.
+func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
+	flag := os.O_RDONLY
+	if head {
+		flag = os.O_RDWR
+	}
+	f, err := l.openFile(seg, flag)
+	if err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	l.headFile, l.headSegment = f, seg
+	defer func() {
+		l.headFile = nil
+		err = errors.Join(err, f.Close())
+	}()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	size := uint64(info.Size())
+	r := bufio.NewReaderSize(f, 64<<10)
+	var header [logHeaderSize]byte
+	var key []byte
+	for off := uint64(0); off < size; {
+		if off >= logSegmentSize {
+			return fmt.Errorf("record offset %d exceeds segment capacity", off)
+		}
+		if size-off < logHeaderSize {
+			return recoverLogTail(f, off, head)
+		}
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			return fmt.Errorf("read header at offset %d: %w", off, err)
+		}
+		ty := header[4]
+		keylen := uint64(binary.BigEndian.Uint32(header[5:]))
+		vallen := uint64(binary.BigEndian.Uint32(header[9:]))
+		expiration := int64(binary.BigEndian.Uint64(header[13:]))
+		if ty != 's' && ty != 'd' || ty == 'd' && (vallen != 0 || expiration != 0) {
+			return fmt.Errorf("invalid record at offset %d", off)
+		}
+		if keylen+vallen > size-off-logHeaderSize {
+			return recoverLogTail(f, off, head)
+		}
+		if keylen > uint64(^uint(0)>>1) {
+			return fmt.Errorf("key too large at offset %d", off)
+		}
+		if cap(key) < int(keylen) {
+			key = make([]byte, int(keylen))
+		} else {
+			key = key[:int(keylen)]
+		}
+		if _, err := io.ReadFull(r, key); err != nil {
+			return fmt.Errorf("read key at offset %d: %w", off, err)
+		}
+		crc := crc32.Update(checksumSmall(header[4:]), crc32.IEEETable, key)
+		for remaining := vallen; remaining > 0; {
+			n := min(remaining, uint64(len(l.writeBuffer)))
+			buf := l.writeBuffer[:int(n)]
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return fmt.Errorf("read value at offset %d: %w", off, err)
+			}
+			crc = crc32.Update(crc, crc32.IEEETable, buf)
+			remaining -= n
+		}
+		if crc != binary.BigEndian.Uint32(header[:]) {
+			return fmt.Errorf("crc mismatch at offset %d", off)
+		}
+		if err := idx.replay(l, ty, key, xxhash.Sum64(key), seg<<26|off, expiration); err != nil {
+			return fmt.Errorf("index record at offset %d: %w", off, err)
+		}
+		off += logHeaderSize + keylen + vallen
+	}
+	return nil
+}
+
+// Only the newest segment may end in a partially written record. Persist the
+// repair before any new records can be appended over that tail.
+func recoverLogTail(f *os.File, off uint64, head bool) error {
+	if !head {
+		return fmt.Errorf("incomplete record at offset %d: %w", off, io.ErrUnexpectedEOF)
+	}
+	if err := f.Truncate(int64(off)); err != nil {
+		return fmt.Errorf("truncate tail at offset %d: %w", off, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync repaired tail: %w", err)
+	}
+	return nil
 }
 
 func (l *Log) segmentPath(seg uint64) string {
@@ -58,14 +183,21 @@ func (l *Log) openFile(seg uint64, flag int) (*os.File, error) {
 }
 
 func (l *Log) openHead(seg uint64) error {
+	if seg > segmentMask>>26 {
+		return fmt.Errorf("segment capacity exceeded")
+	}
 	f, err := l.openFile(seg, os.O_CREATE|os.O_RDWR|os.O_APPEND)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
+	info, err := f.Stat()
+	if err != nil {
+		return errors.Join(fmt.Errorf("stat file: %w", err), f.Close())
+	}
 	old := l.headFile
 	l.headFile = f
 	l.headSegment = seg
-	l.size = 0
+	l.size = uint64(info.Size())
 	if old != nil {
 		if err := old.Close(); err != nil {
 			return fmt.Errorf("close sealed log: %w", err)
@@ -92,6 +224,9 @@ func checksumSmall(data []byte) uint32 {
 }
 
 func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
+	if l.writeErr != nil {
+		return 0, 0, l.writeErr
+	}
 	// Rotate before appending so a failed rotation leaves the record unwritten
 	// and every record starts at an offset that fits in the index.
 	if l.size >= logSegmentSize {
@@ -120,10 +255,25 @@ func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, 
 	copy(record[logHeaderSize+len(key):], val)
 	binary.BigEndian.PutUint32(record[:], crc32.ChecksumIEEE(record[4:]))
 	n, err := l.headFile.Write(record)
-	l.size += uint64(n)
 	if err != nil {
-		return 0, 0, fmt.Errorf("write record: %w", err)
+		err = fmt.Errorf("write record: %w", err)
+		if n > 0 {
+			// Remove the failed record before allowing another append.
+			// O_APPEND makes the next write use EOF after this repair.
+			var rollbackErr error
+			if truncateErr := l.headFile.Truncate(int64(off)); truncateErr != nil {
+				rollbackErr = fmt.Errorf("truncate failed write: %w", truncateErr)
+			} else if syncErr := l.headFile.Sync(); syncErr != nil {
+				rollbackErr = fmt.Errorf("sync rollback: %w", syncErr)
+			}
+			if rollbackErr != nil {
+				l.writeErr = errors.Join(err, fmt.Errorf("rollback failed; log requires recovery: %w", rollbackErr))
+				return 0, 0, l.writeErr
+			}
+		}
+		return 0, 0, err
 	}
+	l.size = off + uint64(n)
 	return segment, off, nil
 }
 

@@ -9,7 +9,7 @@ cd benchmarks
 go test ./...
 go build -o dot-bench .
 
-# Quick check: the same 12 cases with 90% fewer operations.
+# Fewer timed operations; each Open fixture still fills two 64 MiB segments.
 ./dot-bench -ops 30000 -warmup 3000
 
 # Default matrix: 12 fresh-process cases, producing six comparison tables.
@@ -23,6 +23,12 @@ go build -o dot-bench .
 
 # Exercise byte-slice APIs for the same eight stored bytes.
 ./dot-bench -sizes 8 -scalar=false
+
+# Compare operation performance and Open over at least two full log segments.
+./dot-bench -workloads write-heavy -repeat 3
+
+# Increase the retained history to at least four full segments in one Dot shard.
+./dot-bench -workloads write-heavy -open-segments 4
 ```
 
 By default temporary databases live in the current directory, on the same
@@ -32,6 +38,13 @@ Avoid a tmpfs data directory for on-disk comparisons. The default 1 KiB cases
 preload about 16 MiB of values. Cases run sequentially. Additional sizes and
 worker counts are opt-in through `-sizes` and `-workers`. For example, 64 KiB
 values preload about 1 GiB and can take much longer to benchmark.
+
+Open preparation adds at least 128 MiB of update history per case by default,
+after the operation measurements. It fills two 64 MiB segments in one Dot shard
+and starts a nonempty third segment. Both engines receive the same updates.
+This is substantial untimed work even when `-ops` is small: eight-byte values
+require about three million additional updates. Use `-open-segments N` (at least
+2) to increase the history. Cases release their files before the next case starts.
 
 The default matrix is 2 implementations × 3 workloads × 2 value sizes × 1 worker
 count = **12 runs**, six times fewer than the original 72-case matrix. Each
@@ -117,6 +130,7 @@ Columns summarize all operation types. Each cell is the median across the indica
 | Initial live keys | 16,384 total, divided across workers |
 | Measured operations | 300,000 total per case |
 | Warmup operations | 30,000 total per case |
+| Open history | At least two full 64 MiB Dot segments plus an active head |
 | Read heavy | 95% reads / 5% mutations |
 | Mixed | 50% reads / 50% mutations |
 | Write heavy | 5% reads / 95% mutations |
@@ -133,7 +147,7 @@ Keys are 16 bytes with permuted IDs, so insertion order is unrelated to key orde
 Each worker owns a disjoint partition of live keys and selects uniformly within
 it. Misses use a separate, never-inserted key space. This avoids scheduling races
 in the expected outcomes while exercising the same shared engine and locks.
-This first suite does not simulate hot-key contention or skewed access.
+The measured operation workloads do not simulate hot-key contention or skewed access.
 
 Eight-byte values use Dot's `Set[uint64]` and `Get[uint64]` by default. Pebble stores
 the same little-endian bytes and encodes/decodes the integer inside the timed
@@ -145,6 +159,34 @@ reads return caller-owned bytes in both engines; Pebble's copy and release are
 included in latency. Scalar reads avoid that copy in both adapters.
 
 ## Measurement
+
+Every case also measures one clean reopen with a large retained history, reported as
+`OPEN ms` in the terminal, `Open (ms)` in generated tables, and `open_seconds` in
+JSON. After capturing the operation and space metrics, the harness adds enough
+changed-value updates to fill at least two 64 MiB segments in one Dot shard, plus
+a nonempty active head. On-disk file sizes verify that sealed segments are full;
+merely creating several partial files does not qualify. Keys cycle over a subset
+of the existing live keys, keeping the live population fixed while retaining
+overwritten history. Pebble receives the identical key/value update sequence.
+
+The timer covers only the engine's open call, including Dot's log replay and
+index rebuild. History creation, flush/close, correctness checks of every
+surviving key, and the subsequent close are excluded. Each repetition starts fresh
+and supplies one open sample; tables use their median.
+Older saved results without this measurement display an em dash.
+
+`HISTORY MiB` / `Added history (MiB)` reports the extra record bytes using Dot's
+21-byte header, 16-byte key, and configured value size. It is write history, not
+Pebble's physical disk size. JSON also records `open_history_records`,
+`open_preparation_seconds`, and the verified `open_dot_full_segments` for Dot.
+Saved runs with different `open_full_segments` settings cannot be combined.
+
+This is a **warm-cache clean reopen**, with filesystem caches left intact. Pebble
+has flushed its memtables to SSTables before closing, so this does not compare
+crash recovery or recovery of an unflushed Pebble WAL. Dot still replays its full
+log history, including overwritten and deleted records, without hint files or
+checkpoints. Operation RSS and disk measurements precede the additional recovery
+history; operation latency and throughput exclude all Open preparation and timing.
 
 Each case starts a fresh process and database. Preload and a workload warmup are
 untimed. Pebble's memtables are flushed after preload and warmup, so the read

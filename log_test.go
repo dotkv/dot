@@ -14,7 +14,7 @@ import (
 
 func TestNewLogCurrentDirectory(t *testing.T) {
 	t.Chdir(t.TempDir())
-	log, err := newLog(".")
+	log, err := newLog(".", newInternalIndex(t))
 	if err != nil {
 		t.Fatal(err)
 	}

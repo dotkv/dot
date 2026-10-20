@@ -61,7 +61,7 @@ func isExpired(expiration int64) bool {
 	return expiration != 0 && expiration <= time.Now().UnixNano()
 }
 
-// Open creates a database with 64 key shards in directories 00 through 63.
+// Open creates or recovers a database with 64 key shards in directories 00 through 63.
 func Open(path string, opts ...Option) (*DB, error) {
 	var options Options
 	for _, opt := range opts {
@@ -71,14 +71,14 @@ func Open(path string, opts ...Option) (*DB, error) {
 	}
 	db := &DB{path: path, expiration: options.expiration}
 	for i := range db.shards {
-		log, err := newLog(filepath.Join(path, fmt.Sprintf("%02d", i)))
-		if err != nil {
-			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
-		}
-		db.shards[i].log = log
+		var err error
 		db.shards[i].index, err = newIndex()
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("create shard %02d index: %w", i, err), db.Close())
+		}
+		db.shards[i].log, err = newLog(filepath.Join(path, fmt.Sprintf("%02d", i)), db.shards[i].index)
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
 	return db, nil
@@ -86,7 +86,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 
 func (db *DB) shard(key []byte) (*shard, uint64) {
 	// XXH64 with seed zero is part of the shard layout: keep it stable so
-	// future replay can rebuild each index from its existing shard's logs.
+	// replay can rebuild each index from its existing shard's logs.
 	hash := xxhash.Sum64(key)
 	// Keep shard bits separate from the low bits used by index buckets and
 	// fingerprints, including the bits used to split buckets during growth.

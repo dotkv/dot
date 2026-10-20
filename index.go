@@ -365,6 +365,41 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64, expi
 	return idx.prepareUpdate(pos, hash, expiration, prevExp), nil
 }
 
+// replay applies an existing record at addr without writing or deduplicating it.
+// An expired set must remove the previous value so recovery cannot resurrect it.
+func (idx *Index) replay(log *Log, ty byte, key []byte, hash, addr uint64, expiration int64) error {
+	if ty == 'd' || isExpired(expiration) {
+		change, err := idx.prepareDelete(log, key, hash)
+		if err != nil {
+			return err
+		}
+		idx.commit(change)
+		return nil
+	}
+	pos, _, prevExp, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
+	if err != nil {
+		return err
+	}
+	var change indexChange
+	if pos < 0 {
+		if err := idx.grow(); err != nil {
+			return err
+		}
+		change = indexChange{
+			home:       int(hash & uint64(len(idx.slots)-1)),
+			slot:       hashtag(hash),
+			hash:       hash,
+			expiration: expiration,
+			kind:       indexInsert,
+		}
+	} else {
+		change = idx.prepareUpdate(pos, hash, expiration, prevExp)
+	}
+	change.slot |= addr
+	idx.commit(change)
+	return nil
+}
+
 // prepareUpdate reuses a successful lookup under the shard's exclusive lock.
 func (idx *Index) prepareUpdate(pos int, hash uint64, expiration, prevExp int64) indexChange {
 	return indexChange{

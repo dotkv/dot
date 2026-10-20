@@ -13,17 +13,18 @@ import (
 )
 
 type caseConfig struct {
-	Engine     string `json:"engine"`
-	Workload   string `json:"workload"`
-	ValueBytes int    `json:"value_bytes"`
-	Scalar     bool   `json:"scalar"`
-	Workers    int    `json:"workers"`
-	Keys       int    `json:"initial_keys"`
-	Operations int    `json:"operations"`
-	Warmup     int    `json:"warmup_operations"`
-	Seed       uint64 `json:"seed"`
-	Repetition int    `json:"repetition"`
-	Path       string `json:"data_path"`
+	Engine       string `json:"engine"`
+	Workload     string `json:"workload"`
+	ValueBytes   int    `json:"value_bytes"`
+	Scalar       bool   `json:"scalar"`
+	Workers      int    `json:"workers"`
+	Keys         int    `json:"initial_keys"`
+	Operations   int    `json:"operations"`
+	Warmup       int    `json:"warmup_operations"`
+	Seed         uint64 `json:"seed"`
+	Repetition   int    `json:"repetition"`
+	OpenSegments int    `json:"open_full_segments,omitempty"`
+	Path         string `json:"data_path"`
 }
 
 func (c caseConfig) validate() error {
@@ -41,6 +42,9 @@ func (c caseConfig) validate() error {
 	}
 	if c.Keys < c.Workers || c.Operations < c.Workers || c.Warmup < 0 {
 		return fmt.Errorf("keys and operations must be >= workers; warmup must be >= 0")
+	}
+	if c.OpenSegments != 0 && c.OpenSegments < 2 {
+		return fmt.Errorf("open history must fill at least 2 segments")
 	}
 	return nil
 }
@@ -72,22 +76,27 @@ type environment struct {
 }
 
 type result struct {
-	Config             caseConfig                `json:"config"`
-	Environment        environment               `json:"environment"`
-	ElapsedSeconds     float64                   `json:"elapsed_seconds"`
-	OpsPerSecond       float64                   `json:"ops_per_second"`
-	Latency            latencySummary            `json:"latency"`
-	ByOperation        map[string]latencySummary `json:"by_operation"`
-	RSSHarnessBytes    uint64                    `json:"rss_harness_bytes"`
-	RSSPreparedBytes   uint64                    `json:"rss_prepared_bytes"`
-	RSSFinalBytes      uint64                    `json:"rss_final_bytes"`
-	RSSPeakBytes       uint64                    `json:"rss_peak_bytes"`
-	DiskPrepared       diskSize                  `json:"disk_prepared"`
-	DiskFinal          diskSize                  `json:"disk_final"`
-	DrainSeconds       float64                   `json:"drain_seconds"`
-	LiveKeys           int                       `json:"live_keys"`
-	LogicalBytes       uint64                    `json:"logical_bytes"`
-	SpaceAmplification float64                   `json:"space_amplification"`
+	Config                 caseConfig                `json:"config"`
+	Environment            environment               `json:"environment"`
+	ElapsedSeconds         float64                   `json:"elapsed_seconds"`
+	OpsPerSecond           float64                   `json:"ops_per_second"`
+	Latency                latencySummary            `json:"latency"`
+	ByOperation            map[string]latencySummary `json:"by_operation"`
+	RSSHarnessBytes        uint64                    `json:"rss_harness_bytes"`
+	RSSPreparedBytes       uint64                    `json:"rss_prepared_bytes"`
+	RSSFinalBytes          uint64                    `json:"rss_final_bytes"`
+	RSSPeakBytes           uint64                    `json:"rss_peak_bytes"`
+	DiskPrepared           diskSize                  `json:"disk_prepared"`
+	DiskFinal              diskSize                  `json:"disk_final"`
+	DrainSeconds           float64                   `json:"drain_seconds"`
+	OpenSeconds            float64                   `json:"open_seconds,omitempty"`
+	OpenPreparationSeconds float64                   `json:"open_preparation_seconds,omitempty"`
+	OpenHistoryRecords     uint64                    `json:"open_history_records,omitempty"`
+	OpenHistoryBytes       uint64                    `json:"open_history_bytes,omitempty"`
+	OpenFullSegments       int                       `json:"open_dot_full_segments,omitempty"`
+	LiveKeys               int                       `json:"live_keys"`
+	LogicalBytes           uint64                    `json:"logical_bytes"`
+	SpaceAmplification     float64                   `json:"space_amplification"`
 }
 
 func currentEnvironment() environment {
@@ -216,6 +225,16 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 	if err != nil {
 		return out, err
 	}
+	// Expand the history only after capturing operation metrics, so the large
+	// recovery fixture does not change the operation or space measurements.
+	opened, err := measureOpen(ctx, c, workers)
+	if err != nil {
+		return out, err
+	}
+	out.OpenSeconds = opened.elapsed.Seconds()
+	out.OpenPreparationSeconds = opened.preparation.Seconds()
+	out.OpenHistoryRecords, out.OpenHistoryBytes = opened.records, opened.historyBytes
+	out.OpenFullSegments = opened.fullSegments
 	aggregate := newLatency()
 	out.ByOperation = make(map[string]latencySummary)
 	for kind, name := range operationNames {

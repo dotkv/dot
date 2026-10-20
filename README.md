@@ -2,6 +2,18 @@
 
 A small log-backed key-value embedded store in Go.
 
+## Recovery
+
+`Open` replays each shard's log segments in order to rebuild its index, applying
+sets, deletes, and expirations. It resumes appending at the end of the newest
+segment. An incomplete final record in that segment is truncated; checksum
+failures, invalid records, or incomplete records in older segments fail opening.
+Recovery currently scans all log records; checkpoints are not implemented yet.
+
+Failed writes that made partial progress are truncated back to the last complete
+record, and the repair is synced. If rollback fails, further appends fail until
+the database is reopened. Successful writes are not synced individually.
+
 ## Atomic updates
 
 `Update` reads an existing value and writes the callback's result atomically:
@@ -35,4 +47,14 @@ Root benchmarks include serial, unchanged, and parallel `uint64` updates:
 
 ```sh
 go test -run '^$' -bench '^BenchmarkUpdateUint64' -benchmem
+```
+
+`BenchmarkOpen` starts with 4,096 keys and 128-byte values, then repeatedly updates
+keys in one shard until it has two full 64 MiB segments and a nonempty active
+head. It verifies the file sizes and reports full segments per open and replay
+throughput. This measures full replay of over 128 MiB of retained history with
+warm filesystem caches. Setup, validation, and close are untimed:
+
+```sh
+go test -run '^$' -bench '^BenchmarkOpen$' -benchmem
 ```

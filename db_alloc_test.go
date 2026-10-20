@@ -50,7 +50,8 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 	for _, size := range []int{128, 2 * logWriteBufferSize} {
 		for _, hit := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%dB/hit=%t", size, hit), func(t *testing.T) {
-				log, err := newLog(t.TempDir())
+				idx := newInternalIndex(t)
+				log, err := newLog(t.TempDir(), idx)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -59,7 +60,6 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 						t.Error(err)
 					}
 				})
-				idx := newInternalIndex(t)
 				key, value := []byte("target"), bytes.Repeat([]byte{'v'}, size)
 				const hash = uint64(0x123456789abcdef)
 				home := int(hash & uint64(len(idx.slots)-1))
