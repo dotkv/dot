@@ -1,0 +1,265 @@
+package dot
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newInternalDB(t testing.TB) *DB {
+	t.Helper()
+	db, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Destroy(); err != nil {
+			t.Error(err)
+		}
+	})
+	return db
+}
+
+func keysForShard(db *DB, s *shard, prefix string, count int) [][]byte {
+	keys := make([][]byte, 0, count)
+	for i := 0; len(keys) < count; i++ {
+		key := fmt.Appendf(nil, "%s-%d", prefix, i)
+		if db.shard(key) == s {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func TestDBShards(t *testing.T) {
+	db := newInternalDB(t)
+	dirs, err := os.ReadDir(db.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != shardCount {
+		t.Fatalf("got %d shard directories, want %d", len(dirs), shardCount)
+	}
+	for i, dir := range dirs {
+		if !dir.IsDir() || dir.Name() != fmt.Sprintf("%02d", i) {
+			t.Fatalf("unexpected shard directory %q", dir.Name())
+		}
+		s := &db.shards[i]
+		keys := keysForShard(db, s, "key", 2)
+		for j, key := range keys {
+			value := fmt.Appendf(nil, "shard-%d-value-%d", i, j)
+			off := s.log.size
+			if err := db.Set(key, value); err != nil {
+				t.Fatal(err)
+			}
+			// Every shard has its own segment zero, even at identical offsets.
+			k, v, err := s.log.read(0, off)
+			if err != nil || !bytes.Equal(k, key) || !bytes.Equal(v, value) {
+				t.Fatalf("shard %d log: key=%q value=%q error=%v", i, k, v, err)
+			}
+		}
+		if s.index.population != len(keys) {
+			t.Fatalf("shard %d: got population %d, want %d", i, s.index.population, len(keys))
+		}
+		if got := s.log.headFile.Name(); got != filepath.Join(db.path, dir.Name(), "0000000.log") {
+			t.Fatalf("shard %d: unexpected log path %q", i, got)
+		}
+		if err := db.Set(keys[0], []byte("updated")); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Delete(keys[1]); err != nil {
+			t.Fatal(err)
+		}
+		for j, key := range keys {
+			var want []byte
+			if j == 0 {
+				want = []byte("updated")
+			}
+			if got, err := db.Get(key); err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("shard %d key %q: got %q, want %q, error %v", i, key, got, want, err)
+			}
+		}
+	}
+}
+
+func TestDBShardRouting(t *testing.T) {
+	db := newInternalDB(t)
+	other := newInternalDB(t)
+	for _, tc := range []struct {
+		key   []byte
+		shard int
+	}{
+		{nil, 0},
+		{[]byte{}, 0},
+		{[]byte("foo"), 33},
+		{[]byte("bar"), 42},
+	} {
+		if db.shard(tc.key) != &db.shards[tc.shard] || other.shard(tc.key) != &other.shards[tc.shard] {
+			t.Fatalf("key %q: unstable shard routing, want shard %d", tc.key, tc.shard)
+		}
+		if err := db.Set(tc.key, []byte("value")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := db.Get(bytes.Clone(tc.key)); err != nil || string(got) != "value" {
+			t.Fatalf("key %q: got %q, error %v", tc.key, got, err)
+		}
+	}
+}
+
+func TestDBShardLogRotation(t *testing.T) {
+	db := newInternalDB(t)
+	var keys [shardCount][]byte
+	for i := range keys {
+		keys[i] = keysForShard(db, &db.shards[i], "rotation", 1)[0]
+		if err := db.Set(keys[i], []byte("value")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	padLog(t, db.shards[0].log, logSegmentSize)
+	if err := db.Set(keys[0], []byte("updated")); err != nil {
+		t.Fatal(err)
+	}
+	for i, key := range keys {
+		var wantSegment uint64
+		want := "value"
+		if i == 0 {
+			wantSegment, want = 1, "updated"
+		}
+		if got := db.shards[i].log.headSegment; got != wantSegment {
+			t.Fatalf("shard %d: head segment %d, want %d", i, got, wantSegment)
+		}
+		if got, err := db.Get(key); err != nil || string(got) != want {
+			t.Fatalf("shard %d: got %q, want %q, error %v", i, got, want, err)
+		}
+	}
+}
+
+func TestDBShardsOperateIndependently(t *testing.T) {
+	db := newInternalDB(t)
+	locked := &db.shards[0]
+	key := keysForShard(db, &db.shards[1], "other-shard", 1)[0]
+	locked.lock.Lock()
+	defer locked.lock.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		if err := db.Set(key, []byte("value")); err != nil {
+			done <- err
+			return
+		}
+		if got, err := db.Get(key); err != nil || string(got) != "value" {
+			done <- fmt.Errorf("get: value=%q error=%v", got, err)
+			return
+		}
+		done <- db.Delete(key)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("operations on another shard blocked behind the locked shard")
+	}
+}
+
+func openFilesUnder(t *testing.T, path string) int {
+	t.Helper()
+	fds, err := os.ReadDir("/proc/self/fd")
+	if os.IsNotExist(err) {
+		t.Skip("file descriptor inspection requires /proc/self/fd")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, fd := range fds {
+		name, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+		if err == nil && strings.HasPrefix(name, path+string(os.PathSeparator)) {
+			count++
+		}
+	}
+	return count
+}
+
+func TestDBShardFileBudget(t *testing.T) {
+	db := newInternalDB(t)
+	if got := openFilesUnder(t, db.path); got != shardCount {
+		t.Fatalf("empty database: got %d open log files, want %d", got, shardCount)
+	}
+	for i := range db.shards {
+		s := &db.shards[i]
+		keys := keysForShard(db, s, "fd-budget", 2)
+		if err := db.Set(keys[0], []byte("sealed")); err != nil {
+			t.Fatal(err)
+		}
+		padLog(t, s.log, logSegmentSize)
+		if err := db.Set(keys[1], []byte("head")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := db.Get(keys[0]); err != nil || string(got) != "sealed" {
+			t.Fatalf("shard %d sealed read: got %q, error %v", i, got, err)
+		}
+	}
+	if got := openFilesUnder(t, db.path); got != shardCount {
+		t.Fatalf("after rotation and sealed reads: got %d open log files, want %d", got, shardCount)
+	}
+	if err := db.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+	if got := openFilesUnder(t, db.path); got != 0 {
+		t.Fatalf("destroyed database: %d log files still open", got)
+	}
+}
+
+func TestDBShardOpenFailureClosesFiles(t *testing.T) {
+	path := t.TempDir()
+	blocker := filepath.Join(path, fmt.Sprintf("%02d", shardCount/2))
+	if err := os.WriteFile(blocker, []byte("preserve me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := New(path); err == nil || db != nil {
+		if db != nil {
+			db.Destroy()
+		}
+		t.Fatalf("opening blocked shard: db=%v error=%v", db, err)
+	}
+	if got := openFilesUnder(t, path); got != 0 {
+		t.Fatalf("failed open leaked %d file descriptors", got)
+	}
+	if got, err := os.ReadFile(blocker); err != nil || string(got) != "preserve me" {
+		t.Fatalf("failed open changed existing file: data=%q error=%v", got, err)
+	}
+}
+
+func TestDBDestroyShards(t *testing.T) {
+	db := newInternalDB(t)
+	for i := range db.shards {
+		key := keysForShard(db, &db.shards[i], "key", 1)[0]
+		if err := db.Set(key, []byte("value")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range db.shards {
+		if _, err := db.shards[i].log.headFile.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("shard %d: log still open after destroy: %v", i, err)
+		}
+		key := keysForShard(db, &db.shards[i], "key", 1)[0]
+		_, getErr := db.Get(key)
+		for _, err := range []error{getErr, db.Set(key, []byte("new")), db.Delete(key)} {
+			if !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("shard %d: operation after destroy returned %v", i, err)
+			}
+		}
+	}
+	if _, err := os.Stat(db.path); !os.IsNotExist(err) {
+		t.Fatalf("database directory still exists: %v", err)
+	}
+}

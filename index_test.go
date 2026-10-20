@@ -262,14 +262,12 @@ func TestIndexAllocations(t *testing.T) {
 }
 
 func TestDBGrow(t *testing.T) {
-	db, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.log.headFile.Close() })
-	n := len(db.index.slots)
-	var key [8]byte
-	keyFor := func(i int) []byte { return fmt.Appendf(key[:0], "%08d", i) }
+	db := newInternalDB(t)
+	s := &db.shards[0]
+	n := len(s.index.slots)
+	keys := keysForShard(db, s, "grow", 2*n)
+	keyFor := func(i int) []byte { return keys[i] }
+	var err error
 	value := []byte("value")
 	for i := 0; i < n*3/4; i++ {
 		if err := db.Set(keyFor(i), value); err != nil {
@@ -281,20 +279,20 @@ func TestDBGrow(t *testing.T) {
 		if err := db.Set(keyFor(0), val); err != nil {
 			t.Fatal(err)
 		}
-		if len(db.index.slots) != n {
+		if len(s.index.slots) != n {
 			t.Fatal("updating an existing key grew the table")
 		}
 	}
 	// Growing must work with the log closed; reopen it to check every value.
-	name := db.log.headFile.Name()
-	if err := db.log.headFile.Close(); err != nil {
+	name := s.log.headFile.Name()
+	if err := s.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db.index.grow()
-	if len(db.index.slots) != 2*n {
+	s.index.grow()
+	if len(s.index.slots) != 2*n {
 		t.Fatal("grow with the log closed did not double capacity")
 	}
-	db.log.headFile, err = os.OpenFile(name, os.O_RDWR|os.O_APPEND, 0600)
+	s.log.headFile, err = os.OpenFile(name, os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,8 +302,8 @@ func TestDBGrow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(db.index.slots) != 4*n {
-		t.Fatalf("capacity: got %d, want %d", len(db.index.slots), 4*n)
+	if len(s.index.slots) != 4*n {
+		t.Fatalf("capacity: got %d, want %d", len(s.index.slots), 4*n)
 	}
 	for i := 0; i < 2*n; i++ {
 		switch i % 3 {
@@ -334,34 +332,27 @@ func TestDBGrow(t *testing.T) {
 }
 
 func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
-	db, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := db.log.headFile.Close(); err != nil {
-			t.Fatal(err)
-		}
-	})
+	db := newInternalDB(t)
 	checkMissingDelete := func(key []byte) {
 		t.Helper()
-		before, err := db.log.headFile.Stat()
+		s := db.shard(key)
+		before, err := s.log.headFile.Stat()
 		if err != nil {
 			t.Fatal(err)
 		}
-		size := db.log.size
+		size := s.log.size
 		for range 2 {
 			if err := db.Delete(key); err != nil {
 				t.Fatal(err)
 			}
 		}
-		after, err := db.log.headFile.Stat()
+		after, err := s.log.headFile.Stat()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if after.Size() != before.Size() || db.log.size != size {
+		if after.Size() != before.Size() || s.log.size != size {
 			t.Fatalf("deleting missing key %q grew log: file %d -> %d, counter %d -> %d",
-				key, before.Size(), after.Size(), size, db.log.size)
+				key, before.Size(), after.Size(), size, s.log.size)
 		}
 	}
 	key, value := []byte("key"), []byte("value")
@@ -377,18 +368,15 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 }
 
 func TestIndexLogFailure(t *testing.T) {
-	db, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.log.headFile.Close() })
-	db.index.slots = make([]uint64, 32)
+	db := newInternalDB(t)
+	s := &db.shards[0]
+	s.index.slots = make([]uint64, 32)
 	nonce := 0
 	keyFor := func(home uint64) []byte {
 		for {
 			key := fmt.Appendf(nil, "key-%d", nonce)
 			nonce++
-			if db.index.hash(key)&31 == home {
+			if db.shard(key) == s && s.index.hash(key)&31 == home {
 				return key
 			}
 		}
@@ -400,13 +388,14 @@ func TestIndexLogFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	before := slices.Clone(db.index.slots)
-	name := db.log.headFile.Name()
-	if err := db.log.headFile.Close(); err != nil {
+	before := slices.Clone(s.index.slots)
+	name := s.log.headFile.Name()
+	if err := s.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	// Reads succeed, but committing the log record fails after preparation.
-	db.log.headFile, err = os.Open(name)
+	var err error
+	s.log.headFile, err = os.Open(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +407,7 @@ func TestIndexLogFailure(t *testing.T) {
 		if err := operation(); err == nil {
 			t.Fatal("write to read-only log succeeded")
 		}
-		if !slices.Equal(before, db.index.slots) || db.index.population != len(keys) {
+		if !slices.Equal(before, s.index.slots) || s.index.population != len(keys) {
 			t.Fatal("failed log write changed the index")
 		}
 	}
@@ -428,7 +417,7 @@ func TestIndexLogFailure(t *testing.T) {
 			t.Fatalf("key %q: got %q, error %v", key, got, err)
 		}
 	}
-	if err := db.log.headFile.Close(); err != nil {
+	if err := s.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	for _, operation := range []func() error{
@@ -439,7 +428,7 @@ func TestIndexLogFailure(t *testing.T) {
 		if err := operation(); err == nil {
 			t.Fatal("read from closed log succeeded")
 		}
-		if !slices.Equal(before, db.index.slots) || db.index.population != len(keys) {
+		if !slices.Equal(before, s.index.slots) || s.index.population != len(keys) {
 			t.Fatal("failed log read changed the index")
 		}
 	}

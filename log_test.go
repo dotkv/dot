@@ -10,16 +10,6 @@ import (
 	"testing"
 )
 
-func newSealingDB(t *testing.T) *DB {
-	t.Helper()
-	db, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.log.headFile.Close() })
-	return db
-}
-
 // Leave existing records intact and reach the boundary without writing 64 MiB.
 func padLog(t *testing.T, log *Log, size uint64) {
 	t.Helper()
@@ -32,7 +22,7 @@ func padLog(t *testing.T, log *Log, size uint64) {
 func TestLogSealingBoundary(t *testing.T) {
 	for _, extra := range []uint64{0, 1} {
 		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
-			log := newSealingDB(t).log
+			log := newInternalDB(t).shards[0].log
 			key, value := []byte("boundary"), []byte("value spanning the boundary")
 			offset := logSegmentSize - uint64(13+len(key)+len(value)) + extra
 			padLog(t, log, offset)
@@ -79,16 +69,22 @@ func TestLogSealingBoundary(t *testing.T) {
 }
 
 func TestDBLogSealing(t *testing.T) {
-	db := newSealingDB(t)
+	db := newInternalDB(t)
+	s := &db.shards[0]
+	shardKeys := keysForShard(db, s, "seal", 5)
+	keys := make(map[string][]byte)
+	for i, name := range []string{"keep", "update", "delete", "new", "newest"} {
+		keys[name] = shardKeys[i]
+	}
 	set := func(key, value string) {
 		t.Helper()
-		if err := db.Set([]byte(key), []byte(value)); err != nil {
+		if err := db.Set(keys[key], []byte(value)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	get := func(key, want string) {
 		t.Helper()
-		got, err := db.Get([]byte(key))
+		got, err := db.Get(keys[key])
 		if err != nil || string(got) != want {
 			t.Fatalf("key %q: got %q, want %q, error %v", key, got, want, err)
 		}
@@ -96,17 +92,17 @@ func TestDBLogSealing(t *testing.T) {
 	set("keep", "a longer value from segment zero")
 	set("update", "original")
 	set("delete", "remove me")
-	padLog(t, db.log, logSegmentSize)
+	padLog(t, s.log, logSegmentSize)
 	set("new", "segment one")
 	get("keep", "a longer value from segment zero")
 	get("update", "original")
 	get("new", "segment one")
 	set("update", "middle")
-	if err := db.Delete([]byte("delete")); err != nil {
+	if err := db.Delete(keys["delete"]); err != nil {
 		t.Fatal(err)
 	}
 	get("delete", "")
-	padLog(t, db.log, logSegmentSize)
+	padLog(t, s.log, logSegmentSize)
 	set("update", "latest")
 	set("newest", "segment two")
 	get("keep", "a longer value from segment zero")
@@ -114,38 +110,40 @@ func TestDBLogSealing(t *testing.T) {
 	get("update", "latest")
 	get("newest", "segment two")
 	// A delete can also trigger rotation, including when its key is sealed.
-	padLog(t, db.log, logSegmentSize)
+	padLog(t, s.log, logSegmentSize)
 	for _, key := range []string{"keep", "new", "update"} {
-		if err := db.Delete([]byte(key)); err != nil {
+		if err := db.Delete(keys[key]); err != nil {
 			t.Fatal(err)
 		}
 		get(key, "")
 	}
 	get("newest", "segment two")
-	if db.log.headSegment != 3 {
-		t.Fatalf("got head segment %d, want 3", db.log.headSegment)
+	if s.log.headSegment != 3 {
+		t.Fatalf("got head segment %d, want 3", s.log.headSegment)
 	}
 }
 
 func TestDBLogSealingOpenFailure(t *testing.T) {
 	for _, operation := range []string{"insert", "update", "delete"} {
 		t.Run(operation, func(t *testing.T) {
-			db := newSealingDB(t)
+			db := newInternalDB(t)
 			key, value := []byte("existing"), []byte("original")
+			s := db.shard(key)
+			newKey := keysForShard(db, s, "new", 1)[0]
 			if err := db.Set(key, value); err != nil {
 				t.Fatal(err)
 			}
-			padLog(t, db.log, logSegmentSize)
-			head := db.log.headFile
-			before := slices.Clone(db.index.slots)
-			blocker := filepath.Join(db.path, "0000001.log")
+			padLog(t, s.log, logSegmentSize)
+			head := s.log.headFile
+			before := slices.Clone(s.index.slots)
+			blocker := filepath.Join(s.log.path, "0000001.log")
 			if err := os.Mkdir(blocker, 0700); err != nil {
 				t.Fatal(err)
 			}
 			write := func() error {
 				switch operation {
 				case "insert":
-					return db.Set([]byte("new"), []byte("inserted"))
+					return db.Set(newKey, []byte("inserted"))
 				case "update":
 					return db.Set(key, []byte("updated"))
 				default:
@@ -155,10 +153,10 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 			if err := write(); err == nil {
 				t.Fatal("rotation unexpectedly succeeded")
 			}
-			if db.log.headFile != head || db.log.headSegment != 0 || db.log.size != logSegmentSize {
+			if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 				t.Fatal("failed rotation changed the head")
 			}
-			if !slices.Equal(before, db.index.slots) || db.index.population != 1 {
+			if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
 				t.Fatal("failed rotation changed the index")
 			}
 			info, err := head.Stat()
@@ -178,7 +176,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 			want := value
 			switch operation {
 			case "insert":
-				key, want = []byte("new"), []byte("inserted")
+				key, want = newKey, []byte("inserted")
 			case "update":
 				want = []byte("updated")
 			default:
@@ -193,35 +191,38 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 }
 
 func TestDBLogSealingSyncFailure(t *testing.T) {
-	db := newSealingDB(t)
-	if err := db.Set([]byte("existing"), []byte("value")); err != nil {
+	db := newInternalDB(t)
+	key := []byte("existing")
+	s := db.shard(key)
+	newKey := keysForShard(db, s, "new", 1)[0]
+	if err := db.Set(key, []byte("value")); err != nil {
 		t.Fatal(err)
 	}
-	padLog(t, db.log, logSegmentSize)
-	before := slices.Clone(db.index.slots)
-	head := db.log.headFile
+	padLog(t, s.log, logSegmentSize)
+	before := slices.Clone(s.index.slots)
+	head := s.log.headFile
 	if err := head.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Set([]byte("new"), []byte("value")); err == nil {
+	if err := db.Set(newKey, []byte("value")); err == nil {
 		t.Fatal("sync on closed head unexpectedly succeeded")
 	}
-	if db.log.headFile != head || db.log.headSegment != 0 || db.log.size != logSegmentSize {
+	if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 		t.Fatal("failed sync changed the head")
 	}
-	if !slices.Equal(before, db.index.slots) || db.index.population != 1 {
+	if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
 		t.Fatal("failed sync changed the index")
 	}
 	var err error
-	db.log.headFile, err = os.OpenFile(head.Name(), os.O_RDWR|os.O_APPEND, 0600)
+	s.log.headFile, err = os.OpenFile(head.Name(), os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Set([]byte("new"), []byte("value")); err != nil {
+	if err := db.Set(newKey, []byte("value")); err != nil {
 		t.Fatalf("retry after reopening head: %v", err)
 	}
-	for _, key := range []string{"existing", "new"} {
-		got, err := db.Get([]byte(key))
+	for _, key := range [][]byte{key, newKey} {
+		got, err := db.Get(key)
 		if err != nil || string(got) != "value" {
 			t.Fatalf("key %q after retry: got %q, error %v", key, got, err)
 		}
@@ -229,7 +230,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 }
 
 func TestLogSealedReadsCloseFiles(t *testing.T) {
-	log := newSealingDB(t).log
+	log := newInternalDB(t).shards[0].log
 	if _, _, err := log.write('s', []byte("old"), []byte("value")); err != nil {
 		t.Fatal(err)
 	}

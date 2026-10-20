@@ -2,30 +2,27 @@ package dot
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )
 
 func TestDBConcurrentOperations(t *testing.T) {
-	db, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	db := newInternalDB(t)
+	const workerCount, keyCount = 2 * shardCount, 64
+	var keys [workerCount][][]byte
+	for worker := range keys {
+		keys[worker] = keysForShard(db, &db.shards[worker%shardCount], fmt.Sprintf("worker-%d", worker), keyCount)
 	}
-	t.Cleanup(func() {
-		if err := db.log.headFile.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	const workerCount, keyCount = 8, 64
-	keyFor := func(worker, i int) []byte {
-		return fmt.Appendf(nil, "worker-%d-key-%d", worker, i)
-	}
+	keyFor := func(worker, i int) []byte { return keys[worker][i] }
 	initial, updated := []byte("initial"), []byte("updated")
 	// Start at the growth threshold so concurrent writes must resize the index.
-	size := len(db.index.slots)
-	for i := 0; i < size*3/4; i++ {
-		if err := db.Set(fmt.Appendf(nil, "existing-%d", i), initial); err != nil {
+	s := &db.shards[0]
+	size := len(s.index.slots)
+	for _, key := range keysForShard(db, s, "existing", size*3/4) {
+		if err := db.Set(key, initial); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -64,7 +61,7 @@ func TestDBConcurrentOperations(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	if len(db.index.slots) <= size {
+	if len(s.index.slots) <= size {
 		t.Fatal("concurrent inserts did not exercise growth")
 	}
 	for worker := 0; worker < workerCount; worker++ {
@@ -79,4 +76,45 @@ func TestDBConcurrentOperations(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDBConcurrentDestroy(t *testing.T) {
+	db := newInternalDB(t)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range db.shards {
+		key := keysForShard(db, &db.shards[i], "destroy", 1)[0]
+		if err := db.Set(key, []byte("value")); err != nil {
+			t.Fatal(err)
+		}
+		workers.Go(func() {
+			<-start
+			for {
+				if err := db.Set(key, []byte("updated")); err != nil {
+					if !errors.Is(err, os.ErrClosed) {
+						t.Error(err)
+					}
+					return
+				}
+				if _, err := db.Get(key); err != nil && !errors.Is(err, os.ErrClosed) {
+					t.Error(err)
+					return
+				}
+				if err := db.Delete(key); err != nil && !errors.Is(err, os.ErrClosed) {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	for range 2 {
+		workers.Go(func() {
+			<-start
+			if err := db.Destroy(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	close(start)
+	workers.Wait()
 }

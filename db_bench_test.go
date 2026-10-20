@@ -19,15 +19,7 @@ type primitiveFixture struct {
 func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 	b.Helper()
 	b.StopTimer()
-	db, err := New(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() {
-		if err := db.log.headFile.Close(); err != nil {
-			b.Fatal(err)
-		}
-	})
+	db := newInternalDB(b)
 	f := &primitiveFixture{db: db}
 	for i := range f.keys {
 		binary.LittleEndian.PutUint64(f.keys[i][:], uint64(i))
@@ -44,12 +36,15 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 // limit and ensure every batch starts with the same number of live keys.
 func (f *primitiveFixture) reset(b *testing.B, populated bool) {
 	b.Helper()
-	if err := f.db.log.headFile.Truncate(0); err != nil {
-		b.Fatal(err)
+	for i := range f.db.shards {
+		s := &f.db.shards[i]
+		if err := s.log.headFile.Truncate(0); err != nil {
+			b.Fatal(err)
+		}
+		s.log.size = 0
+		clear(s.index.slots)
+		s.index.population = 0
 	}
-	f.db.log.size = 0
-	clear(f.db.index.slots)
-	f.db.index.population = 0
 	if populated {
 		for i := 0; i < benchmarkKeyCount; i++ {
 			if err := f.db.Set(f.keys[i][:], f.value[:]); err != nil {
@@ -141,6 +136,7 @@ func BenchmarkDeleteHit(b *testing.B) {
 func BenchmarkDeleteMiss(b *testing.B) {
 	f := newPrimitiveFixture(b)
 	f.reset(b, true)
+	b.StartTimer()
 	for i := 0; b.Loop(); i++ {
 		if err := f.db.Delete(f.keys[benchmarkKeyCount+i%benchmarkKeyCount][:]); err != nil {
 			b.Fatal(err)
