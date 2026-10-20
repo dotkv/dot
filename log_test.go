@@ -69,7 +69,7 @@ func TestLogBufferedWrites(t *testing.T) {
 		t.Fatalf("log size: counter %d, file %d, want %d", log.size, len(data), size)
 	}
 	for i, r := range records {
-		k, v, err := log.read(0, r.offset)
+		k, v, err := log.read(0, r.offset, nil)
 		if err != nil || !bytes.Equal(k, r.key) || !bytes.Equal(v, r.value) || data[r.offset+4] != r.ty {
 			t.Fatalf("record %d: key/value/type mismatch or read error: %v", i, err)
 		}
@@ -101,8 +101,30 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 			if err := os.WriteFile(log.headFile.Name(), corrupt, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := log.read(0, 0); err == nil || err.Error() != "crc mismatch" {
-				t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
+			for _, buf := range [][]byte{nil, log.writeBuffer[:]} {
+				if _, _, err := log.read(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
+					t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLogBufferedReads(t *testing.T) {
+	log := newInternalDB(t).shards[0].log
+	for _, size := range []int{0, 144, logWriteBufferSize - 1, logWriteBufferSize, logWriteBufferSize + 1, 64 << 10, 144} {
+		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
+			key := bytes.Repeat([]byte{'k'}, min(16, size))
+			value := bytes.Repeat([]byte{'v'}, size-len(key))
+			seg, off, err := log.write('s', key, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, buf := range [][]byte{nil, log.writeBuffer[:0]} {
+				gotKey, gotValue, err := log.read(seg, off, buf)
+				if err != nil || !bytes.Equal(gotKey, key) || !bytes.Equal(gotValue, value) {
+					t.Fatalf("read: key=%q value=%q error=%v", gotKey, gotValue, err)
+				}
 			}
 		})
 	}
@@ -150,7 +172,7 @@ func TestLogSealingBoundary(t *testing.T) {
 				{segment, off, key, value},
 				{newSegment, newOff, newKey, newValue},
 			} {
-				k, v, err := log.read(record.segment, record.offset)
+				k, v, err := log.read(record.segment, record.offset, nil)
 				if err != nil || !bytes.Equal(k, record.key) || !bytes.Equal(v, record.value) {
 					t.Fatalf("record (%d, %d): key=%q value=%q error=%v", record.segment, record.offset, k, v, err)
 				}
@@ -356,13 +378,13 @@ func TestLogSealedReadsCloseFiles(t *testing.T) {
 		return count
 	}
 	for range 8 {
-		if _, _, err := log.read(0, 0); err != nil {
+		if _, _, err := log.read(0, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := countOpen(); got != 0 {
 			t.Fatalf("successful read left %d sealed descriptors open", got)
 		}
-		if _, _, err := log.read(0, logSegmentSize); err == nil {
+		if _, _, err := log.read(0, logSegmentSize, nil); err == nil {
 			t.Fatal("reading past sealed EOF unexpectedly succeeded")
 		}
 		if got := countOpen(); got != 0 {

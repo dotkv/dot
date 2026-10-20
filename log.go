@@ -19,7 +19,8 @@ type Log struct {
 	headFile    *os.File
 	headSegment uint64
 	size        uint64
-	// Each shard serializes writes with its lock; readers never use this buffer.
+	// Writes and their index lookups share this buffer under the shard's
+	// exclusive lock. Concurrent Get calls use their own payload allocations.
 	writeBuffer [logWriteBufferSize]byte
 }
 
@@ -101,7 +102,8 @@ func (l *Log) write(ty byte, key []byte, val []byte) (uint64, uint64, error) {
 	return segment, off, nil
 }
 
-func (l *Log) read(seg uint64, off uint64) ([]byte, []byte, error) {
+// read borrows b when the payload fits; passing nil returns owned slices.
+func (l *Log) read(seg uint64, off uint64, b []byte) ([]byte, []byte, error) {
 	f := l.headFile
 	if l.headSegment != seg {
 		var err error
@@ -117,7 +119,12 @@ func (l *Log) read(seg uint64, off uint64) ([]byte, []byte, error) {
 	}
 	keylen := binary.BigEndian.Uint32(header[5:])
 	vallen := binary.BigEndian.Uint32(header[9:])
-	b := make([]byte, keylen+vallen)
+	size := int(keylen) + int(vallen)
+	if b == nil || cap(b) < size {
+		b = make([]byte, size)
+	} else {
+		b = b[:size]
+	}
 	if _, err := f.ReadAt(b, int64(off)+13); err != nil {
 		return nil, nil, fmt.Errorf("read payload: %w", err)
 	}

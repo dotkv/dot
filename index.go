@@ -219,7 +219,8 @@ func (idx *Index) remove(home, pos int) {
 	idx.population--
 }
 
-func (idx *Index) find(log *Log, key []byte) (uint64, int, []byte, error) {
+// find may return a value backed by buf; consume it before reusing the buffer.
+func (idx *Index) find(log *Log, key []byte, buf []byte) (uint64, int, []byte, error) {
 	hash := idx.hash(key)
 	mask := len(idx.slots) - 1
 	home := int(hash & uint64(mask))
@@ -231,7 +232,7 @@ func (idx *Index) find(log *Log, key []byte) (uint64, int, []byte, error) {
 	for {
 		slot := idx.slots[pos]
 		if slot&hashtagMask == tag {
-			k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask)
+			k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask, buf)
 			if err != nil {
 				return 0, 0, nil, fmt.Errorf("log read: %w", err)
 			}
@@ -247,7 +248,7 @@ func (idx *Index) find(log *Log, key []byte) (uint64, int, []byte, error) {
 }
 
 func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (indexChange, error) {
-	hash, pos, previous, err := idx.find(log, key)
+	hash, pos, previous, err := idx.find(log, key, log.writeBuffer[:])
 	if err != nil {
 		return indexChange{}, err
 	}
@@ -270,7 +271,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (indexChange, err
 }
 
 func (idx *Index) prepareDelete(log *Log, key []byte) (indexChange, error) {
-	hash, pos, _, err := idx.find(log, key)
+	hash, pos, _, err := idx.find(log, key, log.writeBuffer[:])
 	if err != nil {
 		return indexChange{}, err
 	}
@@ -285,7 +286,7 @@ func (idx *Index) prepareDelete(log *Log, key []byte) (indexChange, error) {
 }
 
 func (idx *Index) get(log *Log, key []byte) ([]byte, error) {
-	_, _, val, err := idx.find(log, key)
+	_, _, val, err := idx.find(log, key, nil)
 	return val, err
 }
 

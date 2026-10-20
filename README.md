@@ -19,7 +19,10 @@ head before closing the old one. These temporary files are not cached.
 Each shard's log also owns a fixed 4 KiB write buffer (256 KiB in total).
 Writes assemble the header, key, and value into one record and append it with
 one file write. Records larger than the buffer use a temporary heap allocation.
-Reads keep their own payload allocations.
+Index lookups for `Set` and `Delete` reuse the same buffer for payloads up to
+4 KiB while holding the shard's exclusive lock. Larger payloads still use
+temporary allocations. `Get` allocates its own payload so reads within a shard
+can run concurrently and returned values remain independent of later calls.
 
 `New` currently starts with empty in-memory indexes; reopening and replaying an
 existing database is not implemented. Existing flat log directories are not
