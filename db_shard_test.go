@@ -291,6 +291,9 @@ func TestDBDestroyShards(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range db.shards {
+		if idx := db.shards[i].index; idx.slots != nil || idx.memory.current != nil || idx.memory.previous != nil {
+			t.Fatalf("shard %d: index storage still owned after destroy", i)
+		}
 		if _, err := db.shards[i].log.headFile.Stat(); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("shard %d: log still open after destroy: %v", i, err)
 		}
@@ -304,5 +307,49 @@ func TestDBDestroyShards(t *testing.T) {
 	}
 	if _, err := os.Stat(db.path); !os.IsNotExist(err) {
 		t.Fatalf("database directory still exists: %v", err)
+	}
+}
+
+func TestDBClosePreservesFiles(t *testing.T) {
+	db := newInternalDB(t)
+	key, value := []byte("key"), []byte("value")
+	if err := db.Set(key, value); err != nil {
+		t.Fatal(err)
+	}
+	s := db.shard(key)
+	name := s.log.headFile.Name()
+	before, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := os.ReadFile(name)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("Close changed the log: error=%v", err)
+	}
+	if got := openFilesUnder(t, db.path); got != 0 {
+		t.Fatalf("closed database: %d log files still open", got)
+	}
+	for i := range db.shards {
+		idx := db.shards[i].index
+		if idx.slots != nil || idx.memory.current != nil || idx.memory.previous != nil {
+			t.Fatalf("shard %d: index storage still owned after close", i)
+		}
+	}
+	_, getErr := db.Get(key)
+	for _, err := range []error{getErr, db.Set(key, value), db.Delete(key)} {
+		if !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("operation after close: got %v, want os.ErrClosed", err)
+		}
+	}
+	if err := db.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(db.path); !os.IsNotExist(err) {
+		t.Fatalf("destroy after close left the database directory: %v", err)
 	}
 }

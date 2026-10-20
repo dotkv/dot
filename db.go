@@ -29,13 +29,13 @@ func New(path string) (*DB, error) {
 	for i := range db.shards {
 		log, err := newLog(filepath.Join(path, fmt.Sprintf("%02d", i)))
 		if err != nil {
-			for j := 0; j < i; j++ {
-				db.shards[j].log.headFile.Close()
-			}
-			return nil, fmt.Errorf("open shard %02d: %w", i, err)
+			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 		db.shards[i].log = log
-		db.shards[i].index = newIndex()
+		db.shards[i].index, err = newIndex()
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("create shard %02d index: %w", i, err), db.Close())
+		}
 	}
 	return db, nil
 }
@@ -105,7 +105,19 @@ func (db *DB) Delete(key []byte) error {
 	return nil
 }
 
+// Close waits for active operations and releases the logs and index mappings
+// without removing the database files. Subsequent operations return os.ErrClosed.
+// Close may be called again to retry an unsuccessful unmap.
+func (db *DB) Close() error {
+	return db.close(false)
+}
+
+// Destroy closes the database and removes its directory.
 func (db *DB) Destroy() error {
+	return db.close(true)
+}
+
+func (db *DB) close(removeFiles bool) error {
 	// Lock in directory order to wait for in-flight operations on every shard.
 	for i := range db.shards {
 		db.shards[i].lock.Lock()
@@ -114,12 +126,20 @@ func (db *DB) Destroy() error {
 	var err error
 	for i := range db.shards {
 		s := &db.shards[i]
-		if !s.closed {
-			s.closed = true
+		if !s.closed && s.log != nil {
 			if closeErr := s.log.headFile.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
 				err = errors.Join(err, fmt.Errorf("close shard %02d: %w", i, closeErr))
 			}
 		}
+		s.closed = true
+		if s.index != nil {
+			if unmapErr := s.index.close(); unmapErr != nil {
+				err = errors.Join(err, fmt.Errorf("close shard %02d index: %w", i, unmapErr))
+			}
+		}
 	}
-	return errors.Join(err, os.RemoveAll(db.path))
+	if removeFiles {
+		err = errors.Join(err, os.RemoveAll(db.path))
+	}
+	return err
 }

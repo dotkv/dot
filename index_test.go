@@ -14,6 +14,20 @@ type indexEntry struct {
 	live bool
 }
 
+func newInternalIndex(t testing.TB) *Index {
+	t.Helper()
+	idx, err := newIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := idx.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return idx
+}
+
 // Give every synthetic entry a unique offset and exercise segment bits too.
 func entrySlot(id int, hash uint64) uint64 {
 	return uint64(id) | uint64(id%1024)<<26 | hashtag(hash)
@@ -174,7 +188,7 @@ func FuzzIndexMutations(f *testing.F) {
 }
 
 func TestIndexGrow(t *testing.T) {
-	idx := newIndex()
+	idx := newInternalIndex(t)
 	n := len(idx.slots)
 	random := rand.New(rand.NewPCG(3, 4))
 	var entries []indexEntry
@@ -199,7 +213,9 @@ func TestIndexGrow(t *testing.T) {
 		removeEntry(t, idx, entries, id)
 	}
 	// Deletions count as free space and do not cause premature growth.
-	idx.grow()
+	if err := idx.grow(); err != nil {
+		t.Fatal(err)
+	}
 	if len(idx.slots) != n {
 		t.Fatal("grew below the load threshold")
 	}
@@ -208,7 +224,9 @@ func TestIndexGrow(t *testing.T) {
 			add(random.Uint64())
 		}
 		size, population := len(idx.slots), idx.population
-		idx.grow()
+		if err := idx.grow(); err != nil {
+			t.Fatal(err)
+		}
 		if len(idx.slots) != size*2 || idx.population != population {
 			t.Fatal("grow changed population or did not double capacity")
 		}
@@ -217,17 +235,26 @@ func TestIndexGrow(t *testing.T) {
 }
 
 func TestIndexAllocations(t *testing.T) {
-	idx := newIndex()
+	idx := newInternalIndex(t)
 	for i := 0; i < len(idx.slots)*3/4; i++ {
 		idx.insert(i, entrySlot(i, uint64(i)))
 	}
-	slots, population := idx.slots, idx.population
+	// Keep a heap-backed fixture: each growth unmaps its previous storage.
+	slots, population := slices.Clone(idx.slots), idx.population
+	if err := idx.close(); err != nil {
+		t.Fatal(err)
+	}
 	allocations := testing.AllocsPerRun(5, func() {
 		idx.slots, idx.population = slots, population
-		idx.grow()
+		if err := idx.grow(); err != nil {
+			t.Fatal(err)
+		}
+		if err := idx.close(); err != nil {
+			t.Fatal(err)
+		}
 	})
-	if allocations != 1 {
-		t.Fatalf("grow: got %g allocations, want just the new table", allocations)
+	if allocations != 0 {
+		t.Fatalf("grow: got %g Go heap allocations, want 0", allocations)
 	}
 	idx = &Index{slots: make([]uint64, 32)}
 	allocations = testing.AllocsPerRun(1000, func() {
@@ -237,12 +264,14 @@ func TestIndexAllocations(t *testing.T) {
 		idx.remove(31, 0)
 		idx.remove(31, 31)
 		idx.remove(0, 0)
-		idx.grow()
+		if err := idx.grow(); err != nil {
+			t.Fatal(err)
+		}
 	})
 	if allocations != 0 {
 		t.Fatalf("insert/remove/below-threshold grow: got %g allocations", allocations)
 	}
-	idx = newIndex()
+	idx = newInternalIndex(t)
 	log := &Log{}
 	key := []byte("key")
 	allocations = testing.AllocsPerRun(1000, func() {
@@ -288,7 +317,9 @@ func TestDBGrow(t *testing.T) {
 	if err := s.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s.index.grow()
+	if err := s.index.grow(); err != nil {
+		t.Fatal(err)
+	}
 	if len(s.index.slots) != 2*n {
 		t.Fatal("grow with the log closed did not double capacity")
 	}
@@ -421,7 +452,14 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 func TestIndexLogFailure(t *testing.T) {
 	db := newInternalDB(t)
 	s := &db.shards[0]
-	s.index.slots = make([]uint64, 32)
+	if err := s.index.close(); err != nil {
+		t.Fatal(err)
+	}
+	var mapErr error
+	s.index.slots, mapErr = s.index.memory.allocate(32)
+	if mapErr != nil {
+		t.Fatal(mapErr)
+	}
 	nonce := 0
 	keyFor := func(home uint64) []byte {
 		for {

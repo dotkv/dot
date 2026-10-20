@@ -2,6 +2,7 @@ package dot
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"hash/maphash"
 )
@@ -26,6 +27,7 @@ type Index struct {
 	slots      []uint64
 	population int
 	seed       maphash.Seed
+	memory     indexMemory
 }
 
 // Carry changes by value so insertion/deletion shifts happen only after the
@@ -43,11 +45,24 @@ const (
 	indexDelete
 )
 
-func newIndex() *Index {
-	return &Index{
-		slots: make([]uint64, 1<<indexBits),
-		seed:  maphash.MakeSeed(),
+func newIndex() (*Index, error) {
+	var memory indexMemory
+	slots, err := memory.allocate(1 << indexBits)
+	if err != nil {
+		return nil, fmt.Errorf("map index: %w", err)
 	}
+	return &Index{
+		slots:  slots,
+		seed:   maphash.MakeSeed(),
+		memory: memory,
+	}, nil
+}
+
+// close requires the shard's exclusive lock, as does grow.
+func (idx *Index) close() error {
+	idx.slots = nil
+	idx.population = 0
+	return idx.memory.close()
 }
 
 func (idx *Index) hash(key []byte) uint64 {
@@ -64,17 +79,20 @@ func empty(slot uint64) bool {
 	return slot&metadataMask == 0
 }
 
-func (idx *Index) grow() {
+func (idx *Index) grow() error {
 	n := len(idx.slots)
 	if idx.population < n-n/4 {
-		return
+		return nil
 	}
 	// The 15 fingerprint bits support tables up to 2^31 slots (16 GiB).
 	if uint64(n) >= 1<<(indexBits+15) {
-		panic("index capacity exceeded")
+		return errors.New("index capacity exceeded")
+	}
+	slots, err := idx.memory.allocate(2 * n)
+	if err != nil {
+		return fmt.Errorf("grow index: %w", err)
 	}
 	old := idx.slots
-	idx.slots = make([]uint64, 2*n)
 
 	// An empty bucket gives both walks a common starting point, including
 	// when a cluster wraps around the end of the table. Match each run to
@@ -118,10 +136,12 @@ func (idx *Index) grow() {
 		if pos != bucket {
 			slot |= shiftedMask
 		}
-		idx.slots[bucket] |= occupiedMask
-		idx.slots[pos] = slot | idx.slots[pos]&occupiedMask
+		slots[bucket] |= occupiedMask
+		slots[pos] = slot | slots[pos]&occupiedMask
 		last[half] = bucket
 	}
+	idx.slots = slots
+	return idx.memory.releasePrevious()
 }
 
 // run returns the first entry belonging to home. Its occupied bit must
@@ -256,7 +276,9 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte) (indexChange, err
 		return indexChange{}, err
 	}
 	if pos < 0 {
-		idx.grow()
+		if err := idx.grow(); err != nil {
+			return indexChange{}, err
+		}
 		return indexChange{
 			home: int(hash & uint64(len(idx.slots)-1)),
 			slot: hashtag(hash),

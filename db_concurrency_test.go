@@ -79,6 +79,15 @@ func TestDBConcurrentOperations(t *testing.T) {
 }
 
 func TestDBConcurrentDestroy(t *testing.T) {
+	testDBConcurrentShutdown(t, (*DB).Destroy)
+}
+
+func TestDBConcurrentClose(t *testing.T) {
+	testDBConcurrentShutdown(t, (*DB).Close)
+}
+
+func testDBConcurrentShutdown(t *testing.T, shutdown func(*DB) error) {
+	t.Helper()
 	db := newInternalDB(t)
 	start := make(chan struct{})
 	var workers sync.WaitGroup
@@ -110,7 +119,7 @@ func TestDBConcurrentDestroy(t *testing.T) {
 	for range 2 {
 		workers.Go(func() {
 			<-start
-			if err := db.Destroy(); err != nil {
+			if err := shutdown(db); err != nil {
 				t.Error(err)
 			}
 		})

@@ -59,7 +59,7 @@ func TestIndexFindCollisionAllocations(t *testing.T) {
 						t.Error(err)
 					}
 				})
-				idx := newIndex()
+				idx := newInternalIndex(t)
 				key, value := []byte("target"), bytes.Repeat([]byte{'v'}, size)
 				hash := idx.hash(key)
 				home := int(hash & uint64(len(idx.slots)-1))
