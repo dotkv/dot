@@ -58,7 +58,7 @@ func TestDBShards(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Every shard has its own segment zero, even at identical offsets.
-			k, v, err := s.log.read(0, off, nil)
+			k, v, err := s.log.readPayload(0, off, nil)
 			if err != nil || !bytes.Equal(k, key) || !bytes.Equal(v, value) {
 				t.Fatalf("shard %d log: key=%q value=%q error=%v", i, k, v, err)
 			}
@@ -77,10 +77,12 @@ func TestDBShards(t *testing.T) {
 		}
 		for j, key := range keys {
 			var want []byte
+			wantErr := ErrNotFound
 			if j == 0 {
 				want = []byte("updated")
+				wantErr = nil
 			}
-			if got, err := db.Get(key); err != nil || !bytes.Equal(got, want) {
+			if got, err := db.Get[[]byte](key); err != wantErr || !bytes.Equal(got, want) {
 				t.Fatalf("shard %d key %q: got %q, want %q, error %v", i, key, got, want, err)
 			}
 		}
@@ -116,7 +118,7 @@ func TestDBShardRouting(t *testing.T) {
 			if err := db.Set(tc.key, []byte("value")); err != nil {
 				t.Fatal(err)
 			}
-			if got, err := db.Get(bytes.Clone(tc.key)); err != nil || string(got) != "value" {
+			if got, err := db.Get[[]byte](bytes.Clone(tc.key)); err != nil || string(got) != "value" {
 				t.Fatalf("key %q: got %q, error %v", tc.key, got, err)
 			}
 		}
@@ -132,11 +134,11 @@ func TestDBGetValueOwnership(t *testing.T) {
 			if err := db.Set(key, value); err != nil {
 				t.Fatal(err)
 			}
-			first, err := db.Get(key)
+			first, err := db.Get[[]byte](key)
 			if err != nil || first == nil || !bytes.Equal(first, value) {
 				t.Fatalf("first get: value=%q error=%v", first, err)
 			}
-			retained, err := db.Get(key)
+			retained, err := db.Get[[]byte](key)
 			if err != nil || !bytes.Equal(retained, value) {
 				t.Fatalf("second get: value=%q error=%v", retained, err)
 			}
@@ -150,7 +152,7 @@ func TestDBGetValueOwnership(t *testing.T) {
 			if err := db.Set(key, updated); err != nil {
 				t.Fatal(err)
 			}
-			if got, err := db.Get(key); err != nil || !bytes.Equal(got, updated) {
+			if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, updated) {
 				t.Fatalf("updated get: value=%q error=%v", got, err)
 			}
 			if err := db.Delete(key); err != nil {
@@ -159,7 +161,7 @@ func TestDBGetValueOwnership(t *testing.T) {
 			if !bytes.Equal(retained, value) {
 				t.Fatal("later operations changed a retained Get result")
 			}
-			if got, err := db.Get(key); err != nil || got != nil {
+			if got, err := db.Get[[]byte](key); err != ErrNotFound || got != nil {
 				t.Fatalf("deleted key: value=%q error=%v", got, err)
 			}
 		})
@@ -188,7 +190,7 @@ func TestDBShardLogRotation(t *testing.T) {
 		if got := db.shards[i].log.headSegment; got != wantSegment {
 			t.Fatalf("shard %d: head segment %d, want %d", i, got, wantSegment)
 		}
-		if got, err := db.Get(key); err != nil || string(got) != want {
+		if got, err := db.Get[[]byte](key); err != nil || string(got) != want {
 			t.Fatalf("shard %d: got %q, want %q, error %v", i, got, want, err)
 		}
 	}
@@ -206,7 +208,7 @@ func TestDBShardsOperateIndependently(t *testing.T) {
 			done <- err
 			return
 		}
-		if got, err := db.Get(key); err != nil || string(got) != "value" {
+		if got, err := db.Get[[]byte](key); err != nil || string(got) != "value" {
 			done <- fmt.Errorf("get: value=%q error=%v", got, err)
 			return
 		}
@@ -256,7 +258,7 @@ func TestDBShardFileBudget(t *testing.T) {
 		if err := db.Set(keys[1], []byte("head")); err != nil {
 			t.Fatal(err)
 		}
-		if got, err := db.Get(keys[0]); err != nil || string(got) != "sealed" {
+		if got, err := db.Get[[]byte](keys[0]); err != nil || string(got) != "sealed" {
 			t.Fatalf("shard %d sealed read: got %q, error %v", i, got, err)
 		}
 	}
@@ -310,7 +312,7 @@ func TestDBDestroyShards(t *testing.T) {
 			t.Fatalf("shard %d: log still open after destroy: %v", i, err)
 		}
 		key := keysForShard(db, &db.shards[i], "key", 1)[0]
-		_, getErr := db.Get(key)
+		_, getErr := db.Get[[]byte](key)
 		for _, err := range []error{getErr, db.Set(key, []byte("new")), db.Delete(key)} {
 			if !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("shard %d: operation after destroy returned %v", i, err)
@@ -352,7 +354,7 @@ func TestDBClosePreservesFiles(t *testing.T) {
 			t.Fatalf("shard %d: index storage still owned after close", i)
 		}
 	}
-	_, getErr := db.Get(key)
+	_, getErr := db.Get[[]byte](key)
 	for _, err := range []error{getErr, db.Set(key, value), db.Delete(key)} {
 		if !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("operation after close: got %v, want os.ErrClosed", err)

@@ -33,9 +33,17 @@ func compare(t *testing.T, a []byte, b []byte) {
 
 func equal(t *testing.T, db *dot.DB, key []byte, val []byte) {
 	t.Helper()
-	v, err := db.Get(key)
+	v, err := db.Get[[]byte](key)
 	check(t, err)
 	compare(t, v, val)
+}
+
+func expectMissing(t *testing.T, db *dot.DB, key []byte) {
+	t.Helper()
+	value, err := db.Get[[]byte](key)
+	if err != dot.ErrNotFound || value != nil {
+		t.Fatalf("missing key: got %q, error %v; want nil and ErrNotFound", value, err)
+	}
 }
 
 func TestDBBasic(t *testing.T) {
@@ -49,10 +57,10 @@ func TestDBBasic(t *testing.T) {
 	val = []byte("bar")
 	check(t, db.Set(key, val))
 	equal(t, db, key, val)
-	equal(t, db, []byte("bar"), nil)
+	expectMissing(t, db, []byte("bar"))
 	check(t, db.Delete(key))
-	equal(t, db, key, nil)
-	equal(t, db, []byte("missing"), nil)
+	expectMissing(t, db, key)
+	expectMissing(t, db, []byte("missing"))
 }
 
 func TestDBSetSameValueAfterDelete(t *testing.T) {
@@ -60,7 +68,7 @@ func TestDBSetSameValueAfterDelete(t *testing.T) {
 	key, val := []byte("foo"), []byte("bar")
 	check(t, db.Set(key, val))
 	check(t, db.Delete(key))
-	equal(t, db, key, nil)
+	expectMissing(t, db, key)
 	check(t, db.Set(key, val))
 	equal(t, db, key, val)
 }
@@ -72,7 +80,7 @@ func TestDBDeleteMissingKey(t *testing.T) {
 	check(t, db.Set(key, val))
 	check(t, db.Delete(missing))
 	check(t, db.Delete(missing))
-	equal(t, db, missing, nil)
+	expectMissing(t, db, missing)
 	equal(t, db, key, val)
 }
 
@@ -81,9 +89,9 @@ func TestDBDeleteTwice(t *testing.T) {
 	key, val := []byte("foo"), []byte("bar")
 	check(t, db.Set(key, val))
 	check(t, db.Delete(key))
-	equal(t, db, key, nil)
+	expectMissing(t, db, key)
 	check(t, db.Delete(key))
-	equal(t, db, key, nil)
+	expectMissing(t, db, key)
 }
 
 func TestDBMultipleKeys(t *testing.T) {
@@ -105,7 +113,7 @@ func TestDBMultipleKeys(t *testing.T) {
 	}
 	for i := range keys {
 		if i%2 == 0 {
-			equal(t, db, keys[i], nil)
+			expectMissing(t, db, keys[i])
 		} else {
 			equal(t, db, keys[i], vals[i])
 		}
@@ -122,7 +130,7 @@ func TestDBMultipleKeys(t *testing.T) {
 	}
 	// No old value should become visible after deleting an updated key.
 	for i := range keys {
-		equal(t, db, keys[i], nil)
+		expectMissing(t, db, keys[i])
 	}
 
 	for i := range keys {

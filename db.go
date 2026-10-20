@@ -1,8 +1,10 @@
 package dot
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +16,9 @@ const (
 	shardBits  = 6
 	shardCount = 1 << shardBits
 )
+
+// ErrNotFound is returned directly by Get when the key does not exist.
+var ErrNotFound = errors.New("key not found")
 
 type DB struct {
 	path   string
@@ -53,21 +58,45 @@ func (db *DB) shard(key []byte) (*shard, uint64) {
 	return &db.shards[hash>>(64-shardBits)], hash
 }
 
-func (db *DB) Set(key []byte, val []byte) error {
+// Set stores val using the encoding described by Value. It does not retain key
+// or val, so callers may reuse their byte slices after Set returns.
+func (db *DB) Set[T Value](key []byte, val T) error {
+	var encoded [8]byte
+	var value []byte
+	switch v := any(val).(type) {
+	case []byte:
+		value = v
+	case int64:
+		binary.LittleEndian.PutUint64(encoded[:], uint64(v))
+		value = encoded[:]
+	case uint64:
+		binary.LittleEndian.PutUint64(encoded[:], v)
+		value = encoded[:]
+	case float64:
+		binary.LittleEndian.PutUint64(encoded[:], math.Float64bits(v))
+		value = encoded[:]
+	case bool:
+		if v {
+			encoded[0] = 1
+		}
+		value = encoded[:1]
+	default:
+		return ErrInvalidValue
+	}
 	s, hash := db.shard(key)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareSet(s.log, key, val, hash)
+	change, err := s.index.prepareSet(s.log, key, value, hash)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	segment, off, err := s.log.write('s', key, val)
+	segment, off, err := s.log.write('s', key, value)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
@@ -77,20 +106,40 @@ func (db *DB) Set(key []byte, val []byte) error {
 	return nil
 }
 
-func (db *DB) Get(key []byte) ([]byte, error) {
+// Get returns the value decoded as T. A missing key returns the zero value of T
+// and ErrNotFound directly, without wrapping the sentinel.
+// Byte slices are owned by the caller. Scalar encodings are described by Value.
+func (db *DB) Get[T Value](key []byte) (T, error) {
+	var zero T
 	s, hash := db.shard(key)
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if s.closed {
-		return nil, os.ErrClosed
+		return zero, os.ErrClosed
 	}
-	val, err := s.index.get(s.log, key, hash)
+	// Select the representation here; index lookups only locate and read it.
+	var value T
+	var pos int
+	var err error
+	if out, ok := any(&value).(*[]byte); ok {
+		pos, *out, err = s.index.findPayload(s.log, key, hash, nil)
+	} else {
+		var raw scalarValue
+		pos, raw, err = s.index.findScalar(s.log, key, hash)
+		if err == nil && pos >= 0 {
+			value, err = decodeScalar[T](raw)
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("index get: %w", err)
+		return zero, fmt.Errorf("index get: %w", err)
 	}
-	return val, nil
+	if pos < 0 {
+		return zero, ErrNotFound
+	}
+	return value, nil
 }
 
+// Delete removes key. Deleting a missing key succeeds.
 func (db *DB) Delete(key []byte) error {
 	s, hash := db.shard(key)
 	s.lock.Lock()

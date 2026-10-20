@@ -232,9 +232,10 @@ func (idx *Index) remove(home, pos int) {
 	idx.population--
 }
 
-// find uses the hash computed by DB and may return a value backed by buf;
-// consume it before reusing the buffer.
-func (idx *Index) find(log *Log, key []byte, hash uint64, buf []byte) (int, []byte, error) {
+// findPayload returns the matching slot and value, or position -1 for a miss.
+// A nil buf gives Get owned storage; Set and Delete lend their write buffer.
+// Consume the value before reusing that buffer. The hash is computed by DB.
+func (idx *Index) findPayload(log *Log, key []byte, hash uint64, buf []byte) (int, []byte, error) {
 	mask := len(idx.slots) - 1
 	home := int(hash & uint64(mask))
 	if idx.slots[home]&occupiedMask == 0 {
@@ -245,7 +246,7 @@ func (idx *Index) find(log *Log, key []byte, hash uint64, buf []byte) (int, []by
 	for {
 		slot := idx.slots[pos]
 		if slot&hashtagMask == tag {
-			k, v, err := log.read(slot&segmentMask>>26, slot&offsetMask, buf)
+			k, v, err := log.readPayload(slot&segmentMask>>26, slot&offsetMask, buf)
 			if err != nil {
 				return 0, nil, fmt.Errorf("log read: %w", err)
 			}
@@ -264,7 +265,7 @@ func (idx *Index) find(log *Log, key []byte, hash uint64, buf []byte) (int, []by
 }
 
 func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64) (indexChange, error) {
-	pos, previous, err := idx.find(log, key, hash, log.writeBuffer[:])
+	pos, previous, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
 	if err != nil {
 		return indexChange{}, err
 	}
@@ -289,7 +290,7 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64) (ind
 }
 
 func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange, error) {
-	pos, _, err := idx.find(log, key, hash, log.writeBuffer[:])
+	pos, _, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
 	if err != nil {
 		return indexChange{}, err
 	}
@@ -303,9 +304,32 @@ func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange,
 	}, nil
 }
 
-func (idx *Index) get(log *Log, key []byte, hash uint64) ([]byte, error) {
-	_, val, err := idx.find(log, key, hash, nil)
-	return val, err
+// findScalar returns the matching slot and encoded scalar, or position -1 for a
+// miss. Log consumes its local record buffer; DB decodes the requested type.
+func (idx *Index) findScalar(log *Log, key []byte, hash uint64) (int, scalarValue, error) {
+	mask := len(idx.slots) - 1
+	home := int(hash & uint64(mask))
+	if idx.slots[home]&occupiedMask == 0 {
+		return -1, scalarValue{}, nil
+	}
+	tag := hashtag(hash)
+	pos := idx.run(home)
+	for {
+		slot := idx.slots[pos]
+		if slot&hashtagMask == tag {
+			raw, matched, err := log.readScalar(slot&segmentMask>>26, slot&offsetMask, key)
+			if err != nil {
+				return 0, scalarValue{}, fmt.Errorf("log read: %w", err)
+			}
+			if matched {
+				return pos, raw, nil
+			}
+		}
+		pos = (pos + 1) & mask
+		if idx.slots[pos]&continuationMask == 0 {
+			return -1, scalarValue{}, nil
+		}
+	}
 }
 
 func (idx *Index) commit(change indexChange) {

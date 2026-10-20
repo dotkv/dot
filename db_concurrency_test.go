@@ -9,6 +9,39 @@ import (
 	"testing"
 )
 
+func TestDBConcurrentScalarReads(t *testing.T) {
+	db := newInternalDB(t)
+	key := []byte("scalar")
+	if err := db.Set(key, int64(0)); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			<-start
+			for range 200 {
+				value, err := db.Get[int64](key)
+				if err != nil || (value != 0 && value != 1) {
+					t.Errorf("got %d, error %v", value, err)
+					return
+				}
+			}
+		})
+	}
+	workers.Go(func() {
+		<-start
+		for i := range 200 {
+			if err := db.Set(key, int64(i%2)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	})
+	close(start)
+	workers.Wait()
+}
+
 func TestDBConcurrentOperations(t *testing.T) {
 	db := newInternalDB(t)
 	const workerCount, keyCount = 2 * shardCount, 64
@@ -39,7 +72,7 @@ func TestDBConcurrentOperations(t *testing.T) {
 			}
 			for i := 0; i < keyCount; i++ {
 				key := keyFor(worker, i)
-				if got, err := db.Get(key); err != nil || !bytes.Equal(got, initial) {
+				if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, initial) {
 					t.Errorf("key %q: got %q, want %q, error %v", key, got, initial, err)
 					return
 				}
@@ -67,11 +100,13 @@ func TestDBConcurrentOperations(t *testing.T) {
 	for worker := 0; worker < workerCount; worker++ {
 		for i := 0; i < keyCount; i++ {
 			want := updated
+			var wantErr error
 			if i%2 == 0 {
 				want = nil
+				wantErr = ErrNotFound
 			}
 			key := keyFor(worker, i)
-			if got, err := db.Get(key); err != nil || !bytes.Equal(got, want) {
+			if got, err := db.Get[[]byte](key); err != wantErr || !bytes.Equal(got, want) {
 				t.Fatalf("key %q: got %q, want %q, error %v", key, got, want, err)
 			}
 		}
@@ -105,7 +140,7 @@ func testDBConcurrentShutdown(t *testing.T, shutdown func(*DB) error) {
 					}
 					return
 				}
-				if _, err := db.Get(key); err != nil && !errors.Is(err, os.ErrClosed) {
+				if _, err := db.Get[[]byte](key); err != nil && !errors.Is(err, os.ErrClosed) {
 					t.Error(err)
 					return
 				}

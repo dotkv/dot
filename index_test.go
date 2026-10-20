@@ -350,14 +350,16 @@ func TestDBGrow(t *testing.T) {
 	}
 	for i := 0; i < 2*n; i++ {
 		want := value
+		var wantErr error
 		switch i % 3 {
 		case 0:
 			want = nil
+			wantErr = ErrNotFound
 		case 1:
 			want = []byte("updated")
 		}
-		got, err := db.Get(keyFor(i))
-		if err != nil || !bytes.Equal(got, want) {
+		got, err := db.Get[[]byte](keyFor(i))
+		if err != wantErr || !bytes.Equal(got, want) {
 			t.Fatalf("key %d: got %q, want %q, error %v", i, got, want, err)
 		}
 	}
@@ -407,7 +409,7 @@ func TestDBSetSameValueDoesNotWriteLog(t *testing.T) {
 			if s.index.population != 1 {
 				t.Fatalf("index population: got %d, want 1", s.index.population)
 			}
-			if got, err := db.Get(key); err != nil || !bytes.Equal(got, tc.value) {
+			if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, tc.value) {
 				t.Fatalf("unchanged value: got %q, want %q, error %v", got, tc.value, err)
 			}
 		})
@@ -502,7 +504,7 @@ func TestIndexLogFailure(t *testing.T) {
 		}
 	}
 	for _, key := range keys {
-		got, err := db.Get(key)
+		got, err := db.Get[[]byte](key)
 		if err != nil || !bytes.Equal(got, value) {
 			t.Fatalf("key %q: got %q, error %v", key, got, err)
 		}
@@ -511,7 +513,7 @@ func TestIndexLogFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, operation := range []func() error{
-		func() error { _, err := db.Get(keys[0]); return err },
+		func() error { _, err := db.Get[[]byte](keys[0]); return err },
 		func() error { return db.Set(keys[0], value) },
 		func() error { return db.Delete(keys[0]) },
 	} {

@@ -85,7 +85,7 @@ func TestLogBufferedWrites(t *testing.T) {
 		t.Fatalf("log size: counter %d, file %d, want %d", log.size, len(data), size)
 	}
 	for i, r := range records {
-		k, v, err := log.read(0, r.offset, nil)
+		k, v, err := log.readPayload(0, r.offset, nil)
 		if err != nil || !bytes.Equal(k, r.key) || !bytes.Equal(v, r.value) || data[r.offset+4] != r.ty {
 			t.Fatalf("record %d: key/value/type mismatch or read error: %v", i, err)
 		}
@@ -118,7 +118,7 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, buf := range [][]byte{nil, log.writeBuffer[:]} {
-				if _, _, err := log.read(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
+				if _, _, err := log.readPayload(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
 					t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
 				}
 			}
@@ -137,7 +137,7 @@ func TestLogBufferedReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, buf := range [][]byte{nil, log.writeBuffer[:0]} {
-				gotKey, gotValue, err := log.read(seg, off, buf)
+				gotKey, gotValue, err := log.readPayload(seg, off, buf)
 				if err != nil || !bytes.Equal(gotKey, key) || !bytes.Equal(gotValue, value) {
 					t.Fatalf("read: key=%q value=%q error=%v", gotKey, gotValue, err)
 				}
@@ -188,7 +188,7 @@ func TestLogSealingBoundary(t *testing.T) {
 				{segment, off, key, value},
 				{newSegment, newOff, newKey, newValue},
 			} {
-				k, v, err := log.read(record.segment, record.offset, nil)
+				k, v, err := log.readPayload(record.segment, record.offset, nil)
 				if err != nil || !bytes.Equal(k, record.key) || !bytes.Equal(v, record.value) {
 					t.Fatalf("record (%d, %d): key=%q value=%q error=%v", record.segment, record.offset, k, v, err)
 				}
@@ -220,8 +220,12 @@ func TestDBLogSealing(t *testing.T) {
 	}
 	get := func(key, want string) {
 		t.Helper()
-		got, err := db.Get(keys[key])
-		if err != nil || string(got) != want {
+		var wantErr error
+		if want == "" {
+			wantErr = ErrNotFound
+		}
+		got, err := db.Get[[]byte](keys[key])
+		if err != wantErr || string(got) != want {
 			t.Fatalf("key %q: got %q, want %q, error %v", key, got, want, err)
 		}
 	}
@@ -299,7 +303,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 			if err != nil || info.Size() != logSegmentSize {
 				t.Fatalf("failed rotation changed the file: stat=%v, error=%v", info, err)
 			}
-			got, err := db.Get(key)
+			got, err := db.Get[[]byte](key)
 			if err != nil || !bytes.Equal(got, value) {
 				t.Fatalf("existing value after failed rotation: got %q, error %v", got, err)
 			}
@@ -310,6 +314,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 				t.Fatalf("retry after removing blocker: %v", err)
 			}
 			want := value
+			var wantErr error
 			switch operation {
 			case "insert":
 				key, want = newKey, []byte("inserted")
@@ -317,9 +322,10 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 				want = []byte("updated")
 			default:
 				want = nil
+				wantErr = ErrNotFound
 			}
-			got, err = db.Get(key)
-			if err != nil || !bytes.Equal(got, want) {
+			got, err = db.Get[[]byte](key)
+			if err != wantErr || !bytes.Equal(got, want) {
 				t.Fatalf("value after retry: got %q, want %q, error %v", got, want, err)
 			}
 		})
@@ -358,7 +364,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 		t.Fatalf("retry after reopening head: %v", err)
 	}
 	for _, key := range [][]byte{key, newKey} {
-		got, err := db.Get(key)
+		got, err := db.Get[[]byte](key)
 		if err != nil || string(got) != "value" {
 			t.Fatalf("key %q after retry: got %q, error %v", key, got, err)
 		}
@@ -394,13 +400,13 @@ func TestLogSealedReadsCloseFiles(t *testing.T) {
 		return count
 	}
 	for range 8 {
-		if _, _, err := log.read(0, 0, nil); err != nil {
+		if _, _, err := log.readPayload(0, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := countOpen(); got != 0 {
 			t.Fatalf("successful read left %d sealed descriptors open", got)
 		}
-		if _, _, err := log.read(0, logSegmentSize, nil); err == nil {
+		if _, _, err := log.readPayload(0, logSegmentSize, nil); err == nil {
 			t.Fatal("reading past sealed EOF unexpectedly succeeded")
 		}
 		if got := countOpen(); got != 0 {

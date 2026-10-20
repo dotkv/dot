@@ -79,7 +79,7 @@ func TestDBMappingFailure(t *testing.T) {
 	if !slices.Equal(before, s.index.slots) || s.index.population != population || s.log.size != size {
 		t.Fatal("failed mapping changed the index or appended a log record")
 	}
-	if got, err := db.Get(keys[0]); err != nil || !bytes.Equal(got, value) {
+	if got, err := db.Get[[]byte](keys[0]); err != nil || !bytes.Equal(got, value) {
 		t.Fatalf("existing value after failure: %q, %v", got, err)
 	}
 	if err := db.Set(key, value); err != nil {
@@ -88,7 +88,7 @@ func TestDBMappingFailure(t *testing.T) {
 	if len(s.index.slots) != 2*n {
 		t.Fatal("retry did not grow the index")
 	}
-	if got, err := db.Get(key); err != nil || !bytes.Equal(got, value) {
+	if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, value) {
 		t.Fatalf("retried value: %q, %v", got, err)
 	}
 }
