@@ -29,7 +29,7 @@ func keysForShard(db *DB, s *shard, prefix string, count int) [][]byte {
 	keys := make([][]byte, 0, count)
 	for i := 0; len(keys) < count; i++ {
 		key := fmt.Appendf(nil, "%s-%d", prefix, i)
-		if db.shard(key) == s {
+		if candidate, _ := db.shard(key); candidate == s {
 			keys = append(keys, key)
 		}
 	}
@@ -90,23 +90,35 @@ func TestDBShards(t *testing.T) {
 func TestDBShardRouting(t *testing.T) {
 	db := newInternalDB(t)
 	other := newInternalDB(t)
-	for _, tc := range []struct {
-		key   []byte
-		shard int
-	}{
-		{nil, 0},
-		{[]byte{}, 0},
-		{[]byte("foo"), 33},
-		{[]byte("bar"), 42},
-	} {
-		if db.shard(tc.key) != &db.shards[tc.shard] || other.shard(tc.key) != &other.shards[tc.shard] {
-			t.Fatalf("key %q: unstable shard routing, want shard %d", tc.key, tc.shard)
-		}
-		if err := db.Set(tc.key, []byte("value")); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := db.Get(bytes.Clone(tc.key)); err != nil || string(got) != "value" {
-			t.Fatalf("key %q: got %q, error %v", tc.key, got, err)
+	for _, db := range []*DB{db, other} {
+		// Pin the full hash and shard number to protect the persistent layout
+		// across DB instances, processes, architectures, and dependency updates.
+		for _, tc := range []struct {
+			key   []byte
+			hash  uint64
+			shard int
+		}{
+			{nil, 0xef46db3751d8e999, 59},
+			{[]byte{}, 0xef46db3751d8e999, 59},
+			{[]byte("a"), 0xd24ec4f1a98c6e5b, 52},
+			{[]byte("as"), 0x1c330fb2d66be179, 7},
+			{[]byte("asd"), 0x631c37ce72a97393, 24},
+			{[]byte("asdf"), 0x415872f599cea71e, 16},
+			{[]byte("Call me Ishmael. Some years ago--never mind how long precisely-"), 0x02a2e85470d6fd96, 0},
+		} {
+			s, hash := db.shard(tc.key)
+			if hash != tc.hash || s != &db.shards[tc.shard] {
+				t.Fatalf("key %q: hash=%#x, want hash=%#x and shard=%d", tc.key, hash, tc.hash, tc.shard)
+			}
+			if again, againHash := db.shard(bytes.Clone(tc.key)); again != s || againHash != hash {
+				t.Fatalf("key %q: unstable shard routing", tc.key)
+			}
+			if err := db.Set(tc.key, []byte("value")); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := db.Get(bytes.Clone(tc.key)); err != nil || string(got) != "value" {
+				t.Fatalf("key %q: got %q, error %v", tc.key, got, err)
+			}
 		}
 	}
 }
@@ -316,7 +328,7 @@ func TestDBClosePreservesFiles(t *testing.T) {
 	if err := db.Set(key, value); err != nil {
 		t.Fatal(err)
 	}
-	s := db.shard(key)
+	s, _ := db.shard(key)
 	name := s.log.headFile.Name()
 	before, err := os.ReadFile(name)
 	if err != nil {

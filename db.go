@@ -3,13 +3,17 @@ package dot
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
 )
 
-const shardCount = 64
+const (
+	shardBits  = 6
+	shardCount = 1 << shardBits
+)
 
 type DB struct {
 	path   string
@@ -40,20 +44,23 @@ func New(path string) (*DB, error) {
 	return db, nil
 }
 
-func (db *DB) shard(key []byte) *shard {
-	// Use a stable hash so a key always belongs to the same directory.
-	// Each index still uses its own randomized hash for bucket placement.
-	return &db.shards[crc32.ChecksumIEEE(key)&(shardCount-1)]
+func (db *DB) shard(key []byte) (*shard, uint64) {
+	// XXH64 with seed zero is part of the shard layout: keep it stable so
+	// future replay can rebuild each index from its existing shard's logs.
+	hash := xxhash.Sum64(key)
+	// Keep shard bits separate from the low bits used by index buckets and
+	// fingerprints, including the bits used to split buckets during growth.
+	return &db.shards[hash>>(64-shardBits)], hash
 }
 
 func (db *DB) Set(key []byte, val []byte) error {
-	s := db.shard(key)
+	s, hash := db.shard(key)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareSet(s.log, key, val)
+	change, err := s.index.prepareSet(s.log, key, val, hash)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
@@ -71,13 +78,13 @@ func (db *DB) Set(key []byte, val []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
-	s := db.shard(key)
+	s, hash := db.shard(key)
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if s.closed {
 		return nil, os.ErrClosed
 	}
-	val, err := s.index.get(s.log, key)
+	val, err := s.index.get(s.log, key, hash)
 	if err != nil {
 		return nil, fmt.Errorf("index get: %w", err)
 	}
@@ -85,13 +92,13 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
-	s := db.shard(key)
+	s, hash := db.shard(key)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareDelete(s.log, key)
+	change, err := s.index.prepareDelete(s.log, key, hash)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
 	}

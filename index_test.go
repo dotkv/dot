@@ -274,14 +274,15 @@ func TestIndexAllocations(t *testing.T) {
 	idx = newInternalIndex(t)
 	log := &Log{}
 	key := []byte("key")
+	const hash = uint64(42)
 	allocations = testing.AllocsPerRun(1000, func() {
-		change, err := idx.prepareSet(log, key, nil)
+		change, err := idx.prepareSet(log, key, nil, hash)
 		if err != nil {
 			t.Fatal(err)
 		}
 		idx.commit(change)
 		idx.remove(change.home, change.home)
-		if _, err := idx.prepareDelete(log, key); err != nil {
+		if _, err := idx.prepareDelete(log, key, hash); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -379,7 +380,7 @@ func TestDBSetSameValueDoesNotWriteLog(t *testing.T) {
 			if err := db.Set(key, tc.value); err != nil {
 				t.Fatal(err)
 			}
-			s := db.shard(key)
+			s, _ := db.shard(key)
 			if tc.boundary {
 				padLog(t, s.log, logSegmentSize)
 			}
@@ -417,7 +418,7 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 	db := newInternalDB(t)
 	checkMissingDelete := func(key []byte) {
 		t.Helper()
-		s := db.shard(key)
+		s, _ := db.shard(key)
 		before, err := s.log.headFile.Stat()
 		if err != nil {
 			t.Fatal(err)
@@ -465,7 +466,7 @@ func TestIndexLogFailure(t *testing.T) {
 		for {
 			key := fmt.Appendf(nil, "key-%d", nonce)
 			nonce++
-			if db.shard(key) == s && s.index.hash(key)&31 == home {
+			if candidate, hash := db.shard(key); candidate == s && hash&31 == home {
 				return key
 			}
 		}

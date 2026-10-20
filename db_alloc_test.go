@@ -61,7 +61,7 @@ func TestIndexFindCollisionAllocations(t *testing.T) {
 				})
 				idx := newInternalIndex(t)
 				key, value := []byte("target"), bytes.Repeat([]byte{'v'}, size)
-				hash := idx.hash(key)
+				const hash = uint64(0x123456789abcdef)
 				home := int(hash & uint64(len(idx.slots)-1))
 				for i := range 3 {
 					candidate := []byte("decoy!")
@@ -82,7 +82,7 @@ func TestIndexFindCollisionAllocations(t *testing.T) {
 						wantAllocs = 0
 					}
 					allocations := testing.AllocsPerRun(100, func() {
-						_, pos, got, err := idx.find(log, key, buf)
+						pos, got, err := idx.find(log, key, hash, buf)
 						if err != nil {
 							t.Fatal(err)
 						}

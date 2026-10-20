@@ -3,9 +3,12 @@
 A small log-backed key-value store in Go.
 
 `New(path)` creates 64 shards in directories `path/00` through `path/63`.
-Keys route to a directory using `CRC32-IEEE(key) & 63`. Each shard owns its
-index, read/write lock, and log, so operations on different shards can run
-concurrently. Logs rotate independently at the existing 64 MiB boundary.
+Each operation hashes its key once with XXH64 (seed zero), implemented by
+`github.com/cespare/xxhash/v2`.
+The high six bits select the shard; the low bits select index buckets and
+fingerprints, including during growth. Each shard owns its index, read/write
+lock, and log, so operations on different shards can run concurrently. Logs
+rotate independently at the existing 64 MiB boundary.
 
 `Close` waits for active operations, closes every shard's log, and unmaps its
 index without removing files. `Destroy` releases the same resources and removes
@@ -49,8 +52,11 @@ each time; for a 16-byte key and a 1 KiB value, Go rounds this allocation up to
 1,152 bytes. The library leaves process-wide GC settings to the caller.
 
 `New` currently starts with empty in-memory indexes; reopening and replaying an
-existing database is not implemented. Existing flat log directories are not
-migrated to the sharded layout. Changing the shard count also changes key
-routing and requires redistribution of existing records.
+existing database is not implemented. Shard routing is stable across DB
+instances and processes, allowing future replay to rebuild each shard's index
+from its existing logs. XXH64 with seed zero and the high-six-bit shard selection
+are part of the directory layout; changing the hash, seed, or shard count requires
+migration of existing records. Existing flat log directories are not migrated to
+the sharded layout.
 
 Run checks with `go test ./...`, `go test -race ./...`, and `go vet ./...`.

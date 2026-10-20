@@ -264,7 +264,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			db := newInternalDB(t)
 			key, value := []byte("existing"), []byte("original")
-			s := db.shard(key)
+			s, _ := db.shard(key)
 			newKey := keysForShard(db, s, "new", 1)[0]
 			if err := db.Set(key, value); err != nil {
 				t.Fatal(err)
@@ -329,7 +329,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 func TestDBLogSealingSyncFailure(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("existing")
-	s := db.shard(key)
+	s, _ := db.shard(key)
 	newKey := keysForShard(db, s, "new", 1)[0]
 	if err := db.Set(key, []byte("value")); err != nil {
 		t.Fatal(err)
