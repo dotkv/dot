@@ -1,7 +1,6 @@
 package dot
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -52,11 +51,14 @@ func (l *Log) openHead(segment uint64) error {
 }
 
 func (l *Log) crc(header [13]byte, key []byte, val []byte) uint32 {
-	hash := crc32.NewIEEE()
-	hash.Write(header[4:])
-	hash.Write(key)
-	hash.Write(val)
-	return hash.Sum32()
+	// Checksum the small header directly so it stays on the stack, then use
+	// the optimized standard-library implementation for the payload.
+	crc := ^uint32(0)
+	for _, b := range header[4:] {
+		crc = crc32.IEEETable[byte(crc)^b] ^ (crc >> 8)
+	}
+	crc = crc32.Update(^crc, crc32.IEEETable, key)
+	return crc32.Update(crc, crc32.IEEETable, val)
 }
 
 func (l *Log) write(ty byte, key []byte, val []byte) (uint64, uint64, error) {
@@ -116,8 +118,7 @@ func (l *Log) read(seg uint64, off uint64) ([]byte, []byte, error) {
 	if _, err := f.ReadAt(b, int64(off)+13); err != nil {
 		return nil, nil, fmt.Errorf("read payload: %w", err)
 	}
-	binary.BigEndian.PutUint32(header[4:], l.crc(header, b[:keylen], b[keylen:]))
-	if !bytes.Equal(header[:4], header[4:8]) {
+	if binary.BigEndian.Uint32(header[:]) != l.crc(header, b[:keylen], b[keylen:]) {
 		return nil, nil, fmt.Errorf("crc mismatch")
 	}
 	return b[:keylen], b[keylen:], nil

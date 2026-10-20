@@ -92,6 +92,18 @@ func BenchmarkReplace(b *testing.B) {
 	}
 }
 
+func BenchmarkSetUnchanged(b *testing.B) {
+	f := newPrimitiveFixture(b)
+	f.reset(b, true)
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		if err := f.db.Set(f.keys[i%benchmarkKeyCount][:], f.value[:]); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+}
+
 func BenchmarkGetMiss(b *testing.B) {
 	benchmarkGet(b, false)
 }

@@ -57,6 +57,9 @@ func (db *DB) Set(key []byte, val []byte) error {
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
+	if change.kind == indexUnchanged {
+		return nil
+	}
 	segment, off, err := s.log.write('s', key, val)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)

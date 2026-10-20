@@ -331,6 +331,57 @@ func TestDBGrow(t *testing.T) {
 	}
 }
 
+func TestDBSetSameValueDoesNotWriteLog(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		value, repeated []byte
+		boundary        bool
+	}{
+		{"nonempty", []byte("value"), []byte("value"), false},
+		{"nil-to-empty", nil, []byte{}, false},
+		{"empty-to-nil", []byte{}, nil, false},
+		{"rotation-boundary", []byte("value"), []byte("value"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newInternalDB(t)
+			key := []byte("key")
+			if err := db.Set(key, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			s := db.shard(key)
+			if tc.boundary {
+				padLog(t, s.log, logSegmentSize)
+			}
+			head, size := s.log.headFile, s.log.size
+			before, err := head.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := db.Set(key, tc.repeated); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != size {
+				t.Fatal("setting an unchanged value appended to or rotated the log")
+			}
+			after, err := head.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Size() != before.Size() {
+				t.Fatalf("unchanged value grew log: %d -> %d", before.Size(), after.Size())
+			}
+			if s.index.population != 1 {
+				t.Fatalf("index population: got %d, want 1", s.index.population)
+			}
+			if got, err := db.Get(key); err != nil || !bytes.Equal(got, tc.value) {
+				t.Fatalf("unchanged value: got %q, want %q, error %v", got, tc.value, err)
+			}
+		})
+	}
+}
+
 func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 	db := newInternalDB(t)
 	checkMissingDelete := func(key []byte) {

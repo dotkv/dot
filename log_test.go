@@ -4,11 +4,64 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 )
+
+func TestLogCRCCompatibility(t *testing.T) {
+	var log Log
+	random := rand.NewChaCha8([32]byte{1})
+	for i := range 1000 {
+		var header [13]byte
+		random.Read(header[:])
+		key, value := make([]byte, i%97), make([]byte, i*17%4097)
+		random.Read(key)
+		random.Read(value)
+		original := crc32.NewIEEE()
+		original.Write(header[4:])
+		original.Write(key)
+		original.Write(value)
+		if got, want := log.crc(header, key, value), original.Sum32(); got != want {
+			t.Fatalf("case %d: checksum %08x, want %08x", i, got, want)
+		}
+	}
+}
+
+func TestLogReadRejectsCorruption(t *testing.T) {
+	log := newInternalDB(t).shards[0].log
+	key, value := []byte("key"), []byte("value")
+	if _, _, err := log.write('s', key, value); err != nil {
+		t.Fatal(err)
+	}
+	record, err := os.ReadFile(log.headFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		offset int
+	}{
+		{"checksum", 0},
+		{"type", 4},
+		{"key", 13},
+		{"value", 13 + len(key)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			corrupt := bytes.Clone(record)
+			corrupt[tc.offset] ^= 1
+			if err := os.WriteFile(log.headFile.Name(), corrupt, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := log.read(0, 0); err == nil || err.Error() != "crc mismatch" {
+				t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
+			}
+		})
+	}
+}
 
 // Leave existing records intact and reach the boundary without writing 64 MiB.
 func padLog(t *testing.T, log *Log, size uint64) {
