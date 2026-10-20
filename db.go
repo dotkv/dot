@@ -3,12 +3,14 @@ package dot
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 type DB struct {
 	path  string
 	log   *Log
 	index *Index
+	lock  sync.RWMutex
 }
 
 func New(path string) (*DB, error) {
@@ -25,6 +27,8 @@ func New(path string) (*DB, error) {
 }
 
 func (db *DB) Set(key []byte, val []byte) error {
+	db.lock.Lock()
+	defer db.lock.Unlock()
 	change, err := db.index.prepareSet(db.log, key, val)
 	if err != nil {
 		return fmt.Errorf("prepare set: %s", err)
@@ -37,6 +41,8 @@ func (db *DB) Set(key []byte, val []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
+	db.lock.RLock()
+	defer db.lock.RUnlock()
 	val, err := db.index.get(db.log, key)
 	if err != nil {
 		return nil, fmt.Errorf("index get: %s", err)
@@ -45,6 +51,8 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
+	db.lock.Lock()
+	defer db.lock.Unlock()
 	change, err := db.index.prepareDelete(db.log, key)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %s", err)
@@ -60,5 +68,7 @@ func (db *DB) Delete(key []byte) error {
 }
 
 func (db *DB) Destroy() error {
+	db.lock.Lock()
+	defer db.lock.Unlock()
 	return os.RemoveAll(db.path)
 }
