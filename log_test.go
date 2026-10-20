@@ -41,7 +41,7 @@ func TestLogCRCCompatibility(t *testing.T) {
 		original.Write(header[4:])
 		original.Write(key)
 		original.Write(value)
-		if got, want := log.crc(header, key, value), original.Sum32(); got != want {
+		if got, want := log.crc(header[:], key, value), original.Sum32(); got != want {
 			t.Fatalf("case %d: checksum %08x, want %08x", i, got, want)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -71,7 +72,7 @@ func (l *Log) openHead(seg uint64) error {
 	return nil
 }
 
-func (l *Log) crc(header [13]byte, key []byte, val []byte) uint32 {
+func (l *Log) crc(header []byte, key []byte, val []byte) uint32 {
 	// Checksum the small header directly so it stays on the stack, then use
 	// the optimized standard-library implementation for the payload.
 	crc := ^uint32(0)
@@ -128,22 +129,32 @@ func (l *Log) read(seg uint64, off uint64, b []byte) ([]byte, []byte, error) {
 		}
 		defer f.Close()
 	}
-	var header [13]byte
-	if _, err := f.ReadAt(header[:], int64(off)); err != nil {
+	var header [1 << 10]byte
+	n, err := f.ReadAt(header[:], int64(off))
+	if err != nil && err != io.EOF {
 		return nil, nil, fmt.Errorf("read header: %w", err)
+	}
+	if n < 13 {
+		return nil, nil, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
 	}
 	keylen := binary.BigEndian.Uint32(header[5:])
 	vallen := binary.BigEndian.Uint32(header[9:])
 	size := int(keylen) + int(vallen)
+
 	if b == nil || cap(b) < size {
 		b = make([]byte, size)
 	} else {
 		b = b[:size]
 	}
-	if _, err := f.ReadAt(b, int64(off)+13); err != nil {
-		return nil, nil, fmt.Errorf("read payload: %w", err)
+	copied := copy(b, header[13:n])
+	if copied < size {
+		if _, err := f.ReadAt(
+			b[copied:], int64(off)+13+int64(copied),
+		); err != nil {
+			return nil, nil, fmt.Errorf("read payload: %w", err)
+		}
 	}
-	if binary.BigEndian.Uint32(header[:]) != l.crc(header, b[:keylen], b[keylen:]) {
+	if binary.BigEndian.Uint32(header[:]) != l.crc(header[:13], b[:keylen], b[keylen:]) {
 		return nil, nil, fmt.Errorf("crc mismatch")
 	}
 	return b[:keylen], b[keylen:], nil
