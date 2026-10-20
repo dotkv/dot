@@ -24,7 +24,7 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() {
-		if err := db.log.head.Close(); err != nil {
+		if err := db.log.headFile.Close(); err != nil {
 			b.Fatal(err)
 		}
 	})
@@ -44,7 +44,7 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 // limit and ensure every batch starts with the same number of live keys.
 func (f *primitiveFixture) reset(b *testing.B, populated bool) {
 	b.Helper()
-	if err := f.db.log.head.Truncate(0); err != nil {
+	if err := f.db.log.headFile.Truncate(0); err != nil {
 		b.Fatal(err)
 	}
 	f.db.log.size = 0

@@ -13,7 +13,7 @@ func TestDBConcurrentOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := db.log.head.Close(); err != nil {
+		if err := db.log.headFile.Close(); err != nil {
 			t.Error(err)
 		}
 	})

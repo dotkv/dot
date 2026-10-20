@@ -266,7 +266,7 @@ func TestDBGrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.log.head.Close() })
+	t.Cleanup(func() { db.log.headFile.Close() })
 	n := len(db.index.slots)
 	var key [8]byte
 	keyFor := func(i int) []byte { return fmt.Appendf(key[:0], "%08d", i) }
@@ -286,15 +286,15 @@ func TestDBGrow(t *testing.T) {
 		}
 	}
 	// Growing must work with the log closed; reopen it to check every value.
-	name := db.log.head.Name()
-	if err := db.log.head.Close(); err != nil {
+	name := db.log.headFile.Name()
+	if err := db.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	db.index.grow()
 	if len(db.index.slots) != 2*n {
 		t.Fatal("grow with the log closed did not double capacity")
 	}
-	db.log.head, err = os.OpenFile(name, os.O_RDWR|os.O_APPEND, 0600)
+	db.log.headFile, err = os.OpenFile(name, os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,13 +337,13 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := db.log.head.Close(); err != nil {
+		if err := db.log.headFile.Close(); err != nil {
 			t.Fatal(err)
 		}
 	})
 	checkMissingDelete := func(key []byte) {
 		t.Helper()
-		before, err := db.log.head.Stat()
+		before, err := db.log.headFile.Stat()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -353,7 +353,7 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		after, err := db.log.head.Stat()
+		after, err := db.log.headFile.Stat()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -379,7 +379,7 @@ func TestIndexLogFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.log.head.Close() })
+	t.Cleanup(func() { db.log.headFile.Close() })
 	db.index.slots = make([]uint64, 32)
 	nonce := 0
 	keyFor := func(home uint64) []byte {
@@ -399,12 +399,12 @@ func TestIndexLogFailure(t *testing.T) {
 		}
 	}
 	before := slices.Clone(db.index.slots)
-	name := db.log.head.Name()
-	if err := db.log.head.Close(); err != nil {
+	name := db.log.headFile.Name()
+	if err := db.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	// Reads succeed, but committing the log record fails after preparation.
-	db.log.head, err = os.Open(name)
+	db.log.headFile, err = os.Open(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestIndexLogFailure(t *testing.T) {
 			t.Fatalf("key %q: got %q, error %v", key, got, err)
 		}
 	}
-	if err := db.log.head.Close(); err != nil {
+	if err := db.log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	for _, operation := range []func() error{

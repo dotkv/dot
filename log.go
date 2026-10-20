@@ -11,8 +11,9 @@ import (
 )
 
 type Log struct {
-	head *os.File
-	size uint64
+	headFile    *os.File
+	headSegment uint64
+	size        uint64
 }
 
 func newLog(name string) (*Log, error) {
@@ -22,8 +23,8 @@ func newLog(name string) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
 	}
-	name = path.Join(name, fmt.Sprintf("%07d.log", 0))
-	l.head, err = os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND|syscall.O_CLOEXEC|syscall.O_NOATIME, 0600)
+	name = path.Join(name, fmt.Sprintf("%07d.log", l.headSegment))
+	l.headFile, err = os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND|syscall.O_CLOEXEC|syscall.O_NOATIME, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}
@@ -46,17 +47,17 @@ func (l *Log) write(ty byte, key []byte, val []byte) error {
 	binary.BigEndian.PutUint32(header[:], l.crc(header, key, val))
 	var err error
 	var n int
-	n, err = l.head.Write(header[:])
+	n, err = l.headFile.Write(header[:])
 	if err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
 	l.size += uint64(n)
-	n, err = l.head.Write(key)
+	n, err = l.headFile.Write(key)
 	if err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
 	l.size += uint64(n)
-	n, err = l.head.Write(val)
+	n, err = l.headFile.Write(val)
 	if err != nil {
 		return fmt.Errorf("write val: %w", err)
 	}
@@ -66,13 +67,13 @@ func (l *Log) write(ty byte, key []byte, val []byte) error {
 
 func (l *Log) read(_ uint64, off uint64) ([]byte, []byte, error) {
 	var header [13]byte
-	if _, err := l.head.ReadAt(header[:], int64(off)); err != nil {
+	if _, err := l.headFile.ReadAt(header[:], int64(off)); err != nil {
 		return nil, nil, fmt.Errorf("read header: %w", err)
 	}
 	keylen := binary.BigEndian.Uint32(header[5:])
 	vallen := binary.BigEndian.Uint32(header[9:])
 	b := make([]byte, keylen+vallen)
-	if _, err := l.head.ReadAt(b, int64(off)+13); err != nil {
+	if _, err := l.headFile.ReadAt(b, int64(off)+13); err != nil {
 		return nil, nil, fmt.Errorf("read header: %w", err)
 	}
 	binary.BigEndian.PutUint32(header[4:], l.crc(header, b[:keylen], b[keylen:]))
