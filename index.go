@@ -289,8 +289,6 @@ func (idx *Index) prepareDelete(log *Log, key []byte) (indexChange, error) {
 }
 
 func (idx *Index) get(log *Log, key []byte) ([]byte, error) {
-	// Keep the payload private to this lookup: Get calls share a read lock
-	// and the returned value must survive subsequent reads and writes.
 	_, _, val, err := idx.find(log, key, nil)
 	return val, err
 }
