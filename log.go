@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
-	"path"
+	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
@@ -26,11 +27,15 @@ type Log struct {
 
 func newLog(name string) (*Log, error) {
 	var l Log
-	l.path = name
-	var err error
-	err = os.MkdirAll(l.path, 0700)
-	if err != nil {
+	if err := os.MkdirAll(name, 0700); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
+	}
+	l.path = filepath.Clean(name)
+	switch {
+	case l.path == ".":
+		l.path = ""
+	case !os.IsPathSeparator(l.path[len(l.path)-1]):
+		l.path += string(os.PathSeparator)
 	}
 	if err := l.openHead(0); err != nil {
 		return nil, fmt.Errorf("open head: %w", err)
@@ -38,15 +43,25 @@ func newLog(name string) (*Log, error) {
 	return &l, nil
 }
 
-func (l *Log) openHead(segment uint64) error {
-	name := path.Join(l.path, fmt.Sprintf("%07d.log", segment))
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_APPEND|syscall.O_CLOEXEC|syscall.O_NOATIME, 0600)
+func (l *Log) segmentPath(seg uint64) string {
+	var buf [20]byte
+	digits := strconv.AppendUint(buf[:0], seg, 10)
+	const zeros = "0000000"
+	return l.path + zeros[:max(0, 7-len(digits))] + string(digits) + ".log"
+}
+
+func (l *Log) openFile(seg uint64, flag int) (*os.File, error) {
+	return os.OpenFile(l.segmentPath(seg), flag|syscall.O_CLOEXEC|syscall.O_NOATIME, 0600)
+}
+
+func (l *Log) openHead(seg uint64) error {
+	f, err := l.openFile(seg, os.O_CREATE|os.O_RDWR|os.O_APPEND)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
 	old := l.headFile
 	l.headFile = f
-	l.headSegment = segment
+	l.headSegment = seg
 	l.size = 0
 	if old != nil {
 		if err := old.Close(); err != nil {
@@ -107,7 +122,7 @@ func (l *Log) read(seg uint64, off uint64, b []byte) ([]byte, []byte, error) {
 	f := l.headFile
 	if l.headSegment != seg {
 		var err error
-		f, err = os.OpenFile(path.Join(l.path, fmt.Sprintf("%07d.log", seg)), os.O_RDONLY|syscall.O_NOATIME|syscall.O_CLOEXEC, 0600)
+		f, err = l.openFile(seg, os.O_RDONLY)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open sealed log: %w", err)
 		}

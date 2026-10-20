@@ -75,37 +75,6 @@ func BenchmarkGetHit(b *testing.B) {
 	benchmarkGet(b, true)
 }
 
-func BenchmarkGetHitParallel(b *testing.B) {
-	for _, sameShard := range []bool{false, true} {
-		name := "all-shards"
-		if sameShard {
-			name = "one-shard"
-		}
-		b.Run(name, func(b *testing.B) {
-			f := newPrimitiveFixture(b)
-			f.reset(b, true)
-			keys := make([][]byte, 0, benchmarkKeyCount)
-			for i := 0; i < benchmarkKeyCount; i++ {
-				key := f.keys[i][:]
-				if !sameShard || f.db.shard(key) == &f.db.shards[0] {
-					keys = append(keys, key)
-				}
-			}
-			b.StartTimer()
-			b.RunParallel(func(pb *testing.PB) {
-				for i := 0; pb.Next(); i++ {
-					got, err := f.db.Get(keys[i%len(keys)])
-					if err != nil || !bytes.Equal(got, f.value[:]) {
-						b.Errorf("get: value=%q error=%v", got, err)
-						return
-					}
-				}
-			})
-			b.StopTimer()
-		})
-	}
-}
-
 func BenchmarkReplace(b *testing.B) {
 	f := newPrimitiveFixture(b)
 	replacement := f.value

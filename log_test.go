@@ -12,6 +12,22 @@ import (
 	"testing"
 )
 
+func TestNewLogCurrentDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	log, err := newLog(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := log.headFile.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.Stat("0000000.log"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLogCRCCompatibility(t *testing.T) {
 	var log Log
 	random := rand.NewChaCha8([32]byte{1})
