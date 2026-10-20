@@ -141,8 +141,7 @@ func BenchmarkDeleteHit(b *testing.B) {
 func BenchmarkDeleteMiss(b *testing.B) {
 	f := newPrimitiveFixture(b)
 	f.reset(b, true)
-	b.StartTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		if err := f.db.Delete(f.keys[benchmarkKeyCount+i%benchmarkKeyCount][:]); err != nil {
 			b.Fatal(err)
 		}
