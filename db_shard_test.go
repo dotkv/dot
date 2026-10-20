@@ -25,7 +25,7 @@ func newInternalDB(t testing.TB, opts ...Option) *DB {
 	return db
 }
 
-func keysForShard(db *DB, s *shard, prefix string, count int) [][]byte {
+func keysForShard(db *DB, s *Shard, prefix string, count int) [][]byte {
 	keys := make([][]byte, 0, count)
 	for i := 0; len(keys) < count; i++ {
 		key := fmt.Appendf(nil, "%s-%d", prefix, i)

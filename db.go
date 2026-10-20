@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -23,14 +22,7 @@ var ErrNotFound = errors.New("key not found")
 type DB struct {
 	path       string
 	expiration int64
-	shards     [shardCount]shard
-}
-
-type shard struct {
-	log    *Log
-	index  *Index
-	lock   sync.RWMutex
-	closed bool
+	shards     [shardCount]Shard
 }
 
 // Options configures database and key operations.
@@ -84,7 +76,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	return db, nil
 }
 
-func (db *DB) shard(key []byte) (*shard, uint64) {
+func (db *DB) shard(key []byte) (*Shard, uint64) {
 	// XXH64 with seed zero is part of the shard layout: keep it stable so
 	// replay can rebuild each index from its existing shard's logs.
 	hash := xxhash.Sum64(key)
@@ -122,21 +114,6 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 		return fmt.Errorf("prepare set: %w", err)
 	}
 	return s.appendSet(key, value, change)
-}
-
-// appendSet requires the shard's exclusive lock. Commit only after the append
-// succeeds, using its actual address because writing may rotate the log.
-func (s *shard) appendSet(key, value []byte, change indexChange) error {
-	if change.kind == indexUnchanged {
-		return nil
-	}
-	segment, off, err := s.log.write('s', key, value, change.expiration)
-	if err != nil {
-		return fmt.Errorf("write log: %w", err)
-	}
-	change.slot |= segment<<26 | off
-	s.index.commit(change)
-	return nil
 }
 
 // Get returns the value decoded as T. A missing key returns the zero value of T
