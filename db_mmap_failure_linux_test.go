@@ -41,12 +41,12 @@ func TestDBMappingFailure(t *testing.T) {
 		}
 		var opened *DB
 		var err error
-		withoutNewMappings(t, func() { opened, err = New(path) })
+		withoutNewMappings(t, func() { opened, err = Open(path) })
 		if opened != nil || !errors.Is(err, syscall.ENOMEM) {
 			if opened != nil {
 				opened.Close()
 			}
-			t.Fatalf("New: got database=%v error=%v, want ENOMEM", opened, err)
+			t.Fatalf("Open: got database=%v error=%v, want ENOMEM", opened, err)
 		}
 		if got := openFilesUnder(t, path); got != 0 {
 			t.Fatalf("failed mapping leaked %d file descriptors", got)

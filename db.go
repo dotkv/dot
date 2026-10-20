@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 )
@@ -21,8 +22,9 @@ const (
 var ErrNotFound = errors.New("key not found")
 
 type DB struct {
-	path   string
-	shards [shardCount]shard
+	path       string
+	expiration int64
+	shards     [shardCount]shard
 }
 
 type shard struct {
@@ -32,9 +34,43 @@ type shard struct {
 	closed bool
 }
 
-// New creates a database with 64 key shards in directories 00 through 63.
-func New(path string) (*DB, error) {
-	db := &DB{path: path}
+// Options configures database and key operations.
+type Options struct {
+	expiration int64
+}
+
+// Option configures Open or Set.
+type Option func(*Options)
+
+// WithExpiration sets the time at which a key expires. When passed to Open, it
+// sets the default expiration for Set calls on that database; when passed to
+// Set, it overrides the database default. A zero time.Time clears expiration.
+func WithExpiration(t time.Time) Option {
+	var ns int64
+	if !t.IsZero() {
+		ns = t.UnixNano()
+		if ns == 0 {
+			ns = 1
+		}
+	}
+	return func(o *Options) {
+		o.expiration = ns
+	}
+}
+
+func isExpired(expiration int64) bool {
+	return expiration != 0 && expiration <= time.Now().UnixNano()
+}
+
+// Open creates a database with 64 key shards in directories 00 through 63.
+func Open(path string, opts ...Option) (*DB, error) {
+	var options Options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	db := &DB{path: path, expiration: options.expiration}
 	for i := range db.shards {
 		log, err := newLog(filepath.Join(path, fmt.Sprintf("%02d", i)))
 		if err != nil {
@@ -60,7 +96,17 @@ func (db *DB) shard(key []byte) (*shard, uint64) {
 
 // Set stores val using the encoding described by Value. It does not retain key
 // or val, so callers may reuse their byte slices after Set returns.
-func (db *DB) Set[T Value](key []byte, val T) error {
+func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
+	expiration := db.expiration
+	if len(opts) > 0 {
+		options := Options{expiration: expiration}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(&options)
+			}
+		}
+		expiration = options.expiration
+	}
 	var encoded [8]byte
 	var value []byte
 	switch v := any(val).(type) {
@@ -89,14 +135,14 @@ func (db *DB) Set[T Value](key []byte, val T) error {
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareSet(s.log, key, value, hash)
+	change, err := s.index.prepareSet(s.log, key, value, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	segment, off, err := s.log.write('s', key, value)
+	segment, off, err := s.log.write('s', key, value, expiration)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
@@ -120,14 +166,22 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 	// Select the representation here; index lookups only locate and read it.
 	var value T
 	var pos int
+	var expiration int64
 	var err error
 	if out, ok := any(&value).(*[]byte); ok {
-		pos, *out, err = s.index.findPayload(s.log, key, hash, nil)
+		pos, *out, expiration, err = s.index.findPayload(s.log, key, hash, nil)
+		if err == nil && pos >= 0 && isExpired(expiration) {
+			pos = -1
+		}
 	} else {
 		var raw scalarValue
-		pos, raw, err = s.index.findScalar(s.log, key, hash)
+		pos, raw, expiration, err = s.index.findScalar(s.log, key, hash)
 		if err == nil && pos >= 0 {
-			value, err = decodeScalar[T](raw)
+			if isExpired(expiration) {
+				pos = -1
+			} else {
+				value, err = decodeScalar[T](raw)
+			}
 		}
 	}
 	if err != nil {
@@ -154,7 +208,7 @@ func (db *DB) Delete(key []byte) error {
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	if _, _, err := s.log.write('d', key, nil); err != nil {
+	if _, _, err := s.log.write('d', key, nil, 0); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)

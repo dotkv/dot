@@ -69,7 +69,7 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 					if hit && i == 2 {
 						candidate, candidateValue = key, value
 					}
-					segment, off, err := log.write('s', candidate, candidateValue)
+					segment, off, err := log.write('s', candidate, candidateValue, 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -82,7 +82,7 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 						wantAllocs = 0
 					}
 					allocations := testing.AllocsPerRun(100, func() {
-						pos, got, err := idx.findPayload(log, key, hash, buf)
+						pos, got, _, err := idx.findPayload(log, key, hash, buf)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -149,7 +149,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 		{bytes.Repeat([]byte{'k'}, 144), []byte{1}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := s.log.write('s', entry.key, entry.value)
+		segment, off, err := s.log.write('s', entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +162,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 			key, want = []byte("target"), scalarValue{bits: 42, size: 8}
 		}
 		allocations := testing.AllocsPerRun(100, func() {
-			pos, got, err := s.index.findScalar(s.log, key, hash)
+			pos, got, _, err := s.index.findScalar(s.log, key, hash)
 			if err != nil || (pos >= 0) != hit || got != want {
 				t.Fatalf("position %d, got %v, want %v, error %v", pos, got, want, err)
 			}

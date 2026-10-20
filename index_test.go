@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"testing"
+	"time"
 )
 
 type indexEntry struct {
@@ -276,7 +277,7 @@ func TestIndexAllocations(t *testing.T) {
 	key := []byte("key")
 	const hash = uint64(42)
 	allocations = testing.AllocsPerRun(1000, func() {
-		change, err := idx.prepareSet(log, key, nil, hash)
+		change, err := idx.prepareSet(log, key, nil, hash, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -450,6 +451,151 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkMissingDelete(key)
+
+	// Deleting an expired key drops its index slot without writing to the log.
+	if err := db.Set(key, value, WithExpiration(time.Now().Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.shard(key)
+	if s.index.population != 1 {
+		t.Fatalf("population after expired set: got %d, want 1", s.index.population)
+	}
+	checkMissingDelete(key)
+	if s.index.population != 0 {
+		t.Fatalf("population after deleting expired key: got %d, want 0", s.index.population)
+	}
+}
+
+func TestDBExpirationLogAndIndexBehavior(t *testing.T) {
+	db := newInternalDB(t)
+	key, value := []byte("key"), []byte("value")
+	s, _ := db.shard(key)
+	future1 := time.Now().Add(time.Hour)
+	future2 := future1.Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+
+	if err := db.Set(key, value, WithExpiration(future1)); err != nil {
+		t.Fatal(err)
+	}
+	size := s.log.size
+	// Repeating the same unexpired value and expiration skips the log write.
+	if err := db.Set(key, value, WithExpiration(future1)); err != nil {
+		t.Fatal(err)
+	}
+	if s.log.size != size {
+		t.Fatalf("unchanged set with same expiration grew log: %d -> %d", size, s.log.size)
+	}
+
+	// Changing expiration with the same value writes a new record and reuses the slot.
+	for _, opts := range [][]Option{
+		{WithExpiration(future2)},
+		nil,
+		{WithExpiration(past)},
+		{WithExpiration(past)},
+		nil,
+	} {
+		before := s.log.size
+		if err := db.Set(key, value, opts...); err != nil {
+			t.Fatal(err)
+		}
+		if s.log.size <= before {
+			t.Fatalf("set with opts %v did not write to log", opts)
+		}
+		if s.index.population != 1 {
+			t.Fatalf("population: got %d, want 1", s.index.population)
+		}
+	}
+	if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("got %q, error %v; want %q", got, err, value)
+	}
+}
+
+func TestDBExpirationPruneOnGrow(t *testing.T) {
+	// Verify that Get on an expired key skips log reads via the sidecar, even
+	// when the underlying log file is closed.
+	db := newInternalDB(t)
+	key, value := []byte("expired"), []byte("value")
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+	if err := db.Set(key, value, WithExpiration(past)); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.shard(key)
+	if err := s.log.headFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.Get[[]byte](key); err != ErrNotFound || got != nil {
+		t.Fatalf("expired byte Get with closed log: got %q, error %v", got, err)
+	}
+	if got, err := db.Get[int64](key); err != ErrNotFound || got != 0 {
+		t.Fatalf("expired scalar Get with closed log: got %d, error %v", got, err)
+	}
+
+	// Verify prune-on-grow hysteresis (62.5% = n - n/4 - n/8) and invariants.
+	idx := newInternalIndex(t)
+	n := len(idx.slots)
+	threshold := n - n/4
+	watermark := threshold - n/8
+	random := rand.New(rand.NewPCG(5, 6))
+	var entries []indexEntry
+	add := func(at int64) int {
+		id := len(entries)
+		hash := random.Uint64()
+		entries = append(entries, indexEntry{hash: hash, live: true})
+		slot := entrySlot(id, hash)
+		idx.insert(int(hash&uint64(len(idx.slots)-1)), slot)
+		if at != 0 {
+			idx.setExpiration(slot&addressMask, at, hash)
+		}
+		return id
+	}
+
+	// Fill to 75% (threshold) with enough expired entries (> n/8) so pruning
+	// drops population below the 62.5% watermark and skips doubling.
+	liveTarget := watermark - 1
+	for idx.population < liveTarget {
+		add(future.UnixNano())
+	}
+	var expiredIDs []int
+	for idx.population < threshold {
+		expiredIDs = append(expiredIDs, add(past.UnixNano()))
+	}
+	if err := idx.grow(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range expiredIDs {
+		entries[id].live = false
+	}
+	if len(idx.slots) != n {
+		t.Fatalf("table doubled despite pruning below 62.5%%: got %d, want %d", len(idx.slots), n)
+	}
+	if idx.population != liveTarget {
+		t.Fatalf("population after prune-without-grow: got %d, want %d", idx.population, liveTarget)
+	}
+	checkIndex(t, idx, entries)
+
+	// Refill to 75% with only a few expired entries so pruning leaves population
+	// at or above the 62.5% watermark and doubles the table.
+	expiredIDs = expiredIDs[:0]
+	for idx.population < threshold-4 {
+		add(0)
+	}
+	for idx.population < threshold {
+		expiredIDs = append(expiredIDs, add(past.UnixNano()))
+	}
+	if err := idx.grow(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range expiredIDs {
+		entries[id].live = false
+	}
+	if len(idx.slots) != 2*n {
+		t.Fatalf("table did not double when prune stayed >= 62.5%%: got %d, want %d", len(idx.slots), 2*n)
+	}
+	if idx.population != threshold-4 {
+		t.Fatalf("population after prune-and-grow: got %d, want %d", idx.population, threshold-4)
+	}
+	checkIndex(t, idx, entries)
 }
 
 func TestIndexLogFailure(t *testing.T) {

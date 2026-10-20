@@ -5,11 +5,12 @@ import (
 	"dot"
 	"fmt"
 	"testing"
+	"time"
 )
 
-func newDB(t *testing.T) *dot.DB {
+func newDB(t *testing.T, opts ...dot.Option) *dot.DB {
 	t.Helper()
-	db, err := dot.New(t.TempDir())
+	db, err := dot.Open(t.TempDir(), opts...)
 	check(t, err)
 	t.Cleanup(func() {
 		check(t, db.Destroy())
@@ -139,4 +140,42 @@ func TestDBMultipleKeys(t *testing.T) {
 	for i := range keys {
 		equal(t, db, keys[i], vals[i])
 	}
+}
+
+func TestDBExpiration(t *testing.T) {
+	db := newDB(t)
+	key, val := []byte("foo"), []byte("bar")
+
+	// Future expiration remains readable until the deadline passes.
+	check(t, db.Set(key, val, dot.WithExpiration(time.Now().Add(time.Hour))))
+	equal(t, db, key, val)
+
+	// Zero time.Time clears expiration.
+	check(t, db.Set(key, val, dot.WithExpiration(time.Now().Add(-time.Hour)), dot.WithExpiration(time.Time{})))
+	equal(t, db, key, val)
+
+	// Past timestamps (including Unix epoch) are immediately expired.
+	for _, past := range []time.Time{time.Now().Add(-time.Second), time.Unix(0, 0), time.Unix(-10, 0)} {
+		check(t, db.Set(key, val, dot.WithExpiration(past)))
+		expectMissing(t, db, key)
+	}
+
+	// Re-setting an expired key with the same value makes it live again.
+	check(t, db.Set(key, val))
+	equal(t, db, key, val)
+
+	// Short future expiration transitions from live to missing.
+	check(t, db.Set(key, val, dot.WithExpiration(time.Now().Add(25*time.Millisecond))))
+	equal(t, db, key, val)
+	time.Sleep(35 * time.Millisecond)
+	expectMissing(t, db, key)
+
+	// Open with a default expiration applies to Set unless overridden.
+	dbWithDefault := newDB(t, dot.WithExpiration(time.Now().Add(-time.Second)))
+	check(t, dbWithDefault.Set(key, val))
+	expectMissing(t, dbWithDefault, key)
+	check(t, dbWithDefault.Set(key, val, dot.WithExpiration(time.Now().Add(time.Hour))))
+	equal(t, dbWithDefault, key, val)
+	check(t, dbWithDefault.Set(key, val, dot.WithExpiration(time.Time{})))
+	equal(t, dbWithDefault, key, val)
 }

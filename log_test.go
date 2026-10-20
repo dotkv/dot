@@ -32,7 +32,7 @@ func TestLogCRCCompatibility(t *testing.T) {
 	var log Log
 	random := rand.NewChaCha8([32]byte{1})
 	for i := range 1000 {
-		var header [13]byte
+		var header [logHeaderSize]byte
 		random.Read(header[:])
 		key, value := make([]byte, i%97), make([]byte, i*17%4097)
 		random.Read(key)
@@ -53,21 +53,22 @@ func TestLogBufferedWrites(t *testing.T) {
 	records := []struct {
 		ty         byte
 		key, value []byte
+		expiration int64
 		offset     uint64
 	}{
 		{ty: 's'},
-		{ty: 's', key: key, value: bytes.Repeat([]byte{'a'}, logWriteBufferSize-13-len(key)-1)},
-		{ty: 's', key: key, value: bytes.Repeat([]byte{'b'}, logWriteBufferSize-13-len(key))},
-		{ty: 's', key: key, value: bytes.Repeat([]byte{'c'}, logWriteBufferSize-13-len(key)+1)},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'a'}, logWriteBufferSize-logHeaderSize-len(key)-1), expiration: 123456789},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'b'}, logWriteBufferSize-logHeaderSize-len(key))},
+		{ty: 's', key: key, value: bytes.Repeat([]byte{'c'}, logWriteBufferSize-logHeaderSize-len(key)+1), expiration: -42},
 		{ty: 's', key: bytes.Repeat([]byte{'k'}, 2*logWriteBufferSize), value: []byte("large key")},
 		{ty: 's', key: key, value: bytes.Repeat([]byte{'v'}, 16*logWriteBufferSize)},
-		{ty: 's', key: key, value: []byte("small again")},
+		{ty: 's', key: key, value: []byte("small again"), expiration: 987654321},
 		{ty: 'd', key: key},
 	}
 	var size uint64
 	for i := range records {
 		r := &records[i]
-		segment, off, err := log.write(r.ty, r.key, r.value)
+		segment, off, err := log.write(r.ty, r.key, r.value, r.expiration)
 		if err != nil {
 			t.Fatalf("write record %d: %v", i, err)
 		}
@@ -75,7 +76,7 @@ func TestLogBufferedWrites(t *testing.T) {
 			t.Fatalf("record %d: got address (%d, %d), want (0, %d)", i, segment, off, size)
 		}
 		r.offset = off
-		size += uint64(13 + len(r.key) + len(r.value))
+		size += uint64(logHeaderSize + len(r.key) + len(r.value))
 	}
 	data, err := os.ReadFile(log.headFile.Name())
 	if err != nil {
@@ -85,9 +86,9 @@ func TestLogBufferedWrites(t *testing.T) {
 		t.Fatalf("log size: counter %d, file %d, want %d", log.size, len(data), size)
 	}
 	for i, r := range records {
-		k, v, err := log.readPayload(0, r.offset, nil)
-		if err != nil || !bytes.Equal(k, r.key) || !bytes.Equal(v, r.value) || data[r.offset+4] != r.ty {
-			t.Fatalf("record %d: key/value/type mismatch or read error: %v", i, err)
+		k, v, exp, err := log.readPayload(0, r.offset, nil)
+		if err != nil || !bytes.Equal(k, r.key) || !bytes.Equal(v, r.value) || exp != r.expiration || data[r.offset+4] != r.ty {
+			t.Fatalf("record %d: key/value/expiration/type mismatch or read error: %v", i, err)
 		}
 	}
 }
@@ -95,7 +96,7 @@ func TestLogBufferedWrites(t *testing.T) {
 func TestLogReadRejectsCorruption(t *testing.T) {
 	log := newInternalDB(t).shards[0].log
 	key, value := []byte("key"), []byte("value")
-	if _, _, err := log.write('s', key, value); err != nil {
+	if _, _, err := log.write('s', key, value, 42); err != nil {
 		t.Fatal(err)
 	}
 	record, err := os.ReadFile(log.headFile.Name())
@@ -108,8 +109,9 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 	}{
 		{"checksum", 0},
 		{"type", 4},
-		{"key", 13},
-		{"value", 13 + len(key)},
+		{"expiration", 13},
+		{"key", logHeaderSize},
+		{"value", logHeaderSize + len(key)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			corrupt := bytes.Clone(record)
@@ -118,7 +120,7 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, buf := range [][]byte{nil, log.writeBuffer[:]} {
-				if _, _, err := log.readPayload(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
+				if _, _, _, err := log.readPayload(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
 					t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
 				}
 			}
@@ -132,14 +134,14 @@ func TestLogBufferedReads(t *testing.T) {
 		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, min(16, size))
 			value := bytes.Repeat([]byte{'v'}, size-len(key))
-			seg, off, err := log.write('s', key, value)
+			seg, off, err := log.write('s', key, value, 12345)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, buf := range [][]byte{nil, log.writeBuffer[:0]} {
-				gotKey, gotValue, err := log.readPayload(seg, off, buf)
-				if err != nil || !bytes.Equal(gotKey, key) || !bytes.Equal(gotValue, value) {
-					t.Fatalf("read: key=%q value=%q error=%v", gotKey, gotValue, err)
+				gotKey, gotValue, gotExp, err := log.readPayload(seg, off, buf)
+				if err != nil || !bytes.Equal(gotKey, key) || !bytes.Equal(gotValue, value) || gotExp != 12345 {
+					t.Fatalf("read: key=%q value=%q exp=%d error=%v", gotKey, gotValue, gotExp, err)
 				}
 			}
 		})
@@ -160,9 +162,9 @@ func TestLogSealingBoundary(t *testing.T) {
 		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
 			log := newInternalDB(t).shards[0].log
 			key, value := []byte("boundary"), []byte("value spanning the boundary")
-			offset := logSegmentSize - uint64(13+len(key)+len(value)) + extra
+			offset := logSegmentSize - uint64(logHeaderSize+len(key)+len(value)) + extra
 			padLog(t, log, offset)
-			segment, off, err := log.write('s', key, value)
+			segment, off, err := log.write('s', key, value, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,7 +173,7 @@ func TestLogSealingBoundary(t *testing.T) {
 			}
 			old := log.headFile
 			newKey, newValue := []byte("new"), []byte("v")
-			newSegment, newOff, err := log.write('s', newKey, newValue)
+			newSegment, newOff, err := log.write('s', newKey, newValue, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +190,7 @@ func TestLogSealingBoundary(t *testing.T) {
 				{segment, off, key, value},
 				{newSegment, newOff, newKey, newValue},
 			} {
-				k, v, err := log.readPayload(record.segment, record.offset, nil)
+				k, v, _, err := log.readPayload(record.segment, record.offset, nil)
 				if err != nil || !bytes.Equal(k, record.key) || !bytes.Equal(v, record.value) {
 					t.Fatalf("record (%d, %d): key=%q value=%q error=%v", record.segment, record.offset, k, v, err)
 				}
@@ -373,12 +375,12 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 
 func TestLogSealedReadsCloseFiles(t *testing.T) {
 	log := newInternalDB(t).shards[0].log
-	if _, _, err := log.write('s', []byte("old"), []byte("value")); err != nil {
+	if _, _, err := log.write('s', []byte("old"), []byte("value"), 0); err != nil {
 		t.Fatal(err)
 	}
 	sealedPath := log.headFile.Name()
 	padLog(t, log, logSegmentSize)
-	if _, _, err := log.write('s', []byte("new"), []byte("v")); err != nil {
+	if _, _, err := log.write('s', []byte("new"), []byte("v"), 0); err != nil {
 		t.Fatal(err)
 	}
 	countOpen := func() int {
@@ -400,13 +402,13 @@ func TestLogSealedReadsCloseFiles(t *testing.T) {
 		return count
 	}
 	for range 8 {
-		if _, _, err := log.readPayload(0, 0, nil); err != nil {
+		if _, _, _, err := log.readPayload(0, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := countOpen(); got != 0 {
 			t.Fatalf("successful read left %d sealed descriptors open", got)
 		}
-		if _, _, err := log.readPayload(0, logSegmentSize, nil); err == nil {
+		if _, _, _, err := log.readPayload(0, logSegmentSize, nil); err == nil {
 			t.Fatal("reading past sealed EOF unexpectedly succeeded")
 		}
 		if got := countOpen(); got != 0 {

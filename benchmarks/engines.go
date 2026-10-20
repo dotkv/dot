@@ -25,7 +25,7 @@ type engine interface {
 
 var engines = map[string]func(string) (engine, error){
 	"dot": func(path string) (engine, error) {
-		db, err := dot.New(path)
+		db, err := dot.Open(path)
 		if err != nil {
 			return nil, err
 		}

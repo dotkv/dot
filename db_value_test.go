@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"testing"
+	"time"
 )
 
 func checkScalarGet[T interface {
@@ -185,7 +186,7 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 			db := newInternalDB(t)
 			key := []byte("missing")
 			s, hash := db.shard(key)
-			segment, off, err := s.log.write('s', []byte("decoy"), []byte{1})
+			segment, off, err := s.log.write('s', []byte("decoy"), []byte{1}, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,14 +218,19 @@ func TestDBGetInvalidScalar(t *testing.T) {
 		}
 		checkScalarGet(t, db, key, false, ErrInvalidValue)
 	}
+	// An expired record reports ErrNotFound before scalar validation.
+	if err := db.Set(key, []byte("invalid-scalar"), WithExpiration(time.Now().Add(-time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	checkGetMissing(t, db, key)
 }
 
 func TestDBGetScalarRecordSizes(t *testing.T) {
 	db := newInternalDB(t)
-	for _, size := range []int{0, 1, 1003, 1004, 4096} {
+	for _, size := range []int{0, 1, 995, 996, 4096} {
 		t.Run(fmt.Sprintf("%d-byte-key", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, size)
-			// A 1003-byte key puts the end of this record exactly at 1 KiB.
+			// A 995-byte key puts the end of this record exactly at 1 KiB.
 			if err := db.Set(key, []byte{42, 0, 0, 0, 0, 0, 0, 0}); err != nil {
 				t.Fatal(err)
 			}
@@ -245,7 +251,7 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		{bytes.Repeat([]byte{'k'}, 1100), []byte{2}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := s.log.write('s', entry.key, entry.value)
+		segment, off, err := s.log.write('s', entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -256,7 +262,7 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		want  scalarValue
 		found bool
 	}{{"target", scalarValue{bits: 42, size: 8}, true}, {"missing", scalarValue{}, false}} {
-		pos, got, err := s.index.findScalar(s.log, []byte(tc.key), hash)
+		pos, got, _, err := s.index.findScalar(s.log, []byte(tc.key), hash)
 		if err != nil || (pos >= 0) != tc.found || got != tc.want {
 			t.Fatalf("key %q: position %d, got %v, want %v, error %v", tc.key, pos, got, tc.want, err)
 		}
@@ -277,7 +283,7 @@ func TestDBGetScalarRejectsCorruption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, off := range []int{0, 4, 13, 13 + len(key)} {
+			for _, off := range []int{0, 4, 13, logHeaderSize, logHeaderSize + len(key)} {
 				corrupt := bytes.Clone(record)
 				corrupt[off] ^= 1
 				if err := os.WriteFile(path, corrupt, 0600); err != nil {
@@ -287,7 +293,7 @@ func TestDBGetScalarRejectsCorruption(t *testing.T) {
 					t.Fatalf("accepted corrupt byte at %d", off)
 				}
 			}
-			for _, size := range []int{12, len(record) - 1} {
+			for _, size := range []int{logHeaderSize - 1, len(record) - 1} {
 				if err := os.WriteFile(path, record[:size], 0600); err != nil {
 					t.Fatal(err)
 				}

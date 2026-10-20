@@ -49,6 +49,7 @@ func (f *primitiveFixture) resetValue[T Value](b *testing.B, populated bool, val
 		s.log.size = 0
 		clear(s.index.slots)
 		s.index.population = 0
+		clear(s.index.expirations)
 	}
 	if populated {
 		for i := 0; i < benchmarkKeyCount; i++ {

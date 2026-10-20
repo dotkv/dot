@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-func newInternalDB(t testing.TB) *DB {
+func newInternalDB(t testing.TB, opts ...Option) *DB {
 	t.Helper()
-	db, err := New(t.TempDir())
+	db, err := Open(t.TempDir(), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestDBShards(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Every shard has its own segment zero, even at identical offsets.
-			k, v, err := s.log.readPayload(0, off, nil)
+			k, v, _, err := s.log.readPayload(0, off, nil)
 			if err != nil || !bytes.Equal(k, key) || !bytes.Equal(v, value) {
 				t.Fatalf("shard %d log: key=%q value=%q error=%v", i, k, v, err)
 			}
@@ -279,7 +279,7 @@ func TestDBShardOpenFailureClosesFiles(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("preserve me"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if db, err := New(path); err == nil || db != nil {
+	if db, err := Open(path); err == nil || db != nil {
 		if db != nil {
 			db.Destroy()
 		}
