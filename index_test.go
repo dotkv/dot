@@ -546,7 +546,7 @@ func TestDBExpirationPruneOnGrow(t *testing.T) {
 		slot := entrySlot(id, hash)
 		idx.insert(int(hash&uint64(len(idx.slots)-1)), slot)
 		if at != 0 {
-			idx.setExpiration(slot&addressMask, at, hash)
+			idx.setExpiration(slot&addressMask, at, hash, 0)
 		}
 		return id
 	}

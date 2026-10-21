@@ -20,8 +20,9 @@ const (
 )
 
 type indexExpiration struct {
-	at   int64
-	hash uint64
+	at          int64
+	hash        uint64
+	recordBytes uint64
 }
 
 type Index struct {
@@ -30,8 +31,10 @@ type Index struct {
 	// occupied belongs to the bucket, even when its entries are displaced;
 	// continuation and shifted belong to the entry. Together these bits encode
 	// displacement without a per-entry counter or a limit on collision chains.
-	slots       []uint64
-	entryCount  int
+	slots      []uint64
+	entryCount int
+	// Bytes in records referenced by slots, including TTLs not yet pruned.
+	liveBytes   uint64
 	memory      indexMemory
 	expirations map[uint64]indexExpiration
 	// Shared with Log so every index mutation, including expiry pruning,
@@ -42,13 +45,15 @@ type Index struct {
 // Carry changes by value so insertion/deletion shifts happen only after the
 // log write succeeds.
 type indexChange struct {
-	home, pos  int
-	slot       uint64
-	prevAddr   uint64
-	hash       uint64
-	expiration int64
-	hasPrevExp bool
-	kind       uint8
+	home, pos   int
+	slot        uint64
+	prevAddr    uint64
+	hash        uint64
+	expiration  int64
+	hasPrevExp  bool
+	kind        uint8
+	prevBytes   uint64
+	recordBytes uint64
 }
 
 const (
@@ -74,6 +79,7 @@ func newIndex() (*Index, error) {
 func (idx *Index) close() error {
 	idx.slots = nil
 	idx.entryCount = 0
+	idx.liveBytes = 0
 	idx.expirations = nil
 	clear(idx.segmentRefCounts)
 	return idx.memory.close()
@@ -87,11 +93,11 @@ func (idx *Index) slotExpired(slot uint64) bool {
 	return ok && isExpired(exp.at)
 }
 
-func (idx *Index) setExpiration(addr uint64, at int64, hash uint64) {
+func (idx *Index) setExpiration(addr uint64, at int64, hash uint64, recordBytes uint64) {
 	if idx.expirations == nil {
 		idx.expirations = make(map[uint64]indexExpiration)
 	}
-	idx.expirations[addr] = indexExpiration{at: at, hash: hash}
+	idx.expirations[addr] = indexExpiration{at: at, hash: hash, recordBytes: recordBytes}
 }
 
 func (idx *Index) deleteExpiration(addr uint64) {
@@ -117,6 +123,7 @@ func (idx *Index) prune() {
 			pos := idx.run(home)
 			for {
 				if idx.slots[pos]&addressMask == addr {
+					idx.liveBytes -= exp.recordBytes
 					idx.remove(home, pos)
 					break
 				}
@@ -372,12 +379,12 @@ func (idx *Index) prepareSet(log *Log, ty recordType, key []byte, val []byte, ha
 	if prevType == ty && prevExp == expiration && !isExpired(prevExp) && bytes.Equal(val, previous) {
 		return indexChange{}, nil
 	}
-	return idx.prepareUpdate(pos, hash, expiration, prevExp), nil
+	return idx.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(key), len(previous))), nil
 }
 
 // replay applies an existing record at addr without writing or deduplicating it.
 // An expired set must remove the previous value so recovery cannot resurrect it.
-func (idx *Index) replay(log *Log, ty recordType, key []byte, hash, addr uint64, expiration int64) error {
+func (idx *Index) replay(log *Log, ty recordType, key []byte, hash, addr uint64, expiration int64, recordBytes uint64) error {
 	expired := isExpired(expiration)
 	if ty == typeDelete || expired {
 		if expired {
@@ -392,7 +399,7 @@ func (idx *Index) replay(log *Log, ty recordType, key []byte, hash, addr uint64,
 		idx.commit(change)
 		return nil
 	}
-	pos, _, _, prevExp, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
+	pos, previous, _, prevExp, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
 	if err != nil {
 		return err
 	}
@@ -409,15 +416,16 @@ func (idx *Index) replay(log *Log, ty recordType, key []byte, hash, addr uint64,
 			kind:       indexInsert,
 		}
 	} else {
-		change = idx.prepareUpdate(pos, hash, expiration, prevExp)
+		change = idx.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(key), len(previous)))
 	}
 	change.slot |= addr
+	change.recordBytes = recordBytes
 	idx.commit(change)
 	return nil
 }
 
 // prepareUpdate reuses a successful lookup under the shard's exclusive lock.
-func (idx *Index) prepareUpdate(pos int, hash uint64, expiration, prevExp int64) indexChange {
+func (idx *Index) prepareUpdate(pos int, hash uint64, expiration, prevExp int64, prevBytes uint64) indexChange {
 	return indexChange{
 		pos:        pos,
 		slot:       idx.slots[pos] &^ addressMask,
@@ -425,12 +433,13 @@ func (idx *Index) prepareUpdate(pos int, hash uint64, expiration, prevExp int64)
 		hash:       hash,
 		expiration: expiration,
 		hasPrevExp: prevExp != 0,
+		prevBytes:  prevBytes,
 		kind:       indexUpdate,
 	}
 }
 
 func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange, error) {
-	pos, _, _, expiration, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
+	pos, previous, _, expiration, err := idx.findPayload(log, key, hash, log.writeBuffer[:])
 	if err != nil {
 		return indexChange{}, err
 	}
@@ -440,6 +449,7 @@ func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange,
 	home := int(hash & uint64(len(idx.slots)-1))
 	prevAddr := idx.slots[pos] & addressMask
 	if isExpired(expiration) {
+		idx.liveBytes -= recordSize(len(key), len(previous))
 		idx.deleteExpiration(prevAddr)
 		idx.remove(home, pos)
 		return indexChange{}, nil
@@ -449,6 +459,7 @@ func (idx *Index) prepareDelete(log *Log, key []byte, hash uint64) (indexChange,
 		pos:        pos,
 		prevAddr:   prevAddr,
 		hasPrevExp: expiration != 0,
+		prevBytes:  recordSize(len(key), len(previous)),
 		kind:       indexDelete,
 	}, nil
 }
@@ -484,11 +495,13 @@ func (idx *Index) findScalar(log *Log, key []byte, hash uint64) (int, scalarValu
 func (idx *Index) commit(change indexChange) {
 	switch change.kind {
 	case indexInsert:
+		idx.liveBytes += change.recordBytes
 		idx.insert(change.home, change.slot)
 		if change.expiration != 0 {
-			idx.setExpiration(change.slot&addressMask, change.expiration, change.hash)
+			idx.setExpiration(change.slot&addressMask, change.expiration, change.hash, change.recordBytes)
 		}
 	case indexUpdate:
+		idx.liveBytes = idx.liveBytes - change.prevBytes + change.recordBytes
 		if idx.segmentRefCounts != nil {
 			idx.segmentRefCounts[change.prevAddr>>26]--
 			idx.segmentRefCounts[change.slot&segmentMask>>26]++
@@ -498,9 +511,10 @@ func (idx *Index) commit(change indexChange) {
 		}
 		idx.slots[change.pos] = change.slot
 		if change.expiration != 0 {
-			idx.setExpiration(change.slot&addressMask, change.expiration, change.hash)
+			idx.setExpiration(change.slot&addressMask, change.expiration, change.hash, change.recordBytes)
 		}
 	case indexDelete:
+		idx.liveBytes -= change.prevBytes
 		if change.hasPrevExp {
 			idx.deleteExpiration(change.prevAddr)
 		}

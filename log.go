@@ -32,7 +32,9 @@ type Log struct {
 	headSegment         uint64
 	size                uint64
 	recordCount         uint64
+	recordBytes         uint64
 	segmentRecordCounts map[uint64]uint32
+	segmentBytes        map[uint64]uint64
 	segmentRefCounts    map[uint64]uint32
 	// Finish queued or interrupted maintenance even if cleanup lowers the ratio.
 	compactPending bool
@@ -86,11 +88,13 @@ func newLog(name string, idx *Index) (*Log, error) {
 		return nil, err
 	}
 	l.segmentRecordCounts = make(map[uint64]uint32, len(segments))
+	l.segmentBytes = make(map[uint64]uint64, len(segments))
 	l.segmentRefCounts = make(map[uint64]uint32, len(segments))
 	idx.segmentRefCounts = l.segmentRefCounts
 	var head uint64
 	for i, seg := range segments {
 		l.segmentRecordCounts[seg] = 0
+		l.segmentBytes[seg] = 0
 		// Initialize only this segment; preserve counts from earlier replay.
 		l.segmentRefCounts[seg] = 0
 		if err := l.replaySegment(idx, seg, i == len(segments)-1); err != nil {
@@ -234,12 +238,15 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		if crc != binary.BigEndian.Uint32(header[:]) {
 			return fmt.Errorf("crc mismatch at offset %d", off)
 		}
-		if err := idx.replay(l, ty, key, xxhash.Sum64(key), seg<<26|off, expiration); err != nil {
+		recordBytes := uint64(logHeaderSize) + keylen + vallen
+		if err := idx.replay(l, ty, key, xxhash.Sum64(key), seg<<26|off, expiration, recordBytes); err != nil {
 			return fmt.Errorf("index record at offset %d: %w", off, err)
 		}
 		l.segmentRecordCounts[seg]++
 		l.recordCount++
-		off += logHeaderSize + keylen + vallen
+		l.recordBytes += recordBytes
+		l.segmentBytes[seg] += recordBytes
+		off += recordBytes
 	}
 	return nil
 }
@@ -303,6 +310,7 @@ func (l *Log) openHead(seg uint64) error {
 			return errors.Join(l.writeErr, f.Close())
 		}
 		l.segmentRecordCounts[seg] = 0
+		l.segmentBytes[seg] = 0
 		l.segmentRefCounts[seg] = 0
 	}
 	old := l.headFile
@@ -396,7 +404,13 @@ func (l *Log) appendRecord(ty recordType, key []byte, val []byte, expiration int
 	l.size = off + uint64(n)
 	l.segmentRecordCounts[l.headSegment]++
 	l.recordCount++
+	l.recordBytes += uint64(n)
+	l.segmentBytes[l.headSegment] += uint64(n)
 	return segment, off, nil
+}
+
+func recordSize(keyBytes, valueBytes int) uint64 {
+	return uint64(logHeaderSize) + uint64(keyBytes) + uint64(valueBytes)
 }
 
 // readPayload reads and verifies a record, returning its key, value, type, and

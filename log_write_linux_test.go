@@ -68,6 +68,7 @@ func TestLogPartialWriteRollback(t *testing.T) {
 			if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, old) {
 				t.Fatalf("partial write changed value: value=%q error=%v", got, err)
 			}
+			checkSegmentAccounting(t, s)
 		})
 	}
 	if err := db.Set(key, value); err != nil {
@@ -79,6 +80,8 @@ func TestLogPartialWriteRollback(t *testing.T) {
 		t.Fatalf("retry used wrong offset: position=%d error=%v, want offset %d", pos, err, size)
 	}
 	db = reopenDB(t, db)
+	s, _ = db.shard(key)
+	checkSegmentAccounting(t, s)
 	if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, value) {
 		t.Fatalf("recovery after partial write and retry: length=%d error=%v", len(got), err)
 	}

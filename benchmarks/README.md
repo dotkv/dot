@@ -98,43 +98,43 @@ Columns summarize all operation types. Each cell is the median across the indica
 
 ### 80/20 · 8 B uint64 values · 16 workers
 
-Measured operations per engine: **11,991,600**. Ratios are reads/writes.
+Measured operations per engine: **11,503,872**. Ratios are reads/writes.
 
 | Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot                |    1 |   3.953 |     5.124 |   41.471 |          3,033,391 |           64.4 |      13.31 |
-| Go map (in memory) |    1 |   1.762 |     2.252 |    1.695 |          6,803,910 |           34.7 |       0.00 |
-| Pebble             |    1 |   6.140 |     7.947 |  133.119 |          1,953,018 |           45.2 |      18.16 |
+| Dot                |    1 |   3.667 |     4.948 |   38.655 |          3,136,944 |           62.4 |      30.05 |
+| Go map (in memory) |    1 |   1.620 |     2.158 |    1.535 |          7,102,359 |           34.6 |       0.00 |
+| Pebble             |    1 |   5.630 |     7.563 |  127.487 |          2,043,388 |           45.4 |      18.16 |
 
 ### 80/20 · 1,024 B values · 16 workers
 
-Measured operations per engine: **6,008,400**. Ratios are reads/writes.
+Measured operations per engine: **2,593,008**. Ratios are reads/writes.
 
 | Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot                |    1 |   2.957 |     7.672 |   84.479 |          2,031,842 |           69.0 |     846.04 |
-| Go map (in memory) |    1 |   2.262 |     5.852 |    6.655 |          2,656,734 |           69.1 |       0.00 |
-| Pebble             |    1 |  22.434 |    59.360 |  358.399 |            267,820 |           49.9 |      35.50 |
+| Dot                |    1 |   5.151 |    31.554 |   87.039 |            503,437 |           67.9 |      56.43 |
+| Go map (in memory) |    1 |   0.952 |     5.711 |    6.079 |          2,722,786 |           69.2 |       0.00 |
+| Pebble             |    1 |   9.748 |    59.748 |  364.543 |            265,994 |           55.0 |      37.77 |
 
 ### 20/80 · 8 B uint64 values · 16 workers
 
-Measured operations per engine: **4,878,192**. Ratios are reads/writes.
+Measured operations per engine: **5,031,600**. Ratios are reads/writes.
 
 | Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot                |    1 |   3.788 |    12.222 |   72.191 |          1,287,915 |           64.5 |      74.63 |
-| Go map (in memory) |    1 |   0.905 |     2.852 |    1.735 |          5,391,484 |           33.9 |       0.00 |
-| Pebble             |    1 |   2.563 |     8.234 |   68.095 |          1,903,109 |           45.5 |      18.16 |
+| Dot                |    1 |   4.355 |    13.681 |   62.975 |          1,155,308 |           64.7 |      36.14 |
+| Go map (in memory) |    1 |   0.881 |     2.673 |    1.655 |          5,712,498 |           34.1 |       0.00 |
+| Pebble             |    1 |   2.645 |     8.237 |   67.583 |          1,902,628 |           46.7 |      18.17 |
 
 ### 20/80 · 1,024 B values · 16 workers
 
-Measured operations per engine: **3,159,504**. Ratios are reads/writes.
+Measured operations per engine: **671,088**. Ratios are reads/writes.
 
 | Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot                |    1 |   4.044 |    20.258 |   90.111 |            781,360 |           66.6 |     327.21 |
-| Go map (in memory) |    1 |   1.067 |     5.209 |    2.255 |          2,961,824 |           69.6 |       0.00 |
-| Pebble             |    1 |  26.167 |   131.663 |  387.071 |            120,744 |           52.2 |      39.90 |
+| Dot                |    1 |   4.552 |   106.082 |  147.455 |            147,424 |           65.4 |      54.85 |
+| Go map (in memory) |    1 |   0.206 |     4.629 |    1.967 |          3,257,755 |           69.3 |       0.00 |
+| Pebble             |    1 |   5.412 |   126.876 |  389.119 |            124,010 |           51.2 |      37.34 |
 
 
 <!-- benchmark-results:end -->
@@ -162,8 +162,9 @@ decode scalars without copying a result slice.
 ## Engine and maintenance configuration
 
 **Dot** uses its public API with normal automatic compaction. Successful mutations
-queue a shard when more than 20% of its records are obsolete and at least 8,192
-records are obsolete. A single background worker coalesces requests per shard.
+queue a shard when more than 33% of its encoded log bytes are obsolete and at
+least 1 MiB is obsolete. Both thresholds include headers, keys, and values. A
+single background worker coalesces requests per shard.
 A 10-second ticker also handles tracked expirations and pending retries. The
 flush adapter is a no-op. Closing cancels its compactor after finishing any
 current shard; the drain does not reclaim all outstanding garbage.
@@ -189,6 +190,29 @@ Dot syncs at log rotation and issues a file write before returning. Pebble may
 buffer an acknowledged WAL write in userspace. These configurations have no
 per-operation fsync guarantee and differ in acknowledgment and recovery behavior.
 See [Pebble's WriteOptions](https://pkg.go.dev/github.com/cockroachdb/pebble/v2#WriteOptions).
+
+## Byte threshold comparison
+
+The byte-based trigger was compared at ratio 0.33 with 16 workers, 16,384 initial
+keys, 30,000 warmup operations, and the 20/80 workload. Every threshold ran the
+same seeded trace: 4,878,192 measured operations for 8-byte scalars and 1,000,032
+for 1 KiB values. Each row is one isolated run, with disk measured after drain.
+These fixed budgets differ from the calibrated budgets in the main results.
+
+| Minimum per shard | Values     | Throughput (ops/s) | Disk (MiB) |
+| ----------------- | ---------- | -----------------: | ---------: |
+| 256 KiB           | 8 B uint64 |            554,536 |      13.27 |
+| 256 KiB           | 1 KiB      |             83,917 |      23.20 |
+| 512 KiB           | 8 B uint64 |            907,975 |      27.84 |
+| 512 KiB           | 1 KiB      |             86,483 |      32.84 |
+| 1 MiB             | 8 B uint64 |          1,262,080 |      31.20 |
+| 1 MiB             | 1 KiB      |            149,116 |      52.02 |
+
+The default is **1 MiB per shard**: it gave the highest throughput of these three
+settings. Smaller thresholds retained less history, with more maintenance cost.
+Final disk usage depends on where a run ends in the compaction cycle; the minimum
+is a scheduling threshold, not a hard limit. Compaction still holds a shard lock
+while syncing files, so changing units does not remove that latency tradeoff.
 
 ## Measurement and reports
 

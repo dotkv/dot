@@ -31,18 +31,19 @@ func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange) 
 		return fmt.Errorf("write log: %w", err)
 	}
 	change.slot |= segment<<26 | off
+	change.recordBytes = recordSize(len(key), len(value))
 	s.index.commit(change)
 	s.maybeScheduleCompaction()
 	return nil
 }
 
 type compactionThreshold struct {
-	ratio              float64
-	minObsoleteRecords uint64
+	ratio            float64
+	minObsoleteBytes uint64
 }
 
 func defaultCompactionThreshold() compactionThreshold {
-	return compactionThreshold{ratio: 0.33, minObsoleteRecords: 1 << 15}
+	return compactionThreshold{ratio: 0.33, minObsoleteBytes: 1 << 20}
 }
 
 func (s *Shard) threshold() compactionThreshold {
@@ -52,15 +53,15 @@ func (s *Shard) threshold() compactionThreshold {
 	return defaultCompactionThreshold()
 }
 
-// needsCompaction requires the shard lock. recordCount avoids scanning the
+// needsCompaction requires the shard lock. Byte counters avoid scanning the
 // segment map on the foreground write path.
-func (s *Shard) needsCompaction(minObsoleteRecords uint64) bool {
-	total := s.log.recordCount
+func (s *Shard) needsCompaction(minObsoleteBytes uint64) bool {
+	total := s.log.recordBytes
 	if total == 0 {
 		return false
 	}
-	obsolete := total - uint64(s.index.entryCount)
-	return obsolete >= minObsoleteRecords && float64(obsolete)/float64(total) > s.threshold().ratio
+	obsolete := total - s.index.liveBytes
+	return obsolete >= minObsoleteBytes && float64(obsolete)/float64(total) > s.threshold().ratio
 }
 
 // maybeScheduleCompaction requires the shard lock, except during Open before
@@ -69,7 +70,7 @@ func (s *Shard) maybeScheduleCompaction() {
 	if s.compactionQueue == nil || s.compactionQueued || s.compactionRetry || s.closed || s.log.writeErr != nil {
 		return
 	}
-	if !s.log.compactPending && !s.needsCompaction(s.threshold().minObsoleteRecords) {
+	if !s.log.compactPending && !s.needsCompaction(s.threshold().minObsoleteBytes) {
 		return
 	}
 	s.log.compactPending = true

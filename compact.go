@@ -147,7 +147,9 @@ func (l *Log) removeUnusedPrefix(segments []uint64) ([]uint64, error) {
 			return segments, err
 		}
 		l.recordCount -= uint64(l.segmentRecordCounts[seg])
+		l.recordBytes -= l.segmentBytes[seg]
 		delete(l.segmentRecordCounts, seg)
+		delete(l.segmentBytes, seg)
 		delete(l.segmentRefCounts, seg)
 		segments = segments[1:]
 		if err := l.syncDirectory(); err != nil {
@@ -200,7 +202,7 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 			err = errors.Join(err, os.Remove(staging))
 		}
 	}()
-	output := Log{headFile: f, headSegment: seg, segmentRecordCounts: map[uint64]uint32{seg: 0}}
+	output := Log{headFile: f, headSegment: seg, segmentRecordCounts: map[uint64]uint32{seg: 0}, segmentBytes: map[uint64]uint64{seg: 0}}
 	var moves []recordMove
 	buffer := l.writeBuffer[:]
 	copyRecord := func(pos int) error {
@@ -256,7 +258,9 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 		}
 	}
 	l.recordCount = l.recordCount - uint64(l.segmentRecordCounts[seg]) + uint64(len(moves))
+	l.recordBytes = l.recordBytes - l.segmentBytes[seg] + output.recordBytes
 	l.segmentRecordCounts[seg] = uint32(len(moves))
+	l.segmentBytes[seg] = output.recordBytes
 	if seg == l.headSegment {
 		// Reopen under the published filename so headFile.Name remains useful.
 		// Keep the staging descriptor usable even if reopening fails.

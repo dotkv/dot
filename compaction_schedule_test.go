@@ -30,7 +30,11 @@ func waitForCompaction(t *testing.T, s *Shard, records uint64) {
 func TestStateCompactionMutations(t *testing.T) {
 	for _, mutation := range []string{"set", "update", "delete", "expired-delete"} {
 		t.Run(mutation, func(t *testing.T) {
-			db := newInternalDB(t, WithCompactionThreshold(0.2, 2))
+			minimum := 2 * recordSize(len("key"), 8)
+			if mutation == "delete" {
+				minimum = recordSize(len("key"), 8) + recordSize(len("key"), 0)
+			}
+			db := newInternalDB(t, WithCompactionThreshold(0.2, minimum))
 			key := []byte("key")
 			s, _ := db.shard(key)
 			if err := db.Set(key, uint64(1)); err != nil {
@@ -68,7 +72,7 @@ func TestStateCompactionMutations(t *testing.T) {
 					queued, count := s.compactionQueued, s.log.recordCount
 					s.lock.RUnlock()
 					if queued || count != 2 {
-						t.Fatal("compaction ran below the configured obsolete-record minimum")
+						t.Fatal("compaction ran below the configured obsolete-byte minimum")
 					}
 				}
 			}
@@ -90,7 +94,7 @@ func TestStateCompactionMutations(t *testing.T) {
 }
 
 func TestStateCompactionRatio(t *testing.T) {
-	db := newInternalDB(t, WithCompactionThreshold(0.8, 2))
+	db := newInternalDB(t, WithCompactionThreshold(0.8, 2*recordSize(len("key"), 8)))
 	key := []byte("key")
 	s, _ := db.shard(key)
 	for value := uint64(0); value < 5; value++ {
@@ -104,7 +108,7 @@ func TestStateCompactionRatio(t *testing.T) {
 	if queued || records != 5 {
 		t.Fatal("compaction ran before exceeding the configured ratio")
 	}
-	// Four of five records are obsolete: exactly 80% is below the strict trigger.
+	// Four of five equal-size records are obsolete: exactly 80% is below the strict trigger.
 	if err := db.Set(key, uint64(5)); err != nil {
 		t.Fatal(err)
 	}
@@ -194,9 +198,9 @@ func TestCompactionRecoverySchedulesWithoutWrites(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			minimum := uint64(2)
+			minimum := 2 * recordSize(len(key), 8)
 			if history != "head" {
-				minimum = 100 // Pending cleanup overrides the state-based floor.
+				minimum = 100 * recordSize(len(key), 8) // Pending cleanup overrides the state-based floor.
 			}
 			reopened, err := Open(path, WithCompactionThreshold(0.2, minimum))
 			if err != nil {
@@ -297,7 +301,7 @@ func TestCompactionQueueCoalesces(t *testing.T) {
 }
 
 func TestStateCompactionConcurrentUpdatesAndClose(t *testing.T) {
-	db := newInternalDB(t, WithCompactionThreshold(0.2, 8))
+	db := newInternalDB(t, WithCompactionThreshold(0.2, 256))
 	const shards, workers, updates = 4, 4, 100
 	keys := make([][]byte, shards)
 	var wg sync.WaitGroup

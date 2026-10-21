@@ -61,6 +61,7 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	size, name := log.size, log.headFile.Name()
+	beforeBytes := log.recordBytes
 	if err := log.headFile.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +75,9 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 	}
 	if log.size != size || log.writeErr != nil {
 		t.Fatal("zero-progress failure changed the size or blocked future writes")
+	}
+	if log.recordBytes != beforeBytes || log.segmentBytes[log.headSegment] != beforeBytes {
+		t.Fatal("zero-progress failure changed byte accounting")
 	}
 	if err := log.headFile.Close(); err != nil {
 		t.Fatal(err)

@@ -41,14 +41,15 @@ type Options struct {
 type Option func(*Options)
 
 // WithCompactionThreshold configures state-based background compaction in Open.
-// A shard is queued after a mutation when its obsolete-record fraction exceeds
-// ratio and it has at least minObsoleteRecords obsolete records. Defaults are
-// 0.2 and 8192. ratio must be finite and in [0, 1); a zero minimum is allowed.
+// A shard is queued after a mutation when its obsolete-byte fraction exceeds
+// ratio and it has at least minObsoleteBytes obsolete bytes. Bytes include record
+// headers, keys, and values. Defaults are 0.33 and 1 MiB per shard.
+// ratio must be finite and in [0, 1); a zero minimum is allowed.
 // Expiration sweeps use ratio without the minimum; unfinished passes always
 // retry. This option has no effect when passed to Set.
-func WithCompactionThreshold(ratio float64, minObsoleteRecords uint64) Option {
+func WithCompactionThreshold(ratio float64, minObsoleteBytes uint64) Option {
 	return func(o *Options) {
-		o.compaction = compactionThreshold{ratio, minObsoleteRecords}
+		o.compaction = compactionThreshold{ratio, minObsoleteBytes}
 	}
 }
 
@@ -308,7 +309,11 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 	} else if scalarBytes(ty, payload) == raw {
 		return nil
 	}
-	return s.appendSet(ty, key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration))
+	previousSize := len(previous)
+	if !byteValue {
+		previousSize = raw.size
+	}
+	return s.appendSet(ty, key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(key), previousSize)))
 }
 
 // Delete removes key. Deleting a missing key succeeds.

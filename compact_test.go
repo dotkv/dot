@@ -19,28 +19,41 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 	t.Helper()
 	refs := make(map[uint64]uint32)
 	entries := 0
+	addresses := make(map[uint64]bool)
 	for _, slot := range s.index.slots {
 		if !empty(slot) {
 			refs[slot&segmentMask>>26]++
 			entries++
+			addresses[slot&addressMask] = true
 		}
 	}
 	if entries != s.index.entryCount {
 		t.Fatalf("index entries=%d, entryCount=%d", entries, s.index.entryCount)
 	}
-	var total uint64
+	var total, totalBytes, liveBytes uint64
 	for seg, count := range s.log.segmentRecordCounts {
 		total += uint64(count)
 		data, err := os.ReadFile(s.log.segmentPath(seg))
 		if err != nil {
 			t.Fatal(err)
 		}
+		if s.log.segmentBytes[seg] != uint64(len(data)) {
+			t.Fatalf("segment %d bytes=%d, want %d", seg, s.log.segmentBytes[seg], len(data))
+		}
+		totalBytes += uint64(len(data))
 		var records uint32
 		for off := 0; off < len(data); records++ {
 			if len(data)-off < logHeaderSize {
 				t.Fatalf("segment %d has incomplete header at %d", seg, off)
 			}
 			size := logHeaderSize + int(binary.BigEndian.Uint32(data[off+5:])) + int(binary.BigEndian.Uint32(data[off+9:]))
+			if addresses[seg<<26|uint64(off)] {
+				if exp, ok := s.index.expirations[seg<<26|uint64(off)]; ok && exp.recordBytes != uint64(size) {
+					t.Fatalf("expiration bytes=%d, want %d", exp.recordBytes, size)
+				}
+				liveBytes += uint64(size)
+				delete(addresses, seg<<26|uint64(off))
+			}
 			off += size
 			if off > len(data) {
 				t.Fatalf("segment %d has incomplete payload", seg)
@@ -53,6 +66,12 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 	}
 	if s.log.recordCount != total {
 		t.Fatalf("total records=%d, want %d", s.log.recordCount, total)
+	}
+	if s.log.recordBytes != totalBytes || s.index.liveBytes != liveBytes {
+		t.Fatalf("byte accounting: total=%d/%d live=%d/%d", s.log.recordBytes, totalBytes, s.index.liveBytes, liveBytes)
+	}
+	if len(s.log.segmentBytes) != len(s.log.segmentRecordCounts) || len(addresses) != 0 {
+		t.Fatal("byte accounting references missing records or segments")
 	}
 	if len(refs) != 0 {
 		t.Fatalf("index references missing segments: %v", refs)
@@ -396,7 +415,7 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 }
 
 func TestCompactionFillsAndSealsOutputs(t *testing.T) {
-	db := newInternalDB(t)
+	db := newInternalDB(t, WithCompactionThreshold(0, 0))
 	stopTestMaintenance(db)
 	s := &db.shards[0]
 	keys := keysForShard(db, s, "large", 6)

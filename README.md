@@ -54,24 +54,35 @@ the database is reopened. Successful writes are not synced individually.
 
 ## Compaction
 
-Successful mutations queue background compaction when a shard has more than
-20% obsolete records and at least 8,192 obsolete records. A single worker serves
-a bounded queue with at most one queued request per shard. Checks use incremental
-record counts, without scanning segments or adding reads to the write path.
-Compaction holds one shard's exclusive lock for its pass; other shards can
+Successful mutations queue background compaction when more than 33% of a shard's
+encoded log bytes are obsolete and at least 1 MiB is obsolete. A single worker
+serves a bounded queue with at most one queued request per shard. Checks use
+incremental byte counters, without scanning segments or adding reads to the write
+path. Compaction holds one shard's exclusive lock for its pass; other shards can
 continue serving requests.
 
-Pass `WithCompactionThreshold(ratio, minObsoleteRecords)` to `Open` to configure
-the state trigger. For example, `WithCompactionThreshold(0.3, 4096)` requires more
-than 30% obsolete records and at least 4,096 obsolete records in that shard.
-The ratio must be finite and in `[0, 1)`; a zero minimum is allowed. Thresholds
-count records, not bytes, so retained disk space also depends on record sizes.
+Pass `WithCompactionThreshold(ratio, minObsoleteBytes)` to `Open` to configure the
+state trigger. For example, `WithCompactionThreshold(0.4, 1<<20)` requires more
+than 40% obsolete bytes and at least 1 MiB of obsolete data in that shard. The
+second argument is **bytes**, replacing the previous record-count unit. The ratio
+must be finite and in `[0, 1)`; a zero minimum is allowed. The option has no effect
+when passed to `Set`.
+
+Both thresholds count complete encoded records: the 21-byte header, key, and
+value. Obsolete bytes are total retained record bytes minus bytes referenced by
+the index. Deletes count toward retained history until compaction removes them.
+Expired records become obsolete when pruned from the index. Counters are rebuilt
+from existing logs during recovery; the log format and eight-byte index slots do
+not change.
+
 A larger minimum trades more retained history for fewer compaction passes and
-sync operations. The option has no effect when passed to `Set`.
+sync operations. The minimum applies per shard: 1 MiB across 64 shards amounts
+to roughly 64 MiB of possible obsolete history before considering the ratio,
+queued work, and live data. This is a scheduling threshold, not a disk-space cap.
 
 Every ten seconds, the worker also checks shards with tracked expirations or
 pending cleanup. It prunes expired index entries, then applies the configured
-obsolete ratio without the state trigger's minimum record count. Other shards
+obsolete-byte ratio without the state trigger's minimum byte count. Other shards
 are skipped. Failed passes wait for this ticker to retry, including when pruning
 removed the last expiration entry. Recovery queues eligible history, already
 expired records, and unfinished packing without waiting for another write.
