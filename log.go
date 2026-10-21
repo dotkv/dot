@@ -25,10 +25,12 @@ const (
 )
 
 type Log struct {
-	path        string
-	headFile    *os.File
-	headSegment uint64
-	size        uint64
+	path           string
+	headFile       *os.File
+	headSegment    uint64
+	size           uint64
+	segmentRecords map[uint64]uint32
+
 	// A failed rollback blocks further appends until the log is reopened.
 	writeErr error
 	// Writes and their index lookups share this buffer under the shard's
@@ -64,6 +66,7 @@ func newLog(name string, idx *Index) (*Log, error) {
 		segments = append(segments, seg)
 	}
 	slices.Sort(segments)
+	l.segmentRecords = make(map[uint64]uint32, len(segments))
 	var head uint64
 	for i, seg := range segments {
 		if err := l.replaySegment(idx, seg, i == len(segments)-1); err != nil {
@@ -151,6 +154,7 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		if err := idx.replay(l, ty, key, xxhash.Sum64(key), seg<<26|off, expiration); err != nil {
 			return fmt.Errorf("index record at offset %d: %w", off, err)
 		}
+		l.segmentRecords[seg]++
 		off += logHeaderSize + keylen + vallen
 	}
 	return nil
@@ -274,6 +278,7 @@ func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, 
 		return 0, 0, err
 	}
 	l.size = off + uint64(n)
+	l.segmentRecords[l.headSegment]++
 	return segment, off, nil
 }
 

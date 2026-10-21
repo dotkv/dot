@@ -43,7 +43,10 @@ read-heavy, mixed, and write-heavy workloads, using 8-byte scalars and 1 KiB
 values with 16 workers by default. It reports latency, throughput, RSS, and disk
 usage. Its dependencies live in a separate module.
 
-Root benchmarks include serial, unchanged, and parallel `uint64` updates:
+Root benchmarks include serial, unchanged, and parallel `uint64` updates.
+Their primitive fixtures stop background maintenance to isolate foreground work
+and keep direct file/index resets deterministic. The engine comparison suite
+uses the normal database lifecycle with background maintenance enabled.
 
 ```sh
 go test -run '^$' -bench '^BenchmarkUpdateUint64' -benchmem

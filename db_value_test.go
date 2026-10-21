@@ -184,6 +184,9 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 	for _, fingerprintMatch := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fingerprint-match=%t", fingerprintMatch), func(t *testing.T) {
 			db := newInternalDB(t)
+			// The synthetic entry uses the missing key's hash, not the decoy's.
+			db.backgroundCancel()
+			db.backgroundWG.Wait()
 			key := []byte("missing")
 			s, hash := db.shard(key)
 			segment, off, err := s.log.write('s', []byte("decoy"), []byte{1}, 0)
@@ -240,10 +243,9 @@ func TestDBGetScalarRecordSizes(t *testing.T) {
 }
 
 func TestIndexFindScalarCollisions(t *testing.T) {
-	db := newInternalDB(t)
-	s := &db.shards[0]
+	log, idx := openRecoveryLog(t, t.TempDir())
 	const hash = uint64(0x123456789abcdef)
-	home := int(hash & uint64(len(s.index.slots)-1))
+	home := int(hash & uint64(len(idx.slots)-1))
 	for _, entry := range []struct{ key, value []byte }{
 		{[]byte("decoy"), nil},
 		{bytes.Repeat([]byte{'k'}, 144), []byte{1}},
@@ -251,18 +253,18 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		{bytes.Repeat([]byte{'k'}, 1100), []byte{2}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := s.log.write('s', entry.key, entry.value, 0)
+		segment, off, err := log.write('s', entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.index.insert(home, hashtag(hash)|segment<<26|off)
+		idx.insert(home, hashtag(hash)|segment<<26|off)
 	}
 	for _, tc := range []struct {
 		key   string
 		want  scalarValue
 		found bool
 	}{{"target", scalarValue{bits: 42, size: 8}, true}, {"missing", scalarValue{}, false}} {
-		pos, got, _, err := s.index.findScalar(s.log, []byte(tc.key), hash)
+		pos, got, _, err := idx.findScalar(log, []byte(tc.key), hash)
 		if err != nil || (pos >= 0) != tc.found || got != tc.want {
 			t.Fatalf("key %q: position %d, got %v, want %v, error %v", tc.key, pos, got, tc.want, err)
 		}

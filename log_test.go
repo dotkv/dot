@@ -48,7 +48,7 @@ func TestLogCRCCompatibility(t *testing.T) {
 }
 
 func TestLogBufferedWrites(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	key := []byte("key")
 	records := []struct {
 		ty         byte
@@ -94,7 +94,7 @@ func TestLogBufferedWrites(t *testing.T) {
 }
 
 func TestLogReadRejectsCorruption(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	key, value := []byte("key"), []byte("value")
 	if _, _, err := log.write('s', key, value, 42); err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 }
 
 func TestLogBufferedReads(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	for _, size := range []int{0, 144, logWriteBufferSize - 1, logWriteBufferSize, logWriteBufferSize + 1, 64 << 10, 144} {
 		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, min(16, size))
@@ -160,7 +160,7 @@ func padLog(t *testing.T, log *Log, size uint64) {
 func TestLogSealingBoundary(t *testing.T) {
 	for _, extra := range []uint64{0, 1} {
 		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
-			log := newInternalDB(t).shards[0].log
+			log, _ := openRecoveryLog(t, t.TempDir())
 			key, value := []byte("boundary"), []byte("value spanning the boundary")
 			offset := logSegmentSize - uint64(logHeaderSize+len(key)+len(value)) + extra
 			padLog(t, log, offset)
@@ -374,7 +374,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 }
 
 func TestLogSealedReadsCloseFiles(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	if _, _, err := log.write('s', []byte("old"), []byte("value"), 0); err != nil {
 		t.Fatal(err)
 	}

@@ -2,10 +2,12 @@ package dot
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -20,9 +22,12 @@ const (
 var ErrNotFound = errors.New("key not found")
 
 type DB struct {
-	path       string
-	expiration int64
-	shards     [shardCount]Shard
+	path             string
+	expiration       int64
+	shards           [shardCount]Shard
+	backgroundTicker *time.Ticker
+	backgroundCancel context.CancelFunc
+	backgroundWG     sync.WaitGroup
 }
 
 // Options configures database and key operations.
@@ -61,7 +66,11 @@ func Open(path string, opts ...Option) (*DB, error) {
 			opt(&options)
 		}
 	}
-	db := &DB{path: path, expiration: options.expiration}
+	ctx, cancel := context.WithCancel(context.Background())
+	db := &DB{path: path,
+		expiration:       options.expiration,
+		backgroundCancel: cancel,
+	}
 	for i := range db.shards {
 		var err error
 		db.shards[i].index, err = newIndex()
@@ -73,7 +82,43 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
+	db.backgroundTicker = time.NewTicker(time.Second * 10)
+	db.backgroundWG.Go(func() {
+		db.background(ctx)
+	})
 	return db, nil
+}
+
+func (db *DB) background(ctx context.Context) {
+	defer db.backgroundTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-db.backgroundTicker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			db.compact()
+		}
+	}
+}
+
+func (db *DB) compact() {
+	// TODO: keep log.segmentRecords updated!
+	for i := range db.shards {
+		db.shards[i].lock.Lock()
+		live := db.shards[i].index.population
+		var total int
+		for _, pop := range db.shards[i].log.segmentRecords {
+			total += int(pop)
+		}
+		dead := total - live
+		if total > 0 && dead > total/5 { // > 20% dead
+			fmt.Printf("start compaction.log for shard %d, or continue it\n", i)
+		}
+		db.shards[i].lock.Unlock()
+	}
 }
 
 func (db *DB) shard(key []byte) (*Shard, uint64) {
@@ -251,6 +296,8 @@ func (db *DB) Destroy() error {
 }
 
 func (db *DB) close(removeFiles bool) error {
+	db.backgroundCancel()
+	db.backgroundWG.Wait()
 	// Lock in directory order to wait for in-flight operations on every shard.
 	for i := range db.shards {
 		db.shards[i].lock.Lock()

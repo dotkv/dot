@@ -33,6 +33,9 @@ func TestDBMappingFailure(t *testing.T) {
 
 	// Warm constructor/cleanup paths before forbidding new OS mappings.
 	db := newInternalDB(t)
+	// The worker can allocate lazily; stop it before restricting address space.
+	db.backgroundCancel()
+	db.backgroundWG.Wait()
 	if mode == "new" {
 		path := t.TempDir()
 		marker := filepath.Join(path, "preserve")

@@ -23,6 +23,10 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 	// Callers must start the timer after setup, even when using b.Loop.
 	b.StopTimer()
 	db := newInternalDB(b)
+	// Primitive benchmarks reset files and index state directly. Keep background
+	// maintenance out of these fixtures and their foreground measurements.
+	db.backgroundCancel()
+	db.backgroundWG.Wait()
 	f := &primitiveFixture{db: db}
 	for i := range f.keys {
 		binary.LittleEndian.PutUint64(f.keys[i][:], uint64(i))
@@ -49,6 +53,7 @@ func (f *primitiveFixture) resetValue[T Value](b *testing.B, populated bool, val
 			b.Fatal(err)
 		}
 		s.log.size = 0
+		clear(s.log.segmentRecords)
 		clear(s.index.slots)
 		s.index.population = 0
 		clear(s.index.expirations)
@@ -132,6 +137,7 @@ func BenchmarkOpen(b *testing.B) {
 	if err := f.db.Close(); err != nil {
 		b.Fatal(err)
 	}
+	// Leave the timer stopped between samples while validating and closing.
 	for b.Loop() {
 		b.StartTimer()
 		db, err := Open(f.db.path)
@@ -139,6 +145,9 @@ func BenchmarkOpen(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// Preserve the retained history while validating and reusing this fixture.
+		db.backgroundCancel()
+		db.backgroundWG.Wait()
 		for j := range benchmarkKeyCount {
 			want := f.value
 			if versions[j] != 0 {
