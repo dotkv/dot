@@ -125,7 +125,7 @@ func TestDBRecovery(t *testing.T) {
 			wantErr = ErrNotFound
 		}
 		_, hash := db.shard(key)
-		pos, _, expiration, err := s.index.findPayload(s.log, key, hash, nil)
+		pos, _, _, expiration, err := s.index.findPayload(s.log, key, hash, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestDBRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, hash := db.shard(keys[0])
-	pos, _, _, err := s.index.findPayload(s.log, keys[0], hash, nil)
+	pos, _, _, _, err := s.index.findPayload(s.log, keys[0], hash, nil)
 	if err != nil || pos < 0 || s.index.slots[pos]&addressMask != 2<<26|size {
 		t.Fatalf("append did not use recovered offset %d: position=%d error=%v", size, pos, err)
 	}

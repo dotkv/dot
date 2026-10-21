@@ -14,6 +14,7 @@ import (
 // Get returns caller-owned bytes. Scalar operations return the decoded value
 // without allocating an intermediate result. New contenders implement this
 // interface and add an opener to engines; the workload driver stays unchanged.
+// Each workload uses one value type per key; cross-type reads are engine-specific.
 type engine interface {
 	Set([]byte, []byte) error
 	Get([]byte) ([]byte, bool, error)

@@ -58,7 +58,7 @@ func TestDBShards(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Every shard has its own segment zero, even at identical offsets.
-			k, v, _, err := s.log.readPayload(0, off, nil)
+			k, v, _, _, err := s.log.readPayload(0, off, nil)
 			if err != nil || !bytes.Equal(k, key) || !bytes.Equal(v, value) {
 				t.Fatalf("shard %d log: key=%q value=%q error=%v", i, k, v, err)
 			}

@@ -37,16 +37,16 @@ go build -o dot-bench .
 Ratios are **reads/writes**. The only workloads are **80/20** and **20/80**.
 Writes are equal shares of inserts, updates, and deletes.
 
-| Setting | Default |
-| --- | --- |
-| Engines | `dot,pebble,map` |
-| Read/write ratios | `80/20,20/80` |
-| Value sizes | 8 B scalars, 1,024 B byte slices |
-| Workers | 16 |
-| Initial live keys | 16,384 |
-| Untimed warmup operations | 30,000 |
-| Seed | 1 |
-| Dot time target | 3 seconds |
+| Setting                   | Default                          |
+| ------------------------- | -------------------------------- |
+| Engines                   | `dot,pebble,map`                 |
+| Read/write ratios         | `80/20,20/80`                    |
+| Value sizes               | 8 B scalars, 1,024 B byte slices |
+| Workers                   | 16                               |
+| Initial live keys         | 16,384                           |
+| Untimed warmup operations | 30,000                           |
+| Seed                      | 1                                |
+| Dot time target           | 3 seconds                        |
 
 This gives **12 cases** across four configurations before repetitions. Use
 `-engines`, `-workloads`, `-sizes`, and `-workers` to select a subset or override
@@ -82,7 +82,60 @@ process, including preparation and drain, to 10 minutes by default.
 
 <!-- benchmark-results:start -->
 
-Results will be regenerated for the current matrix.
+Completed cases: **12**, covering **4 configurations**.
+
+Configuration: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**. Operation budgets are fixed per configuration and shared across engines and repetitions.
+
+Dot and Pebble use normal automatic compaction; budgets estimated from a short Dot probe targeting **3s for Dot**. The Go map is in memory with no persistence.
+
+Environment: go1.27.2, linux/amd64, 16 logical CPUs, GOMAXPROCS=16.
+
+CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics.
+
+Pebble: `v2.1.7`. Eight-byte scalar cases use `uint64` in Dot and equivalent little-endian encoding/decoding in the other adapters.
+
+Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.
+
+### 80/20 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **11,991,600**. Ratios are reads/writes.
+
+| Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot                |    1 |   3.953 |     5.124 |   41.471 |          3,033,391 |           64.4 |      13.31 |
+| Go map (in memory) |    1 |   1.762 |     2.252 |    1.695 |          6,803,910 |           34.7 |       0.00 |
+| Pebble             |    1 |   6.140 |     7.947 |  133.119 |          1,953,018 |           45.2 |      18.16 |
+
+### 80/20 · 1,024 B values · 16 workers
+
+Measured operations per engine: **6,008,400**. Ratios are reads/writes.
+
+| Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot                |    1 |   2.957 |     7.672 |   84.479 |          2,031,842 |           69.0 |     846.04 |
+| Go map (in memory) |    1 |   2.262 |     5.852 |    6.655 |          2,656,734 |           69.1 |       0.00 |
+| Pebble             |    1 |  22.434 |    59.360 |  358.399 |            267,820 |           49.9 |      35.50 |
+
+### 20/80 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **4,878,192**. Ratios are reads/writes.
+
+| Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot                |    1 |   3.788 |    12.222 |   72.191 |          1,287,915 |           64.5 |      74.63 |
+| Go map (in memory) |    1 |   0.905 |     2.852 |    1.735 |          5,391,484 |           33.9 |       0.00 |
+| Pebble             |    1 |   2.563 |     8.234 |   68.095 |          1,903,109 |           45.5 |      18.16 |
+
+### 20/80 · 1,024 B values · 16 workers
+
+Measured operations per engine: **3,159,504**. Ratios are reads/writes.
+
+| Implementation     | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| ------------------ | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot                |    1 |   4.044 |    20.258 |   90.111 |            781,360 |           66.6 |     327.21 |
+| Go map (in memory) |    1 |   1.067 |     5.209 |    2.255 |          2,961,824 |           69.6 |       0.00 |
+| Pebble             |    1 |  26.167 |   131.663 |  387.071 |            120,744 |           52.2 |      39.90 |
+
 
 <!-- benchmark-results:end -->
 

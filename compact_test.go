@@ -213,8 +213,8 @@ func TestCompactionConcurrentUpdates(t *testing.T) {
 func TestCompactionDoesNotReuseDeleteBeforeOlderHistory(t *testing.T) {
 	path := t.TempDir()
 	key := []byte("deleted")
-	writeRecoverySegment(t, path, 0, recoveryRecord('s', key, []byte("old"), 0))
-	writeRecoverySegment(t, path, 1, recoveryRecord('d', key, nil, 0))
+	writeRecoverySegment(t, path, 0, recoveryRecord(typeBytes, key, []byte("old"), 0))
+	writeRecoverySegment(t, path, 1, recoveryRecord(typeDelete, key, nil, 0))
 	writeRecoverySegment(t, path, 2, nil)
 	log, idx := openRecoveryLog(t, path)
 	s := &Shard{log: log, index: idx}
@@ -239,8 +239,8 @@ func TestCompactionRecoveryPublicationBoundaries(t *testing.T) {
 			path := t.TempDir()
 			keep, deleted := []byte("keep"), []byte("deleted")
 			writeRecoverySegment(t, path, maxSegment,
-				append(recoveryRecord('s', keep, []byte("keep"), 0), recoveryRecord('s', deleted, []byte("old"), 0)...))
-			writeRecoverySegment(t, path, 0, recoveryRecord('d', deleted, nil, 0))
+				append(recoveryRecord(typeBytes, keep, []byte("keep"), 0), recoveryRecord(typeBytes, deleted, []byte("old"), 0)...))
+			writeRecoverySegment(t, path, 0, recoveryRecord(typeDelete, deleted, nil, 0))
 			log, idx := openRecoveryLog(t, path)
 			pos := checkRecoveredValue(t, log, idx, keep, []byte("keep"))
 			staging := log.segmentPath(maxSegment) + ".compact"

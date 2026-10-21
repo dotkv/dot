@@ -19,13 +19,13 @@ func TestCompactionResumesAfterRecovery(t *testing.T) {
 			var source, head []byte
 			switch state {
 			case "cleaned":
-				source = recoveryRecord('s', []byte("other"), []byte("value"), 0)
-				head = recoveryRecord('s', key, []byte("new"), 0)
+				source = recoveryRecord(typeBytes, []byte("other"), []byte("value"), 0)
+				head = recoveryRecord(typeBytes, key, []byte("new"), 0)
 			case "drained":
-				head = recoveryRecord('s', key, []byte("new"), 0)
+				head = recoveryRecord(typeBytes, key, []byte("new"), 0)
 			case "unreferenced":
-				source = recoveryRecord('s', key, []byte("old"), 0)
-				head = recoveryRecord('s', key, []byte("new"), 0)
+				source = recoveryRecord(typeBytes, key, []byte("old"), 0)
+				head = recoveryRecord(typeBytes, key, []byte("new"), 0)
 			}
 			writeRecoverySegment(t, path, maxSegment, source)
 			writeRecoverySegment(t, path, 0, head)
@@ -73,13 +73,13 @@ func TestCompactionRetriesBelowThreshold(t *testing.T) {
 	path := t.TempDir()
 	var source []byte
 	for i := range 10 {
-		source = append(source, recoveryRecord('s', []byte("keep"), fmt.Appendf(nil, "version-%d", i), 0)...)
+		source = append(source, recoveryRecord(typeBytes, []byte("keep"), fmt.Appendf(nil, "version-%d", i), 0)...)
 	}
 	for i := range 5 {
-		source = append(source, recoveryRecord('s', fmt.Appendf(nil, "other-%d", i), []byte("value"), 0)...)
+		source = append(source, recoveryRecord(typeBytes, fmt.Appendf(nil, "other-%d", i), []byte("value"), 0)...)
 	}
 	writeRecoverySegment(t, path, 0, source)
-	head := append(recoveryRecord('s', []byte("head"), []byte("old"), 0), recoveryRecord('s', []byte("head"), []byte("new"), 0)...)
+	head := append(recoveryRecord(typeBytes, []byte("head"), []byte("old"), 0), recoveryRecord(typeBytes, []byte("head"), []byte("new"), 0)...)
 	writeRecoverySegment(t, path, 1, head)
 	log, idx := openRecoveryLog(t, path)
 	blocker := log.segmentPath(1) + ".compact"
@@ -111,13 +111,13 @@ func TestCompactionRetriesBelowThreshold(t *testing.T) {
 func TestCompactionResumesPackedFullSource(t *testing.T) {
 	path := t.TempDir()
 	large := bytes.Repeat([]byte{'x'}, logSegmentSize/2)
-	source := append(recoveryRecord('s', []byte("a"), large, 0), recoveryRecord('s', []byte("b"), large, 0)...)
+	source := append(recoveryRecord(typeBytes, []byte("a"), large, 0), recoveryRecord(typeBytes, []byte("b"), large, 0)...)
 	writeRecoverySegment(t, path, 0, source)
 	// The head has a copy of a, but its full source has not been retired. Only
 	// one of seven records is obsolete, so the ordinary 20% trigger would skip it.
-	head := recoveryRecord('s', []byte("a"), large, 0)
+	head := recoveryRecord(typeBytes, []byte("a"), large, 0)
 	for i := range 4 {
-		head = append(head, recoveryRecord('s', fmt.Appendf(nil, "small-%d", i), []byte("value"), 0)...)
+		head = append(head, recoveryRecord(typeBytes, fmt.Appendf(nil, "small-%d", i), []byte("value"), 0)...)
 	}
 	writeRecoverySegment(t, path, 1, head)
 	log, idx := openRecoveryLog(t, path)
@@ -138,7 +138,7 @@ func TestCompactionStaleStaging(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			path := t.TempDir()
 			key := []byte("key")
-			data := append(recoveryRecord('s', key, []byte("old"), 0), recoveryRecord('s', key, []byte("new"), 0)...)
+			data := append(recoveryRecord(typeBytes, key, []byte("old"), 0), recoveryRecord(typeBytes, key, []byte("new"), 0)...)
 			original := writeRecoverySegment(t, path, 0, data)
 			log, idx := openRecoveryLog(t, path)
 			staging := original + ".compact"
@@ -175,12 +175,12 @@ func TestCompactionExpirationAddressReuse(t *testing.T) {
 	path := t.TempDir()
 	x, a, b, dead := []byte("xxxx"), []byte("aaaa"), []byte("bbbb"), []byte("dead")
 	future := time.Now().Add(time.Hour).UnixNano()
-	writeRecoverySegment(t, path, 0, recoveryRecord('s', x, x, future+3))
+	writeRecoverySegment(t, path, 0, recoveryRecord(typeBytes, x, x, future+3))
 	var data []byte
-	data = append(data, recoveryRecord('s', dead, []byte("gone"), 0)...)
-	data = append(data, recoveryRecord('s', a, a, future+1)...)
-	data = append(data, recoveryRecord('s', b, b, future+2)...)
-	data = append(data, recoveryRecord('d', dead, nil, 0)...)
+	data = append(data, recoveryRecord(typeBytes, dead, []byte("gone"), 0)...)
+	data = append(data, recoveryRecord(typeBytes, a, a, future+1)...)
+	data = append(data, recoveryRecord(typeBytes, b, b, future+2)...)
+	data = append(data, recoveryRecord(typeDelete, dead, nil, 0)...)
 	writeRecoverySegment(t, path, 1, data)
 	log, idx := openRecoveryLog(t, path)
 	pa := checkRecoveredValue(t, log, idx, a, a)
@@ -272,7 +272,7 @@ func TestCompactionPublicationFailures(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			path := t.TempDir()
 			key := []byte("key")
-			data := append(recoveryRecord('s', key, []byte("old"), 0), recoveryRecord('s', key, []byte("new"), 0)...)
+			data := append(recoveryRecord(typeBytes, key, []byte("old"), 0), recoveryRecord(typeBytes, key, []byte("new"), 0)...)
 			seg := uint64(0)
 			writeRecoverySegment(t, path, seg, data)
 			if failure == "directory-sync" {
@@ -318,7 +318,7 @@ func TestCompactionPublicationFailures(t *testing.T) {
 				if log.writeErr == nil || idx.slots[pos]&addressMask == oldAddress {
 					t.Fatal("published replacement did not update the index and block writes")
 				}
-				if _, _, err := log.write('s', key, []byte("blocked"), 0); err != log.writeErr {
+				if _, _, err := log.write(typeBytes, key, []byte("blocked"), 0); err != log.writeErr {
 					t.Fatalf("subsequent write was not blocked: %v", err)
 				}
 			}
@@ -337,7 +337,7 @@ func TestCompactionRemovalFailure(t *testing.T) {
 	path := t.TempDir()
 	key := []byte("key")
 	for i, seg := range []uint64{maxSegment - 1, maxSegment, 0} {
-		writeRecoverySegment(t, path, seg, recoveryRecord('s', key, fmt.Appendf(nil, "version-%d", i), 0))
+		writeRecoverySegment(t, path, seg, recoveryRecord(typeBytes, key, fmt.Appendf(nil, "version-%d", i), 0))
 	}
 	log, idx := openRecoveryLog(t, path)
 	if err := log.headFile.Sync(); err != nil {

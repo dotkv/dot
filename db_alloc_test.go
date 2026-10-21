@@ -69,7 +69,7 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 					if hit && i == 2 {
 						candidate, candidateValue = key, value
 					}
-					segment, off, err := log.write('s', candidate, candidateValue, 0)
+					segment, off, err := log.write(typeBytes, candidate, candidateValue, 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -82,7 +82,7 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 						wantAllocs = 0
 					}
 					allocations := testing.AllocsPerRun(100, func() {
-						pos, got, _, err := idx.findPayload(log, key, hash, buf)
+						pos, got, _, _, err := idx.findPayload(log, key, hash, buf)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -121,20 +121,21 @@ func checkScalarAllocations[T interface {
 
 func TestDBGetScalarAllocations(t *testing.T) {
 	db := newInternalDB(t)
-	key, boolKey := []byte("scalar"), []byte("bool")
-	if err := db.Set(key, []byte{42, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+	intKey, uintKey, floatKey, boolKey := []byte("int"), []byte("uint"), []byte("float"), []byte("bool")
+	if err := db.Set(intKey, int64(42)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Set(boolKey, []byte{1}); err != nil {
+	if err := db.Set(uintKey, uint64(42)); err != nil {
 		t.Fatal(err)
 	}
-	checkScalarAllocations(t, db, key, int64(42))
-	checkScalarAllocations(t, db, key, uint64(42))
-	// Eight zero bytes encode float64 zero, avoiding any conversion in the loop.
-	floatKey := []byte("float")
-	if err := db.Set(floatKey, make([]byte, 8)); err != nil {
+	if err := db.Set(floatKey, float64(0)); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Set(boolKey, true); err != nil {
+		t.Fatal(err)
+	}
+	checkScalarAllocations(t, db, intKey, int64(42))
+	checkScalarAllocations(t, db, uintKey, uint64(42))
 	checkScalarAllocations(t, db, floatKey, float64(0))
 	checkScalarAllocations(t, db, boolKey, true)
 }
@@ -148,7 +149,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 		{bytes.Repeat([]byte{'k'}, 144), []byte{1}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := log.write('s', entry.key, entry.value, 0)
+		segment, off, err := log.write(typeBytes, entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +159,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 		key := []byte("missing")
 		var want scalarValue
 		if hit {
-			key, want = []byte("target"), scalarValue{bits: 42, size: 8}
+			key, want = []byte("target"), scalarValue{bits: 42, size: 8, ty: typeBytes}
 		}
 		allocations := testing.AllocsPerRun(100, func() {
 			pos, got, _, err := idx.findScalar(log, key, hash)

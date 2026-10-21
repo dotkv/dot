@@ -22,11 +22,11 @@ type Shard struct {
 
 // appendSet requires the shard's exclusive lock. Commit only after the append
 // succeeds, using its actual address because writing may rotate the log.
-func (s *Shard) appendSet(key, value []byte, change indexChange) error {
+func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange) error {
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	segment, off, err := s.log.write('s', key, value, change.expiration)
+	segment, off, err := s.log.write(ty, key, value, change.expiration)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
@@ -42,7 +42,7 @@ type compactionThreshold struct {
 }
 
 func defaultCompactionThreshold() compactionThreshold {
-	return compactionThreshold{ratio: 0.2, minObsoleteRecords: 8192}
+	return compactionThreshold{ratio: 0.33, minObsoleteRecords: 1 << 15}
 }
 
 func (s *Shard) threshold() compactionThreshold {

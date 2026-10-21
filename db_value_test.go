@@ -29,29 +29,19 @@ func TestDBGetScalarEncodings(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("scalar")
 	for _, value := range []int64{0, 42, -42, math.MinInt64, math.MaxInt64} {
-		var encoded [8]byte
-		binary.LittleEndian.PutUint64(encoded[:], uint64(value))
-		if err := db.Set(key, encoded[:]); err != nil {
+		if err := db.Set(key, value); err != nil {
 			t.Fatal(err)
 		}
 		checkScalarGet(t, db, key, value, nil)
-		// The raw bytes stay interoperable with the typed decoder.
-		if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, encoded[:]) {
-			t.Fatalf("raw value: %x, error %v", got, err)
-		}
 	}
 	for _, value := range []uint64{0, 42, math.MaxInt64 + 1, math.MaxUint64} {
-		var encoded [8]byte
-		binary.LittleEndian.PutUint64(encoded[:], value)
-		if err := db.Set(key, encoded[:]); err != nil {
+		if err := db.Set(key, value); err != nil {
 			t.Fatal(err)
 		}
 		checkScalarGet(t, db, key, value, nil)
 	}
 	for _, bits := range []uint64{0, 1 << 63, 0x3ff8000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042} {
-		var encoded [8]byte
-		binary.LittleEndian.PutUint64(encoded[:], bits)
-		if err := db.Set(key, encoded[:]); err != nil {
+		if err := db.Set(key, math.Float64frombits(bits)); err != nil {
 			t.Fatal(err)
 		}
 		value, err := db.Get[float64](key)
@@ -59,11 +49,11 @@ func TestDBGetScalarEncodings(t *testing.T) {
 			t.Fatalf("float64 bits: got %x, want %x, error %v", math.Float64bits(value), bits, err)
 		}
 	}
-	for _, value := range []byte{0, 1} {
-		if err := db.Set(key, []byte{value}); err != nil {
+	for _, value := range []bool{false, true} {
+		if err := db.Set(key, value); err != nil {
 			t.Fatal(err)
 		}
-		checkScalarGet(t, db, key, value == 1, nil)
+		checkScalarGet(t, db, key, value, nil)
 	}
 }
 
@@ -72,11 +62,11 @@ func checkScalarSet[T Value](t *testing.T, db *DB, key []byte, value T, encoded 
 	if err := db.Set(key, value); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.Get[[]byte](key)
-	if err != nil || !bytes.Equal(got, encoded) {
+	s, hash := db.shard(key)
+	pos, got, ty, _, err := s.index.findPayload(s.log, key, hash, nil)
+	if err != nil || pos < 0 || checkType[T](ty) != nil || !bytes.Equal(got, encoded) {
 		t.Fatalf("Set[%T]: bytes %x, want %x, error %v", value, got, encoded, err)
 	}
-	s, _ := db.shard(key)
 	segment, size := s.log.headSegment, s.log.size
 	if err := db.Set(key, value); err != nil {
 		t.Fatal(err)
@@ -110,9 +100,9 @@ func TestDBSetScalarEncodings(t *testing.T) {
 			t.Fatalf("float64 bits: got %x, want %x, error %v", math.Float64bits(got), bits, err)
 		}
 	}
-	checkScalarSet(t, db, key, false, []byte{0})
+	checkScalarSet(t, db, key, false, nil)
 	checkScalarGet(t, db, key, false, nil)
-	checkScalarSet(t, db, key, true, []byte{1})
+	checkScalarSet(t, db, key, true, nil)
 	checkScalarGet(t, db, key, true, nil)
 	// Explicit type arguments also allow untyped constants and nil.
 	if err := db.Set[int64](key, 42); err != nil {
@@ -189,7 +179,7 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 			db.backgroundWG.Wait()
 			key := []byte("missing")
 			s, hash := db.shard(key)
-			segment, off, err := s.log.write('s', []byte("decoy"), []byte{1}, 0)
+			segment, off, err := s.log.write(typeBytes, []byte("decoy"), []byte{1}, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -204,22 +194,22 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 	}
 }
 
-func TestDBGetInvalidScalar(t *testing.T) {
+func TestDBGetBytesRejectScalarReads(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("invalid")
 	for _, size := range []int{0, 1, 7, 9, 2048} {
 		if err := db.Set(key, make([]byte, size)); err != nil {
 			t.Fatal(err)
 		}
-		checkScalarGet(t, db, key, int64(0), ErrInvalidValue)
-		checkScalarGet(t, db, key, uint64(0), ErrInvalidValue)
-		checkScalarGet(t, db, key, float64(0), ErrInvalidValue)
+		checkScalarGet(t, db, key, int64(0), ErrTypeMismatch)
+		checkScalarGet(t, db, key, uint64(0), ErrTypeMismatch)
+		checkScalarGet(t, db, key, float64(0), ErrTypeMismatch)
 	}
 	for _, encoded := range [][]byte{nil, {0, 0}, {2}, {255}} {
 		if err := db.Set(key, encoded); err != nil {
 			t.Fatal(err)
 		}
-		checkScalarGet(t, db, key, false, ErrInvalidValue)
+		checkScalarGet(t, db, key, false, ErrTypeMismatch)
 	}
 	// An expired record reports ErrNotFound before scalar validation.
 	if err := db.Set(key, []byte("invalid-scalar"), WithExpiration(time.Now().Add(-time.Second))); err != nil {
@@ -234,7 +224,7 @@ func TestDBGetScalarRecordSizes(t *testing.T) {
 		t.Run(fmt.Sprintf("%d-byte-key", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, size)
 			// A 995-byte key puts the end of this record exactly at 1 KiB.
-			if err := db.Set(key, []byte{42, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+			if err := db.Set(key, int64(42)); err != nil {
 				t.Fatal(err)
 			}
 			checkScalarGet(t, db, key, int64(42), nil)
@@ -253,7 +243,7 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		{bytes.Repeat([]byte{'k'}, 1100), []byte{2}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := log.write('s', entry.key, entry.value, 0)
+		segment, off, err := log.write(typeBytes, entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,7 +253,7 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		key   string
 		want  scalarValue
 		found bool
-	}{{"target", scalarValue{bits: 42, size: 8}, true}, {"missing", scalarValue{}, false}} {
+	}{{"target", scalarValue{bits: 42, size: 8, ty: typeBytes}, true}, {"missing", scalarValue{}, false}} {
 		pos, got, _, err := idx.findScalar(log, []byte(tc.key), hash)
 		if err != nil || (pos >= 0) != tc.found || got != tc.want {
 			t.Fatalf("key %q: position %d, got %v, want %v, error %v", tc.key, pos, got, tc.want, err)
@@ -276,7 +266,7 @@ func TestDBGetScalarRejectsCorruption(t *testing.T) {
 		t.Run(fmt.Sprintf("%d-byte-key", size), func(t *testing.T) {
 			db := newInternalDB(t)
 			key := bytes.Repeat([]byte{'k'}, size)
-			if err := db.Set(key, []byte{42, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+			if err := db.Set(key, int64(42)); err != nil {
 				t.Fatal(err)
 			}
 			s, _ := db.shard(key)
@@ -311,13 +301,13 @@ func TestDBGetScalarSealedSegment(t *testing.T) {
 	for _, key := range [][]byte{[]byte("small"), bytes.Repeat([]byte{'k'}, 1100)} {
 		t.Run(fmt.Sprintf("%d-byte-key", len(key)), func(t *testing.T) {
 			db := newInternalDB(t)
-			if err := db.Set(key, []byte{42, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+			if err := db.Set(key, int64(42)); err != nil {
 				t.Fatal(err)
 			}
 			s, _ := db.shard(key)
 			padLog(t, s.log, logSegmentSize)
 			next := keysForShard(db, s, "next", 1)[0]
-			if err := db.Set(next, []byte{43, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+			if err := db.Set(next, int64(43)); err != nil {
 				t.Fatal(err)
 			}
 			files := openFilesUnder(t, db.path)

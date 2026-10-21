@@ -25,7 +25,7 @@ func TestLogWriteRollbackFailure(t *testing.T) {
 		readResult <- err
 	}()
 	log := Log{headFile: writer}
-	_, _, writeErr := log.write('s', []byte("key"), make([]byte, 2<<20), 0)
+	_, _, writeErr := log.write(typeBytes, []byte("key"), make([]byte, 2<<20), 0)
 	if err := <-readResult; err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestLogWriteRollbackFailure(t *testing.T) {
 	log.headFile = f
 	for _, size := range []uint64{0, logSegmentSize} {
 		log.size = size
-		if _, _, err := log.write('s', nil, nil, 0); err != writeErr {
+		if _, _, err := log.write(typeBytes, nil, nil, 0); err != writeErr {
 			t.Fatalf("subsequent write error=%v, want %v", err, writeErr)
 		}
 		if info, err := f.Stat(); err != nil || info.Size() != 0 || log.headSegment != 0 {
@@ -57,7 +57,7 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 	path := t.TempDir()
 	log, _ := openRecoveryLog(t, path)
 	key, old := []byte("key"), []byte("old")
-	if _, _, err := log.write('s', key, old, 0); err != nil {
+	if _, _, err := log.write(typeBytes, key, old, 0); err != nil {
 		t.Fatal(err)
 	}
 	size, name := log.size, log.headFile.Name()
@@ -69,7 +69,7 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := log.write('s', key, []byte("failed"), 0); err == nil {
+	if _, _, err := log.write(typeBytes, key, []byte("failed"), 0); err == nil {
 		t.Fatal("write to read-only log succeeded")
 	}
 	if log.size != size || log.writeErr != nil {
@@ -82,7 +82,7 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, off, err := log.write('s', key, []byte("new"), 0); err != nil || off != size {
+	if _, off, err := log.write(typeBytes, key, []byte("new"), 0); err != nil || off != size {
 		t.Fatalf("retry: offset=%d error=%v, want offset %d", off, err, size)
 	}
 	if err := log.headFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
@@ -93,7 +93,7 @@ func TestLogWriteFailureWithoutProgress(t *testing.T) {
 	if addr := idx.slots[pos] & addressMask; addr != size {
 		t.Fatalf("retry address=%d, want %d", addr, size)
 	}
-	if got, _, _, err := log.readPayload(0, 0, nil); err != nil || !bytes.Equal(got, key) {
+	if got, _, _, _, err := log.readPayload(0, 0, nil); err != nil || !bytes.Equal(got, key) {
 		t.Fatalf("original record damaged: key=%q error=%v", got, err)
 	}
 }

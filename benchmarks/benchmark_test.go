@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"dot"
 )
 
 func TestEngineContracts(t *testing.T) {
@@ -59,7 +62,11 @@ func TestEngineContracts(t *testing.T) {
 				t.Fatalf("scalar: got=%x found=%v err=%v", got, found, err)
 			}
 			got, found, err := db.Get(key)
-			if err != nil || !found || len(got) != 8 || binary.LittleEndian.Uint64(got) != scalar {
+			if name == "dot" {
+				if !errors.Is(err, dot.ErrTypeMismatch) || found || got != nil {
+					t.Fatalf("scalar read as bytes: %x, found=%v, err=%v", got, found, err)
+				}
+			} else if err != nil || !found || len(got) != 8 || binary.LittleEndian.Uint64(got) != scalar {
 				t.Fatalf("scalar encoding: %x, found=%v, err=%v", got, found, err)
 			}
 			if err := db.Flush(); err != nil {

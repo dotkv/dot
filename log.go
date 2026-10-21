@@ -200,12 +200,12 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		if _, err := io.ReadFull(r, header[:]); err != nil {
 			return fmt.Errorf("read header at offset %d: %w", off, err)
 		}
-		ty := header[4]
+		ty := recordType(header[4])
 		keylen := uint64(binary.BigEndian.Uint32(header[5:]))
 		vallen := uint64(binary.BigEndian.Uint32(header[9:]))
 		expiration := int64(binary.BigEndian.Uint64(header[13:]))
-		if ty != 's' && ty != 'd' || ty == 'd' && (vallen != 0 || expiration != 0) {
-			return fmt.Errorf("invalid record at offset %d", off)
+		if err := ty.validate(vallen, expiration); err != nil {
+			return fmt.Errorf("invalid record at offset %d: %w", off, err)
 		}
 		if keylen+vallen > size-off-logHeaderSize {
 			return recoverLogTail(f, off, head)
@@ -334,7 +334,7 @@ func checksumSmall(data []byte) uint32 {
 	return ^crc
 }
 
-func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
+func (l *Log) write(ty recordType, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
 	if l.writeErr != nil {
 		return 0, 0, l.writeErr
 	}
@@ -353,7 +353,10 @@ func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, 
 
 // appendRecord also serves compaction's unpublished replacement files. The
 // caller ensures the next record starts within the segment's offset range.
-func (l *Log) appendRecord(ty byte, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
+func (l *Log) appendRecord(ty recordType, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
+	if err := ty.validate(uint64(len(val)), expiration); err != nil {
+		return 0, 0, err
+	}
 	segment, off := l.headSegment, l.size
 	size := logHeaderSize + len(key) + len(val)
 	var record []byte
@@ -364,7 +367,7 @@ func (l *Log) appendRecord(ty byte, key []byte, val []byte, expiration int64) (u
 		record = make([]byte, size)
 	}
 	// [crc 4][type 1][keylen 4][vallen 4][expiration 8][key][value]
-	record[4] = ty
+	record[4] = byte(ty)
 	binary.BigEndian.PutUint32(record[5:], uint32(len(key)))
 	binary.BigEndian.PutUint32(record[9:], uint32(len(val)))
 	binary.BigEndian.PutUint64(record[13:], uint64(expiration))
@@ -396,25 +399,25 @@ func (l *Log) appendRecord(ty byte, key []byte, val []byte, expiration int64) (u
 	return segment, off, nil
 }
 
-// readPayload reads and verifies a record, returning its key, value, and
+// readPayload reads and verifies a record, returning its key, value, type, and
 // expiration. It borrows buf when the payload fits; passing nil returns owned slices.
-func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, int64, error) {
+func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, recordType, int64, error) {
 	f := l.headFile
 	if l.headSegment != seg {
 		var err error
 		f, err = l.openFile(seg, os.O_RDONLY)
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("open sealed log: %w", err)
+			return nil, nil, 0, 0, fmt.Errorf("open sealed log: %w", err)
 		}
 		defer f.Close()
 	}
 	var prefix [1 << 10]byte
 	n, err := f.ReadAt(prefix[:], int64(off))
 	if err != nil && err != io.EOF {
-		return nil, nil, 0, fmt.Errorf("read header: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("read header: %w", err)
 	}
 	if n < logHeaderSize {
-		return nil, nil, 0, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
+		return nil, nil, 0, 0, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
 	}
 	return l.readFromPrefix(f, off, prefix[:n], buf)
 }
@@ -423,7 +426,7 @@ func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, i
 // possibly some payload bytes have been read. Both read paths use it, with
 // readScalar falling back here only when the record exceeds its local buffer.
 // prefix starts at off and must contain at least the 21-byte record header.
-func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) ([]byte, []byte, int64, error) {
+func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) ([]byte, []byte, recordType, int64, error) {
 	keylen := binary.BigEndian.Uint32(prefix[5:])
 	vallen := binary.BigEndian.Uint32(prefix[9:])
 	expiration := int64(binary.BigEndian.Uint64(prefix[13:]))
@@ -439,17 +442,21 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 		if _, err := f.ReadAt(
 			buf[copied:], int64(off)+logHeaderSize+int64(copied),
 		); err != nil {
-			return nil, nil, 0, fmt.Errorf("read payload: %w", err)
+			return nil, nil, 0, 0, fmt.Errorf("read payload: %w", err)
 		}
 	}
 	if binary.BigEndian.Uint32(prefix[:]) != l.crc(prefix[:logHeaderSize], buf[:keylen], buf[keylen:]) {
-		return nil, nil, 0, fmt.Errorf("crc mismatch")
+		return nil, nil, 0, 0, fmt.Errorf("crc mismatch")
 	}
-	return buf[:keylen], buf[keylen:], expiration, nil
+	ty := recordType(prefix[4])
+	if err := ty.validate(uint64(vallen), expiration); err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return buf[:keylen], buf[keylen:], ty, expiration, nil
 }
 
 // readScalar reads and verifies a record, returning its scalar bits, byte
-// length, and expiration when the key matches. Key comparison stays here to keep
+// length, type, and expiration when the key matches. Key comparison stays here to keep
 // record bytes on the stack. DB.Get validates the scalar type and decodes the returned bits.
 func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64, bool, error) {
 	f := l.headFile
@@ -475,14 +482,14 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 	keylen := int(binary.BigEndian.Uint32(record[5:]))
 	vallen := int(binary.BigEndian.Uint32(record[9:]))
 	if keylen+vallen > len(record)-logHeaderSize {
-		storedKey, value, expiration, err := l.readFromPrefix(f, off, record[:n], nil)
+		storedKey, value, ty, expiration, err := l.readFromPrefix(f, off, record[:n], nil)
 		if err != nil {
 			return scalarValue{}, 0, false, err
 		}
 		if !bytes.Equal(storedKey, key) {
 			return scalarValue{}, 0, false, nil
 		}
-		return scalarBytes(value), expiration, true, nil
+		return scalarBytes(ty, value), expiration, true, nil
 	}
 	end := logHeaderSize + keylen + vallen
 	if n < end {
@@ -493,9 +500,13 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 	if binary.BigEndian.Uint32(record[:]) != checksumSmall(record[4:end]) {
 		return scalarValue{}, 0, false, fmt.Errorf("crc mismatch")
 	}
+	expiration := int64(binary.BigEndian.Uint64(record[13:]))
+	ty := recordType(record[4])
+	if err := ty.validate(uint64(vallen), expiration); err != nil {
+		return scalarValue{}, 0, false, err
+	}
 	if !bytes.Equal(record[logHeaderSize:logHeaderSize+keylen], key) {
 		return scalarValue{}, 0, false, nil
 	}
-	expiration := int64(binary.BigEndian.Uint64(record[13:]))
-	return scalarBytes(record[logHeaderSize+keylen : end]), expiration, true, nil
+	return scalarBytes(ty, record[logHeaderSize+keylen:end]), expiration, true, nil
 }

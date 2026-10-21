@@ -172,7 +172,8 @@ func (db *DB) shard(key []byte) (*Shard, uint64) {
 }
 
 // Set stores val using the encoding described by Value. It does not retain key
-// or val, so callers may reuse their byte slices after Set returns.
+// or val, so callers may reuse their byte slices after Set returns. Set may
+// replace an existing key with a different type.
 func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 	expiration := db.expiration
 	if len(opts) > 0 {
@@ -185,7 +186,7 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 		expiration = options.expiration
 	}
 	var encoded [8]byte
-	value, err := encodeValue(val, &encoded)
+	ty, value, err := encodeValue(val, &encoded)
 	if err != nil {
 		return err
 	}
@@ -195,15 +196,16 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareSet(s.log, key, value, hash, expiration)
+	change, err := s.index.prepareSet(s.log, ty, key, value, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
-	return s.appendSet(key, value, change)
+	return s.appendSet(ty, key, value, change)
 }
 
 // Get returns the value decoded as T. A missing key returns the zero value of T
-// and ErrNotFound directly, without wrapping the sentinel.
+// and ErrNotFound directly, without wrapping the sentinel. A different stored
+// type returns an error wrapping ErrTypeMismatch, with no implicit conversion.
 // Byte slices are owned by the caller. Scalar encodings are described by Value.
 func (db *DB) Get[T Value](key []byte) (T, error) {
 	var zero T
@@ -217,11 +219,14 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 	var value T
 	var pos int
 	var expiration int64
+	var ty recordType
 	var err error
 	if out, ok := any(&value).(*[]byte); ok {
-		pos, *out, expiration, err = s.index.findPayload(s.log, key, hash, nil)
+		pos, *out, ty, expiration, err = s.index.findPayload(s.log, key, hash, nil)
 		if err == nil && pos >= 0 && isExpired(expiration) {
 			pos = -1
+		} else if err == nil && pos >= 0 {
+			err = checkType[T](ty)
 		}
 	} else {
 		var raw scalarValue
@@ -245,7 +250,7 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 
 // Update atomically replaces an existing value with fn's result, preserving its
 // expiration. Missing or expired keys return ErrNotFound without calling fn;
-// invalid scalar encodings also leave the value unchanged without calling fn.
+// type mismatches and malformed encodings also fail without calling fn.
 // The callback runs once under the shard's exclusive lock. It must be short and
 // must not call methods on this DB. A panic propagates without changing the value.
 // Byte slices passed to fn are owned by the caller and may be mutated or retained.
@@ -262,6 +267,7 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 	var value T
 	var pos int
 	var expiration int64
+	var ty recordType
 	var err error
 	var previous []byte
 	var raw scalarValue
@@ -269,7 +275,7 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 	if byteValue {
 		// Keep the original in the write scratch space for no-op detection,
 		// and give the callback a separate copy it can mutate or retain.
-		pos, previous, expiration, err = s.index.lookupPayload(s.log, key, hash, s.log.writeBuffer[:], true)
+		pos, previous, ty, expiration, err = s.index.lookupPayload(s.log, key, hash, s.log.writeBuffer[:], true)
 	} else {
 		pos, raw, expiration, err = s.index.findScalar(s.log, key, hash)
 	}
@@ -280,6 +286,9 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 		return ErrNotFound
 	}
 	if byteValue {
+		if err := checkType[T](ty); err != nil {
+			return fmt.Errorf("index update: %w", err)
+		}
 		*out = bytes.Clone(previous)
 	} else {
 		value, err = decodeScalar[T](raw)
@@ -288,7 +297,7 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 		}
 	}
 	var encoded [8]byte
-	payload, err := encodeValue(fn(value), &encoded)
+	ty, payload, err := encodeValue(fn(value), &encoded)
 	if err != nil {
 		return err
 	}
@@ -296,10 +305,10 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 		if bytes.Equal(payload, previous) {
 			return nil
 		}
-	} else if scalarBytes(payload) == raw {
+	} else if scalarBytes(ty, payload) == raw {
 		return nil
 	}
-	return s.appendSet(key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration))
+	return s.appendSet(ty, key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration))
 }
 
 // Delete removes key. Deleting a missing key succeeds.
@@ -319,7 +328,7 @@ func (db *DB) Delete(key []byte) error {
 		s.maybeScheduleCompaction()
 		return nil
 	}
-	if _, _, err := s.log.write('d', key, nil, 0); err != nil {
+	if _, _, err := s.log.write(typeDelete, key, nil, 0); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)

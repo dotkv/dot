@@ -208,12 +208,12 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 			return fmt.Errorf("compaction record start exceeds segment offset range")
 		}
 		old := idx.slots[pos] & addressMask
-		key, value, expiration, err := l.readPayload(old>>26, old&offsetMask, buffer)
+		key, value, ty, expiration, err := l.readPayload(old>>26, old&offsetMask, buffer)
 		if err != nil {
 			return err
 		}
 		buffer = key[:cap(key)]
-		_, off, err := output.appendRecord('s', key, value, expiration)
+		_, off, err := output.appendRecord(ty, key, value, expiration)
 		if err != nil {
 			return err
 		}

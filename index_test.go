@@ -277,7 +277,7 @@ func TestIndexAllocations(t *testing.T) {
 	key := []byte("key")
 	const hash = uint64(42)
 	allocations = testing.AllocsPerRun(1000, func() {
-		change, err := idx.prepareSet(log, key, nil, hash, 0)
+		change, err := idx.prepareSet(log, typeBytes, key, nil, hash, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

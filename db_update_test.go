@@ -27,9 +27,9 @@ func checkUpdate[T Value](t *testing.T, db *DB, key []byte, initial, want T, fn 
 	}
 	got, err := db.Get[T](key)
 	var gotBuf, wantBuf [8]byte
-	gotBytes, _ := encodeValue(got, &gotBuf)
-	wantBytes, _ := encodeValue(want, &wantBuf)
-	if err != nil || !bytes.Equal(gotBytes, wantBytes) {
+	gotType, gotBytes, _ := encodeValue(got, &gotBuf)
+	wantType, wantBytes, _ := encodeValue(want, &wantBuf)
+	if err != nil || gotType != wantType || !bytes.Equal(gotBytes, wantBytes) {
 		t.Fatalf("got %v, want %v, error %v", got, want, err)
 	}
 }
@@ -108,7 +108,7 @@ func TestDBUpdateMissingInvalidAndClosed(t *testing.T) {
 	if err := db.Set(key, []byte("invalid")); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update(key, unexpected); !errors.Is(err, ErrInvalidValue) {
+	if err := db.Update(key, unexpected); !errors.Is(err, ErrTypeMismatch) {
 		t.Fatalf("invalid scalar: %v", err)
 	}
 	if err := db.Set(key, []byte("invalid"), WithExpiration(time.Now().Add(-time.Second))); err != nil {

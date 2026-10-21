@@ -74,7 +74,7 @@ func TestLogPartialWriteRollback(t *testing.T) {
 		t.Fatalf("retry after partial write: %v", err)
 	}
 	_, hash := db.shard(key)
-	pos, _, _, err := s.index.findPayload(s.log, key, hash, nil)
+	pos, _, _, _, err := s.index.findPayload(s.log, key, hash, nil)
 	if err != nil || pos < 0 || s.index.slots[pos]&addressMask != size {
 		t.Fatalf("retry used wrong offset: position=%d error=%v, want offset %d", pos, err, size)
 	}

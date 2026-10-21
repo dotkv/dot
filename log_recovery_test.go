@@ -18,8 +18,8 @@ import (
 func TestLogRecoveryWrappedHead(t *testing.T) {
 	path := t.TempDir()
 	key := []byte("key")
-	writeRecoverySegment(t, path, maxSegment, recoveryRecord('s', key, []byte("old"), 0))
-	record := recoveryRecord('s', key, []byte("new"), 0)
+	writeRecoverySegment(t, path, maxSegment, recoveryRecord(typeBytes, key, []byte("old"), 0))
+	record := recoveryRecord(typeBytes, key, []byte("new"), 0)
 	head := writeRecoverySegment(t, path, 0, append(bytes.Clone(record), record[:logHeaderSize-1]...))
 	log, idx := openRecoveryLog(t, path)
 	pos := checkRecoveredValue(t, log, idx, key, []byte("new"))
@@ -34,7 +34,7 @@ func TestLogRecoveryWrappedHead(t *testing.T) {
 
 func TestLogRecoveryRejectsAmbiguousGaps(t *testing.T) {
 	path := t.TempDir()
-	writeRecoverySegment(t, path, 0, recoveryRecord('s', []byte("key"), []byte("value"), 0))
+	writeRecoverySegment(t, path, 0, recoveryRecord(typeBytes, []byte("key"), []byte("value"), 0))
 	writeRecoverySegment(t, path, 2, nil)
 	log, err := newLog(path, newInternalIndex(t))
 	if log != nil || err == nil || !strings.Contains(err.Error(), "cannot infer head") {
@@ -61,9 +61,9 @@ func TestSegmentOrder(t *testing.T) {
 	}
 }
 
-func recoveryRecord(ty byte, key, value []byte, expiration int64) []byte {
+func recoveryRecord(ty recordType, key, value []byte, expiration int64) []byte {
 	record := make([]byte, logHeaderSize+len(key)+len(value))
-	record[4] = ty
+	record[4] = byte(ty)
 	binary.BigEndian.PutUint32(record[5:], uint32(len(key)))
 	binary.BigEndian.PutUint32(record[9:], uint32(len(value)))
 	binary.BigEndian.PutUint64(record[13:], uint64(expiration))
@@ -99,7 +99,7 @@ func openRecoveryLog(t *testing.T, path string) (*Log, *Index) {
 
 func checkRecoveredValue(t *testing.T, log *Log, idx *Index, key, want []byte) int {
 	t.Helper()
-	pos, got, _, err := idx.findPayload(log, key, xxhash.Sum64(key), nil)
+	pos, got, _, _, err := idx.findPayload(log, key, xxhash.Sum64(key), nil)
 	if err != nil || pos < 0 || !bytes.Equal(got, want) {
 		t.Fatalf("key %q: position=%d value=%q error=%v, want %q", key, pos, got, err, want)
 	}
@@ -109,10 +109,10 @@ func checkRecoveredValue(t *testing.T, log *Log, idx *Index, key, want []byte) i
 func TestLogRecoveryOrderAndEmptyHead(t *testing.T) {
 	path := t.TempDir()
 	key := []byte("key")
-	record := recoveryRecord('s', key, []byte("new"), 0)
+	record := recoveryRecord(typeBytes, key, []byte("new"), 0)
 	// The last two identical sets must still restore the latest address.
 	writeRecoverySegment(t, path, 10, append(bytes.Clone(record), record...))
-	writeRecoverySegment(t, path, 2, recoveryRecord('s', key, []byte("old"), 0))
+	writeRecoverySegment(t, path, 2, recoveryRecord(typeBytes, key, []byte("old"), 0))
 	// Keep one contiguous occupied arc; empty files are valid placeholders.
 	for seg := uint64(3); seg < 10; seg++ {
 		writeRecoverySegment(t, path, seg, nil)
@@ -129,15 +129,15 @@ func TestLogRecoveryOrderAndEmptyHead(t *testing.T) {
 	if log.headSegment != 11 || log.size != 0 {
 		t.Fatalf("head: segment=%d size=%d, want 11 and 0", log.headSegment, log.size)
 	}
-	if seg, off, err := log.write('s', key, []byte("appended"), 0); err != nil || seg != 11 || off != 0 {
+	if seg, off, err := log.write(typeBytes, key, []byte("appended"), 0); err != nil || seg != 11 || off != 0 {
 		t.Fatalf("append: segment=%d offset=%d error=%v", seg, off, err)
 	}
 }
 
 func TestLogRecoveryIncompleteHead(t *testing.T) {
 	key := []byte("key")
-	old := recoveryRecord('s', key, []byte("old"), 0)
-	update := recoveryRecord('s', key, []byte("new value"), 0)
+	old := recoveryRecord(typeBytes, key, []byte("old"), 0)
+	update := recoveryRecord(typeBytes, key, []byte("new value"), 0)
 	for _, prefix := range [][]byte{nil, old} {
 		for cut := 0; cut < len(update); cut++ {
 			t.Run(fmt.Sprintf("prefix=%d/cut=%d", len(prefix), cut), func(t *testing.T) {
@@ -152,7 +152,7 @@ func TestLogRecoveryIncompleteHead(t *testing.T) {
 				if data, err := os.ReadFile(name); err != nil || !bytes.Equal(data, prefix) || log.size != uint64(len(prefix)) {
 					t.Fatalf("tail repair: length=%d size=%d error=%v, want %d", len(data), log.size, err, len(prefix))
 				}
-				if _, off, err := log.write('s', key, []byte("appended"), 0); err != nil || off != uint64(len(prefix)) {
+				if _, off, err := log.write(typeBytes, key, []byte("appended"), 0); err != nil || off != uint64(len(prefix)) {
 					t.Fatalf("append after repair: offset=%d error=%v", off, err)
 				}
 				if err := log.headFile.Close(); err != nil {
@@ -166,7 +166,7 @@ func TestLogRecoveryIncompleteHead(t *testing.T) {
 }
 
 func TestLogRecoveryRejectsCorruption(t *testing.T) {
-	valid := recoveryRecord('s', []byte("key"), []byte("value"), 0)
+	valid := recoveryRecord(typeBytes, []byte("key"), []byte("value"), 0)
 	badCRC := bytes.Clone(valid)
 	badCRC[len(badCRC)-1] ^= 1
 	for _, sealed := range []bool{false, true} {
@@ -177,8 +177,8 @@ func TestLogRecoveryRejectsCorruption(t *testing.T) {
 		}{
 			{"checksum", badCRC, "crc mismatch"},
 			{"type", recoveryRecord('x', nil, nil, 0), "invalid record"},
-			{"delete-value", recoveryRecord('d', []byte("key"), []byte("value"), 0), "invalid record"},
-			{"delete-expiration", recoveryRecord('d', []byte("key"), nil, 1), "invalid record"},
+			{"delete-value", recoveryRecord(typeDelete, []byte("key"), []byte("value"), 0), "invalid record"},
+			{"delete-expiration", recoveryRecord(typeDelete, []byte("key"), nil, 1), "invalid record"},
 			{"short-header", valid[:logHeaderSize-1], "incomplete record"},
 			{"short-payload", valid[:len(valid)-1], "incomplete record"},
 		} {
@@ -232,7 +232,7 @@ func TestLogRecoveryGrowsIndex(t *testing.T) {
 	const count = (1<<indexBits)*3/4 + 1
 	for i := range count {
 		key := fmt.Appendf(nil, "key-%d", i)
-		if _, _, err := log.write('s', key, key, 0); err != nil {
+		if _, _, err := log.write(typeBytes, key, key, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -255,13 +255,13 @@ func TestLogRecoveryRotationAtBoundary(t *testing.T) {
 	key := []byte("key")
 	value := make([]byte, logWriteBufferSize-logHeaderSize-len(key))
 	for range logSegmentSize/logWriteBufferSize - 1 {
-		if _, _, err := log.write('s', key, value, 0); err != nil {
+		if _, _, err := log.write(typeBytes, key, value, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// The final record starts within the offset range and ends one byte past it.
 	value = append(value, 1)
-	if _, _, err := log.write('s', key, value, 0); err != nil {
+	if _, _, err := log.write(typeBytes, key, value, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.headFile.Close(); err != nil {
@@ -272,7 +272,7 @@ func TestLogRecoveryRotationAtBoundary(t *testing.T) {
 		t.Fatalf("recovered size=%d, want %d", log.size, logSegmentSize+1)
 	}
 	checkRecoveredValue(t, log, idx, key, value)
-	if seg, off, err := log.write('s', []byte("next"), nil, 0); err != nil || seg != 1 || off != 0 {
+	if seg, off, err := log.write(typeBytes, []byte("next"), nil, 0); err != nil || seg != 1 || off != 0 {
 		t.Fatalf("rotation after recovery: segment=%d offset=%d error=%v", seg, off, err)
 	}
 }
