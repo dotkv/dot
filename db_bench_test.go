@@ -132,7 +132,7 @@ func BenchmarkOpen(b *testing.B) {
 	if err := f.db.Close(); err != nil {
 		b.Fatal(err)
 	}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		b.StartTimer()
 		db, err := Open(f.db.path)
 		b.StopTimer()
