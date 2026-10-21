@@ -112,7 +112,6 @@ func newLog(name string, idx *Index) (*Log, error) {
 }
 
 func incrementSegment(seg uint64) uint64 { return (seg + 1) & maxSegment }
-func decrementSegment(seg uint64) uint64 { return (seg - 1) & maxSegment }
 
 // Published filenames form one occupied arc of the ring, leaving one nonempty
 // gap. Its predecessor is the head; multiple gaps cannot identify a unique head.

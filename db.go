@@ -25,7 +25,6 @@ type DB struct {
 	path             string
 	expiration       int64
 	shards           [shardCount]Shard
-	backgroundTicker *time.Ticker
 	backgroundCancel context.CancelFunc
 	backgroundWG     sync.WaitGroup
 }
@@ -82,20 +81,18 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
-	db.backgroundTicker = time.NewTicker(time.Second * 10)
-	db.backgroundWG.Go(func() {
-		db.background(ctx)
-	})
+	db.backgroundWG.Go(func() { db.background(ctx) })
 	return db, nil
 }
 
 func (db *DB) background(ctx context.Context) {
-	defer db.backgroundTicker.Stop()
+	t := time.NewTicker(time.Second * 10)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-db.backgroundTicker.C:
+		case <-t.C:
 			if ctx.Err() != nil {
 				return
 			}
