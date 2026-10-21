@@ -178,9 +178,10 @@ func renderResults(results []result) ([]byte, error) {
 		for _, engine := range engines {
 			runs := groups[key][engine]
 			name := engine
-			if engine == "dot" {
+			switch engine {
+			case "dot":
 				name = "Dot"
-			} else if engine == "pebble" {
+			case "pebble":
 				name = "Pebble"
 			}
 			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %s | %.1f | %.2f |\n",
