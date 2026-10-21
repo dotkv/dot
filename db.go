@@ -115,6 +115,11 @@ func (db *DB) compact() {
 		dead := total - live
 		if total > 0 && dead > total/5 { // > 20% dead
 			fmt.Printf("start compaction.log for shard %d, or continue it\n", i)
+			// 1. compaction.log (publish boundary == potential compaction seg)
+			// 2. <publish-boundary.log> (seg was deleted, compaction head == pub-bound)
+			// 3. <updated-publish-boundary.log> (more segs were deleted, pub-bound increasing with compaction-head)
+			// - actually we need pub-bound, comp-head, comp-tail
+			//     -> pub-bound can be less than comp-tail
 		}
 		db.shards[i].lock.Unlock()
 	}
