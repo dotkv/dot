@@ -12,6 +12,35 @@ import (
 	"testing"
 )
 
+func TestLogRotationWraps(t *testing.T) {
+	path := t.TempDir()
+	writeRecoverySegment(t, path, maxSegment, nil)
+	log, _ := openRecoveryLog(t, path)
+	padLog(t, log, logSegmentSize)
+	seg, off, err := log.write('s', []byte("key"), []byte("new"), 0)
+	if err != nil || seg != 0 || off != 0 {
+		t.Fatalf("wrapped rotation: segment=%d offset=%d error=%v", seg, off, err)
+	}
+	if len(log.segmentRecordCounts) != 2 || log.segmentRecordCounts[0] != 1 {
+		t.Fatalf("rotated counts=%v", log.segmentRecordCounts)
+	}
+}
+
+func TestLogRotationPreservesLastVacantID(t *testing.T) {
+	log, _ := openRecoveryLog(t, t.TempDir())
+	// Populate accounting without creating a million files: reservation must
+	// reject the rotation before attempting any filesystem operation.
+	for seg := uint64(2); seg <= maxSegment; seg++ {
+		log.segmentRecordCounts[seg] = 0
+	}
+	if err := log.openHead(1); err == nil || log.headSegment != 0 {
+		t.Fatalf("rotation consumed the last vacant ID: %v", err)
+	}
+	if _, err := os.Stat(log.segmentPath(1)); !os.IsNotExist(err) {
+		t.Fatalf("rotation created the last vacant segment: %v", err)
+	}
+}
+
 func TestNewLogCurrentDirectory(t *testing.T) {
 	t.Chdir(t.TempDir())
 	log, err := newLog(".", newInternalIndex(t))
@@ -298,7 +327,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 			if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 				t.Fatal("failed rotation changed the head")
 			}
-			if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
+			if !slices.Equal(before, s.index.slots) || s.index.entryCount != 1 {
 				t.Fatal("failed rotation changed the index")
 			}
 			info, err := head.Stat()
@@ -354,7 +383,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 	if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 		t.Fatal("failed sync changed the head")
 	}
-	if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
+	if !slices.Equal(before, s.index.slots) || s.index.entryCount != 1 {
 		t.Fatal("failed sync changed the index")
 	}
 	var err error

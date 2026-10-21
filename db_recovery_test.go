@@ -44,7 +44,7 @@ func TestDBRecovery(t *testing.T) {
 	}
 	// Use short sealed segments to exercise replay across files without padding
 	// them with bytes that would not be valid records.
-	if err := s.log.openHead(2); err != nil {
+	if err := s.log.openHead(1); err != nil {
 		t.Fatal(err)
 	}
 	past, future := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
@@ -66,7 +66,7 @@ func TestDBRecovery(t *testing.T) {
 	if err := db.Set(keys[5], []byte("future"), WithExpiration(future)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.log.openHead(10); err != nil {
+	if err := s.log.openHead(2); err != nil {
 		t.Fatal(err)
 	}
 	large := bytes.Repeat([]byte{'v'}, 128<<10)
@@ -88,8 +88,8 @@ func TestDBRecovery(t *testing.T) {
 	size := s.log.size
 	db = reopenDB(t, db)
 	s = &db.shards[0]
-	if s.log.headSegment != 10 || s.log.size != size {
-		t.Fatalf("recovered head: segment=%d size=%d, want 10 and %d", s.log.headSegment, s.log.size, size)
+	if s.log.headSegment != 2 || s.log.size != size {
+		t.Fatalf("recovered head: segment=%d size=%d, want 2 and %d", s.log.headSegment, s.log.size, size)
 	}
 	if got := openFilesUnder(t, db.path); got != shardCount {
 		t.Fatalf("recovery left %d descriptors open, want %d", got, shardCount)
@@ -131,7 +131,7 @@ func TestDBRecovery(t *testing.T) {
 	}
 	_, hash := db.shard(keys[0])
 	pos, _, _, err := s.index.findPayload(s.log, keys[0], hash, nil)
-	if err != nil || pos < 0 || s.index.slots[pos]&addressMask != 10<<26|size {
+	if err != nil || pos < 0 || s.index.slots[pos]&addressMask != 2<<26|size {
 		t.Fatalf("append did not use recovered offset %d: position=%d error=%v", size, pos, err)
 	}
 	if err := db.Delete(retained[0]); err != nil {

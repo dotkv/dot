@@ -56,8 +56,8 @@ func TestIndexMappingLifecycle(t *testing.T) {
 		}
 	}
 	checkIndexMapping(t, address, false)
-	if idx.slots != nil || idx.memory.current != nil || idx.memory.previous != nil || idx.population != 0 {
-		t.Fatal("closed index retains storage or population")
+	if idx.slots != nil || idx.memory.current != nil || idx.memory.previous != nil || idx.entryCount != 0 {
+		t.Fatal("closed index retains storage or entryCount")
 	}
 }
 

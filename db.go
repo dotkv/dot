@@ -99,30 +99,21 @@ func (db *DB) background(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			db.compact()
+			if err := db.compact(); err != nil {
+				fmt.Fprintf(os.Stderr, "compact: %v\n", err)
+			}
 		}
 	}
 }
 
-func (db *DB) compact() {
+func (db *DB) compact() error {
+	var err error
 	for i := range db.shards {
-		db.shards[i].lock.Lock()
-		live := db.shards[i].index.population
-		var total int
-		for _, pop := range db.shards[i].log.segmentRecords {
-			total += int(pop)
+		if compactErr := db.shards[i].compact(); compactErr != nil {
+			err = errors.Join(err, fmt.Errorf("shard %02d: %w", i, compactErr))
 		}
-		dead := total - live
-		if total > 0 && dead > total/5 { // > 20% dead
-			fmt.Fprintf(os.Stderr, "start compaction.log for shard %d, or continue it\n", i)
-			// 1. compaction.log (publish boundary == potential compaction seg)
-			// 2. <publish-boundary.log> (seg was deleted, compaction head == pub-bound)
-			// 3. <updated-publish-boundary.log> (more segs were deleted, pub-bound increasing with compaction-head)
-			// - actually we need pub-bound, comp-head, comp-tail
-			//     -> pub-bound can be less than comp-tail
-		}
-		db.shards[i].lock.Unlock()
 	}
+	return err
 }
 
 func (db *DB) shard(key []byte) (*Shard, uint64) {

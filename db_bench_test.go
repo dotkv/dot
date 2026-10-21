@@ -53,9 +53,12 @@ func (f *primitiveFixture) resetValue[T Value](b *testing.B, populated bool, val
 			b.Fatal(err)
 		}
 		s.log.size = 0
-		clear(s.log.segmentRecords)
+		clear(s.log.segmentRecordCounts)
+		s.log.segmentRecordCounts[s.log.headSegment] = 0
+		clear(s.log.segmentRefCounts)
+		s.log.segmentRefCounts[s.log.headSegment] = 0
 		clear(s.index.slots)
-		s.index.population = 0
+		s.index.entryCount = 0
 		clear(s.index.expirations)
 	}
 	if populated {

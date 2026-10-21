@@ -8,11 +8,58 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
 )
+
+func TestLogRecoveryWrappedHead(t *testing.T) {
+	path := t.TempDir()
+	key := []byte("key")
+	writeRecoverySegment(t, path, maxSegment, recoveryRecord('s', key, []byte("old"), 0))
+	record := recoveryRecord('s', key, []byte("new"), 0)
+	head := writeRecoverySegment(t, path, 0, append(bytes.Clone(record), record[:logHeaderSize-1]...))
+	log, idx := openRecoveryLog(t, path)
+	pos := checkRecoveredValue(t, log, idx, key, []byte("new"))
+	if log.headSegment != 0 || log.size != uint64(len(record)) || idx.slots[pos]&addressMask != 0 {
+		t.Fatalf("wrapped head: segment=%d size=%d address=%d", log.headSegment, log.size, idx.slots[pos]&addressMask)
+	}
+	if data, err := os.ReadFile(head); err != nil || !bytes.Equal(data, record) {
+		t.Fatalf("wrapped tail repair: %v", err)
+	}
+	checkSegmentAccounting(t, &Shard{log: log, index: idx})
+}
+
+func TestLogRecoveryRejectsAmbiguousGaps(t *testing.T) {
+	path := t.TempDir()
+	writeRecoverySegment(t, path, 0, recoveryRecord('s', []byte("key"), []byte("value"), 0))
+	writeRecoverySegment(t, path, 2, nil)
+	log, err := newLog(path, newInternalIndex(t))
+	if log != nil || err == nil || !strings.Contains(err.Error(), "cannot infer head") {
+		t.Fatalf("gapped recovery: log=%v error=%v", log, err)
+	}
+}
+
+func TestSegmentOrder(t *testing.T) {
+	for _, tc := range []struct {
+		segments, want []uint64
+	}{
+		{nil, nil},
+		{[]uint64{0}, []uint64{0}},
+		{[]uint64{3, 1, 2}, []uint64{1, 2, 3}},
+		{[]uint64{0, maxSegment, 1}, []uint64{maxSegment, 0, 1}},
+	} {
+		got, err := orderSegments(tc.segments)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Fatalf("order=%v error=%v, want %v", got, err, tc.want)
+		}
+	}
+	if _, err := orderSegments(make([]uint64, segmentCount)); err == nil {
+		t.Fatal("accepted a saturated segment ring")
+	}
+}
 
 func recoveryRecord(ty byte, key, value []byte, expiration int64) []byte {
 	record := make([]byte, logHeaderSize+len(key)+len(value))
@@ -66,6 +113,10 @@ func TestLogRecoveryOrderAndEmptyHead(t *testing.T) {
 	// The last two identical sets must still restore the latest address.
 	writeRecoverySegment(t, path, 10, append(bytes.Clone(record), record...))
 	writeRecoverySegment(t, path, 2, recoveryRecord('s', key, []byte("old"), 0))
+	// Keep one contiguous occupied arc; empty files are valid placeholders.
+	for seg := uint64(3); seg < 10; seg++ {
+		writeRecoverySegment(t, path, seg, nil)
+	}
 	writeRecoverySegment(t, path, 11, nil)
 	if err := os.WriteFile(filepath.Join(path, "unrelated"), []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
@@ -95,7 +146,7 @@ func TestLogRecoveryIncompleteHead(t *testing.T) {
 				log, idx := openRecoveryLog(t, path)
 				if len(prefix) > 0 {
 					checkRecoveredValue(t, log, idx, key, []byte("old"))
-				} else if idx.population != 0 {
+				} else if idx.entryCount != 0 {
 					t.Fatal("incomplete first record populated the index")
 				}
 				if data, err := os.ReadFile(name); err != nil || !bytes.Equal(data, prefix) || log.size != uint64(len(prefix)) {
@@ -189,8 +240,8 @@ func TestLogRecoveryGrowsIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	log, idx := openRecoveryLog(t, path)
-	if idx.population != count || len(idx.slots) != 2<<indexBits {
-		t.Fatalf("recovered index: population=%d capacity=%d", idx.population, len(idx.slots))
+	if idx.entryCount != count || len(idx.slots) != 2<<indexBits {
+		t.Fatalf("recovered index: entryCount=%d capacity=%d", idx.entryCount, len(idx.slots))
 	}
 	for i := range count {
 		key := fmt.Appendf(nil, "key-%d", i)

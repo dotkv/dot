@@ -98,8 +98,8 @@ func checkIndex(t *testing.T, idx *Index, entries []indexEntry) {
 			t.Fatalf("bucket %d: run is longer than expected", home)
 		}
 	}
-	if idx.population != live {
-		t.Fatalf("population: got %d, want %d", idx.population, live)
+	if idx.entryCount != live {
+		t.Fatalf("entryCount: got %d, want %d", idx.entryCount, live)
 	}
 }
 
@@ -206,7 +206,7 @@ func TestIndexGrow(t *testing.T) {
 	for _, home := range []int{1, n - 1, 0, 2, n - 3} {
 		add(uint64(home) | uint64(home%8)<<indexBits)
 	}
-	for idx.population < n*3/4 {
+	for idx.entryCount < n*3/4 {
 		add(random.Uint64())
 	}
 	checkIndex(t, idx, entries)
@@ -221,15 +221,15 @@ func TestIndexGrow(t *testing.T) {
 		t.Fatal("grew below the load threshold")
 	}
 	for growth := 0; growth < 3; growth++ {
-		for idx.population < len(idx.slots)*3/4 {
+		for idx.entryCount < len(idx.slots)*3/4 {
 			add(random.Uint64())
 		}
-		size, population := len(idx.slots), idx.population
+		size, entryCount := len(idx.slots), idx.entryCount
 		if err := idx.grow(); err != nil {
 			t.Fatal(err)
 		}
-		if len(idx.slots) != size*2 || idx.population != population {
-			t.Fatal("grow changed population or did not double capacity")
+		if len(idx.slots) != size*2 || idx.entryCount != entryCount {
+			t.Fatal("grow changed entryCount or did not double capacity")
 		}
 		checkIndex(t, idx, entries)
 	}
@@ -241,12 +241,12 @@ func TestIndexAllocations(t *testing.T) {
 		idx.insert(i, entrySlot(i, uint64(i)))
 	}
 	// Keep a heap-backed fixture: each growth unmaps its previous storage.
-	slots, population := slices.Clone(idx.slots), idx.population
+	slots, entryCount := slices.Clone(idx.slots), idx.entryCount
 	if err := idx.close(); err != nil {
 		t.Fatal(err)
 	}
 	allocations := testing.AllocsPerRun(5, func() {
-		idx.slots, idx.population = slots, population
+		idx.slots, idx.entryCount = slots, entryCount
 		if err := idx.grow(); err != nil {
 			t.Fatal(err)
 		}
@@ -364,6 +364,7 @@ func TestDBGrow(t *testing.T) {
 			t.Fatalf("key %d: got %q, want %q, error %v", i, got, want, err)
 		}
 	}
+	checkSegmentAccounting(t, s)
 }
 
 func TestDBSetSameValueDoesNotWriteLog(t *testing.T) {
@@ -407,8 +408,8 @@ func TestDBSetSameValueDoesNotWriteLog(t *testing.T) {
 			if after.Size() != before.Size() {
 				t.Fatalf("unchanged value grew log: %d -> %d", before.Size(), after.Size())
 			}
-			if s.index.population != 1 {
-				t.Fatalf("index population: got %d, want 1", s.index.population)
+			if s.index.entryCount != 1 {
+				t.Fatalf("index entryCount: got %d, want 1", s.index.entryCount)
 			}
 			if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, tc.value) {
 				t.Fatalf("unchanged value: got %q, want %q, error %v", got, tc.value, err)
@@ -457,12 +458,12 @@ func TestDBDeleteMissDoesNotWriteLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, _ := db.shard(key)
-	if s.index.population != 1 {
-		t.Fatalf("population after expired set: got %d, want 1", s.index.population)
+	if s.index.entryCount != 1 {
+		t.Fatalf("entryCount after expired set: got %d, want 1", s.index.entryCount)
 	}
 	checkMissingDelete(key)
-	if s.index.population != 0 {
-		t.Fatalf("population after deleting expired key: got %d, want 0", s.index.population)
+	if s.index.entryCount != 0 {
+		t.Fatalf("entryCount after deleting expired key: got %d, want 0", s.index.entryCount)
 	}
 }
 
@@ -501,8 +502,8 @@ func TestDBExpirationLogAndIndexBehavior(t *testing.T) {
 		if s.log.size <= before {
 			t.Fatalf("set with opts %v did not write to log", opts)
 		}
-		if s.index.population != 1 {
-			t.Fatalf("population: got %d, want 1", s.index.population)
+		if s.index.entryCount != 1 {
+			t.Fatalf("entryCount: got %d, want 1", s.index.entryCount)
 		}
 	}
 	if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, value) {
@@ -551,13 +552,13 @@ func TestDBExpirationPruneOnGrow(t *testing.T) {
 	}
 
 	// Fill to 75% (threshold) with enough expired entries (> n/8) so pruning
-	// drops population below the 62.5% watermark and skips doubling.
+	// drops entryCount below the 62.5% watermark and skips doubling.
 	liveTarget := watermark - 1
-	for idx.population < liveTarget {
+	for idx.entryCount < liveTarget {
 		add(future.UnixNano())
 	}
 	var expiredIDs []int
-	for idx.population < threshold {
+	for idx.entryCount < threshold {
 		expiredIDs = append(expiredIDs, add(past.UnixNano()))
 	}
 	if err := idx.grow(); err != nil {
@@ -569,18 +570,18 @@ func TestDBExpirationPruneOnGrow(t *testing.T) {
 	if len(idx.slots) != n {
 		t.Fatalf("table doubled despite pruning below 62.5%%: got %d, want %d", len(idx.slots), n)
 	}
-	if idx.population != liveTarget {
-		t.Fatalf("population after prune-without-grow: got %d, want %d", idx.population, liveTarget)
+	if idx.entryCount != liveTarget {
+		t.Fatalf("entryCount after prune-without-grow: got %d, want %d", idx.entryCount, liveTarget)
 	}
 	checkIndex(t, idx, entries)
 
-	// Refill to 75% with only a few expired entries so pruning leaves population
+	// Refill to 75% with only a few expired entries so pruning leaves entryCount
 	// at or above the 62.5% watermark and doubles the table.
 	expiredIDs = expiredIDs[:0]
-	for idx.population < threshold-4 {
+	for idx.entryCount < threshold-4 {
 		add(0)
 	}
-	for idx.population < threshold {
+	for idx.entryCount < threshold {
 		expiredIDs = append(expiredIDs, add(past.UnixNano()))
 	}
 	if err := idx.grow(); err != nil {
@@ -592,8 +593,8 @@ func TestDBExpirationPruneOnGrow(t *testing.T) {
 	if len(idx.slots) != 2*n {
 		t.Fatalf("table did not double when prune stayed >= 62.5%%: got %d, want %d", len(idx.slots), 2*n)
 	}
-	if idx.population != threshold-4 {
-		t.Fatalf("population after prune-and-grow: got %d, want %d", idx.population, threshold-4)
+	if idx.entryCount != threshold-4 {
+		t.Fatalf("entryCount after prune-and-grow: got %d, want %d", idx.entryCount, threshold-4)
 	}
 	checkIndex(t, idx, entries)
 }
@@ -645,7 +646,7 @@ func TestIndexLogFailure(t *testing.T) {
 		if err := operation(); err == nil {
 			t.Fatal("write to read-only log succeeded")
 		}
-		if !slices.Equal(before, s.index.slots) || s.index.population != len(keys) {
+		if !slices.Equal(before, s.index.slots) || s.index.entryCount != len(keys) {
 			t.Fatal("failed log write changed the index")
 		}
 	}
@@ -666,7 +667,7 @@ func TestIndexLogFailure(t *testing.T) {
 		if err := operation(); err == nil {
 			t.Fatal("read from closed log succeeded")
 		}
-		if !slices.Equal(before, s.index.slots) || s.index.population != len(keys) {
+		if !slices.Equal(before, s.index.slots) || s.index.entryCount != len(keys) {
 			t.Fatal("failed log read changed the index")
 		}
 	}
