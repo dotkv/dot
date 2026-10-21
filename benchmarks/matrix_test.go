@@ -19,7 +19,7 @@ func TestBenchmarkMatrix(t *testing.T) {
 	seen := make(map[scenario]int)
 	for _, c := range cases {
 		if c.KeyBytes != 16 || c.Scalar != (c.ValueBytes == 8) || c.CalibrationDuration != 0 ||
-			c.DotTarget != 3*time.Second || (c.ValueBytes != 8 && c.ValueBytes != 1024) ||
+			c.DotTarget != 15*time.Second || (c.ValueBytes != 8 && c.ValueBytes != 1024) ||
 			(c.Workload != "80/20" && c.Workload != "20/80") {
 			t.Fatalf("invalid measured case: %+v", c)
 		}

@@ -34,7 +34,7 @@ func command(ctx context.Context) error {
 	workerList := flag.String("workers", "16", "comma-separated worker counts (1, 16, 128)")
 	keys := flag.Int("keys", 16384, "total preloaded live keys per case")
 	ops := flag.Int("ops", 0, "fixed measured operations per case; overrides Dot calibration")
-	target := flag.Duration("target", 0, "Dot time target for shared operation budgets (default 3s)")
+	target := flag.Duration("target", 0, "Dot time target for shared operation budgets (default 15s)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "timeout for each process, including preparation and drain")
 	warmup := flag.Int("warmup", 30000, "total untimed warmup operations per case")
 	seed := flag.Uint64("seed", 1, "deterministic workload seed")

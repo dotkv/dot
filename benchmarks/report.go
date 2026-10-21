@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const resultsStart = "<!-- benchmark-results:start -->"
@@ -197,13 +198,12 @@ func renderResults(results []result) ([]byte, error) {
 		title := strings.ReplaceAll(key.workload, "-", " ")
 		fmt.Fprintf(&out, "### %s · %s · %d %s\n\n", title, value, key.workers, workerLabel)
 		fmt.Fprintf(&out, "Measured operations per engine: **%s**. Ratios are reads/writes.\n\n", integerWithCommas(budgets[key]))
-		out.WriteString("| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |\n")
-		out.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		var engines []string
 		for name := range groups[key] {
 			engines = append(engines, name)
 		}
 		sort.Strings(engines)
+		var rows [][8]string
 		for _, engine := range engines {
 			runs := groups[key][engine]
 			name := engine
@@ -215,18 +215,57 @@ func renderResults(results []result) ([]byte, error) {
 			case "map":
 				name = "Go map (in memory)"
 			}
-			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %.3f | %s | %.1f | %.2f |\n",
-				name, len(runs),
-				median(runs, func(r result) float64 { return r.ElapsedSeconds }),
-				median(runs, func(r result) float64 { return r.Latency.MeanNS / 1000 }),
-				median(runs, func(r result) float64 { return float64(r.Latency.P99NS) / 1000 }),
-				integerWithCommas(int(median(runs, func(r result) float64 { return r.OpsPerSecond })+0.5)),
-				median(runs, func(r result) float64 { return float64(r.RSSPeakBytes) / (1 << 20) }),
-				median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) }))
+			rows = append(rows, [8]string{
+				name, fmt.Sprint(len(runs)),
+				fmt.Sprintf("%.3f", median(runs, func(r result) float64 { return r.ElapsedSeconds })),
+				fmt.Sprintf("%.3f", median(runs, func(r result) float64 { return r.Latency.MeanNS / 1000 })),
+				fmt.Sprintf("%.3f", median(runs, func(r result) float64 { return float64(r.Latency.P99NS) / 1000 })),
+				integerWithCommas(int(median(runs, func(r result) float64 { return r.OpsPerSecond }) + 0.5)),
+				fmt.Sprintf("%.1f", median(runs, func(r result) float64 { return float64(r.RSSPeakBytes) / (1 << 20) })),
+				fmt.Sprintf("%.2f", median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) })),
+			})
 		}
+		writeResultTable(&out, rows)
 		out.WriteByte('\n')
 	}
 	return []byte(out.String()), nil
+}
+
+func writeResultTable(out *strings.Builder, rows [][8]string) {
+	headers := [8]string{"Implementation", "Runs", "Seconds", "Mean (µs)", "p99 (µs)", "Throughput (ops/s)", "Peak RSS (MiB)", "Disk (MiB)"}
+	var widths [8]int
+	for i, header := range headers {
+		widths[i] = utf8.RuneCountInString(header)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			widths[i] = max(widths[i], utf8.RuneCountInString(cell))
+		}
+	}
+	writeRow := func(row [8]string) {
+		out.WriteByte('|')
+		for i, cell := range row {
+			if i == 0 {
+				fmt.Fprintf(out, " %-*s |", widths[i], cell)
+			} else {
+				fmt.Fprintf(out, " %*s |", widths[i], cell)
+			}
+		}
+		out.WriteByte('\n')
+	}
+	writeRow(headers)
+	out.WriteByte('|')
+	for i, width := range widths {
+		separator := strings.Repeat("-", width)
+		if i > 0 {
+			separator = separator[:width-1] + ":"
+		}
+		fmt.Fprintf(out, " %s |", separator)
+	}
+	out.WriteByte('\n')
+	for _, row := range rows {
+		writeRow(row)
+	}
 }
 
 // Identify gaps within the workload/value/worker axes present in a saved run.

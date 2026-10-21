@@ -46,7 +46,7 @@ Writes are equal shares of inserts, updates, and deletes.
 | Initial live keys         | 16,384                           |
 | Untimed warmup operations | 30,000                           |
 | Seed                      | 1                                |
-| Dot time target           | 3 seconds                        |
+| Dot time target           | 15 seconds                       |
 
 This gives **12 cases** across four configurations before repetitions. Use
 `-engines`, `-workloads`, `-sizes`, and `-workers` to select a subset or override
@@ -65,7 +65,7 @@ runtime on them. Dot is used for calibration even if omitted from `-engines`.
 Calibration is an estimate, not a runtime guarantee or evidence of steady state.
 A short probe may not capture later maintenance costs. Preparation, calibration,
 drain, and process overhead are outside the Dot target. `-target` overrides the
-3-second target; `-ops` bypasses calibration and supplies one explicit budget for
+15-second target; `-ops` bypasses calibration and supplies one explicit budget for
 all configurations. These flags are mutually exclusive. Budgets are reused across
 repetitions within a command. Independent commands can choose different budgets;
 the report refuses to combine different budgets for the same configuration. Use

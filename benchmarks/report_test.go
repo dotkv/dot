@@ -95,6 +95,7 @@ func TestReportMarksMissingConfigurations(t *testing.T) {
 func TestReportGroupingAndMedians(t *testing.T) {
 	other := reportFixture("dot", 2000, 4000)
 	other.Config.Scalar = false
+	other.ElapsedSeconds = 12345.678
 	data, err := renderResults([]result{
 		reportFixture("pebble", 1000, 2000),
 		reportFixture("map", 1000, 2000),
@@ -105,7 +106,7 @@ func TestReportGroupingAndMedians(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(data)
+	text := strings.Join(strings.Fields(string(data)), " ")
 	if strings.Count(text, "| Implementation |") != 2 || !strings.Contains(text, "8 B uint64 values") || !strings.Contains(text, "8 B values") {
 		t.Fatal("scalar and byte-slice configurations were combined")
 	}
@@ -119,6 +120,14 @@ func TestReportGroupingAndMedians(t *testing.T) {
 	}
 	if strings.Index(text, "| Dot |") > strings.Index(text, "| Pebble |") {
 		t.Fatal("implementation ordering depends on execution order")
+	}
+	// Columns account for Unicode headers and values wider than their headers.
+	table := `| Implementation | Runs |   Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | --------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 | 12345.678 |     2.000 |    4.000 |          1,000,000 |           20.0 |       4.00 |
+`
+	if !bytes.Contains(data, []byte(table)) {
+		t.Fatalf("missing aligned table:\n%s", data)
 	}
 	other.Config.Scalar = true
 	other.Config.Operations++
@@ -149,7 +158,7 @@ func TestWriteReadmePreservesDocumentation(t *testing.T) {
 		if !bytes.HasPrefix(data, []byte(prefix)) || !bytes.HasSuffix(data, []byte(suffix)) || bytes.Contains(data, []byte("Old results")) {
 			t.Fatal("handwritten documentation changed or old results remained")
 		}
-		if bytes.Count(data, []byte(resultsStart)) != 1 || bytes.Count(data, []byte("| Dot |")) != 1 {
+		if bytes.Count(data, []byte(resultsStart)) != 1 || bytes.Count(data, []byte("| Dot ")) != 1 {
 			t.Fatal("updating results appended duplicate content")
 		}
 		info, err := os.Stat(path)

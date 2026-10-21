@@ -36,7 +36,7 @@ func buildCases(base caseConfig, engines, workloads []string, sizes, workers []i
 							// before any engine runs its measured case.
 							c.Operations = c.Workers
 							if c.DotTarget == 0 {
-								c.DotTarget = 3 * time.Second
+								c.DotTarget = 15 * time.Second
 							}
 						}
 						if err := c.validate(); err != nil {

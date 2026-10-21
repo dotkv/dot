@@ -128,7 +128,7 @@ The [engine comparison suite](benchmarks/README.md) compares Dot, Pebble, and an
 in-memory Go map using 16-byte keys and 16 workers by default. It covers 80/20 and
 20/80 read/write ratios with 8-byte scalars and 1 KiB values. Dot and Pebble use
 normal automatic compaction. A short Dot probe estimates fixed operation budgets
-targeting about 3 seconds per Dot case. Every engine runs the same operation
+targeting about 15 seconds per Dot case. Every engine runs the same operation
 count. The suite reports latency, throughput, RSS, and disk usage, and always
 writes results to its README after a successful run. Dependencies live in a
 separate module.
