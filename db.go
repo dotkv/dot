@@ -105,7 +105,6 @@ func (db *DB) background(ctx context.Context) {
 }
 
 func (db *DB) compact() {
-	// TODO: keep log.segmentRecords updated!
 	for i := range db.shards {
 		db.shards[i].lock.Lock()
 		live := db.shards[i].index.population
