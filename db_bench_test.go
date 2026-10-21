@@ -133,13 +133,12 @@ func BenchmarkOpen(b *testing.B) {
 		b.Fatalf("open fixture has %d full sealed segments or an empty head", sealed)
 	}
 	b.SetBytes(replayBytes)
-	b.ReportMetric(float64(sealed), "full-segments/op")
 	if err := f.db.Close(); err != nil {
 		b.Fatal(err)
 	}
-	// Leave the timer stopped between samples while validating and closing.
+	// B.Loop requires a running timer; pause only for validation and Close.
+	b.StartTimer()
 	for b.Loop() {
-		b.StartTimer()
 		db, err := Open(f.db.path)
 		b.StopTimer()
 		if err != nil {
@@ -162,7 +161,9 @@ func BenchmarkOpen(b *testing.B) {
 		if err := db.Close(); err != nil {
 			b.Fatal(err)
 		}
+		b.StartTimer()
 	}
+	b.ReportMetric(float64(sealed), "full-segments/op")
 }
 
 func BenchmarkGetBytesHit(b *testing.B) {
