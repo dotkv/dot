@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,12 +28,14 @@ type DB struct {
 	shards           [shardCount]Shard
 	backgroundCancel context.CancelFunc
 	backgroundWG     sync.WaitGroup
+	compactionQueue  chan *Shard
 }
 
 // Options configures database and key operations.
 type Options struct {
 	expiration        int64
 	disableCompaction bool
+	compaction        compactionThreshold
 }
 
 // Option configures Open or Set.
@@ -45,6 +48,19 @@ type Option func(*Options)
 func WithCompaction(enabled bool) Option {
 	return func(o *Options) {
 		o.disableCompaction = !enabled
+	}
+}
+
+// WithCompactionThreshold configures state-based background compaction in Open.
+// A shard is queued after a mutation when its obsolete-record fraction exceeds
+// ratio and it has at least minObsoleteRecords obsolete records. Defaults are
+// 0.2 and 8192. ratio must be finite and in [0, 1); a zero minimum is allowed.
+// Expiration sweeps use ratio without the minimum; unfinished passes always
+// retry. WithCompaction(false) disables all automatic compaction regardless of
+// these thresholds. This option has no effect when passed to Set.
+func WithCompactionThreshold(ratio float64, minObsoleteRecords uint64) Option {
+	return func(o *Options) {
+		o.compaction = compactionThreshold{ratio, minObsoleteRecords}
 	}
 }
 
@@ -70,18 +86,26 @@ func isExpired(expiration int64) bool {
 
 // Open creates or recovers a database with 64 key shards in directories 00 through 63.
 func Open(path string, opts ...Option) (*DB, error) {
-	var options Options
+	options := Options{compaction: defaultCompactionThreshold()}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&options)
 		}
+	}
+	if ratio := options.compaction.ratio; math.IsNaN(ratio) || ratio < 0 || ratio >= 1 {
+		return nil, fmt.Errorf("compaction ratio must be finite and in [0, 1)")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &DB{path: path,
 		expiration:       options.expiration,
 		backgroundCancel: cancel,
 	}
+	if !options.disableCompaction {
+		db.compactionQueue = make(chan *Shard, shardCount)
+	}
 	for i := range db.shards {
+		db.shards[i].compactionThreshold = &options.compaction
+		db.shards[i].compactionQueue = db.compactionQueue
 		var err error
 		db.shards[i].index, err = newIndex()
 		if err != nil {
@@ -93,6 +117,11 @@ func Open(path string, opts ...Option) (*DB, error) {
 		}
 	}
 	if !options.disableCompaction {
+		// Recovery may leave eligible history or unfinished packing without any
+		// subsequent writes. Queue it before exposing the DB to callers.
+		for i := range db.shards {
+			db.shards[i].maybeScheduleCompaction()
+		}
 		db.backgroundWG.Go(func() { db.background(ctx) })
 	}
 	return db, nil
@@ -105,15 +134,34 @@ func (db *DB) background(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case s := <-db.compactionQueue:
 			if ctx.Err() != nil {
 				return
 			}
-			if err := db.compact(ctx); err != nil {
+			if err := s.compactQueued(); err != nil {
+				fmt.Fprintf(os.Stderr, "compact %s: %v\n", s.log.path, err)
+			}
+		case <-t.C:
+			if err := db.compactExpirations(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "compact: %v\n", err)
 			}
 		}
 	}
+}
+
+// compactExpirations is the ticker path. Ordinary write history is handled by
+// queued state triggers; pending passes are also retried when no TTLs remain.
+func (db *DB) compactExpirations(ctx context.Context) error {
+	var err error
+	for i := range db.shards {
+		if ctx.Err() != nil {
+			break
+		}
+		if compactErr := db.shards[i].compactExpirations(); compactErr != nil {
+			err = errors.Join(err, fmt.Errorf("shard %02d: %w", i, compactErr))
+		}
+	}
+	return err
 }
 
 func (db *DB) compact(ctx context.Context) error {
@@ -283,12 +331,15 @@ func (db *DB) Delete(key []byte) error {
 		return fmt.Errorf("prepare delete: %w", err)
 	}
 	if change.kind == indexUnchanged {
+		// Deleting an expired key can prune its index entry without a tombstone.
+		s.maybeScheduleCompaction()
 		return nil
 	}
 	if _, _, err := s.log.write('d', key, nil, 0); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)
+	s.maybeScheduleCompaction()
 	return nil
 }
 

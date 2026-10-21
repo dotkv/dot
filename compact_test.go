@@ -28,7 +28,9 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 	if entries != s.index.entryCount {
 		t.Fatalf("index entries=%d, entryCount=%d", entries, s.index.entryCount)
 	}
+	var total uint64
 	for seg, count := range s.log.segmentRecordCounts {
+		total += uint64(count)
 		data, err := os.ReadFile(s.log.segmentPath(seg))
 		if err != nil {
 			t.Fatal(err)
@@ -49,6 +51,9 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 		}
 		delete(refs, seg)
 	}
+	if s.log.recordCount != total {
+		t.Fatalf("total records=%d, want %d", s.log.recordCount, total)
+	}
 	if len(refs) != 0 {
 		t.Fatalf("index references missing segments: %v", refs)
 	}
@@ -62,6 +67,12 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 func stopTestMaintenance(db *DB) {
 	db.backgroundCancel()
 	db.backgroundWG.Wait()
+	for i := range db.shards {
+		s := &db.shards[i]
+		s.lock.Lock()
+		s.compactionQueue = nil
+		s.lock.Unlock()
+	}
 }
 
 func TestDBCompaction(t *testing.T) {
@@ -324,7 +335,7 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRecoverySegment(t, shardPath, maxSegment-2, nil)
-	db, err := Open(path)
+	db, err := Open(path, WithCompaction(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +390,7 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			db, err = Open(path)
+			db, err = Open(path, WithCompaction(false))
 			if err != nil {
 				t.Fatal(err)
 			}

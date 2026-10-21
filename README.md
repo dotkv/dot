@@ -19,11 +19,28 @@ the database is reopened. Successful writes are not synced individually.
 
 ## Compaction
 
-Every ten seconds, shards with more than 20% obsolete records are compacted.
+Successful mutations queue background compaction when a shard has more than
+20% obsolete records and at least 8,192 obsolete records. A single worker serves
+a bounded queue with at most one queued request per shard. Checks use incremental
+record counts, without scanning segments or adding reads to the write path.
 Compaction holds one shard's exclusive lock for its pass; other shards can
-continue serving requests. Expired index entries are pruned before counting.
-Interrupted passes are retried even below that threshold. Recovery schedules a
-pass for underfilled sealed segments or sealed segments with obsolete records.
+continue serving requests.
+
+Pass `WithCompactionThreshold(ratio, minObsoleteRecords)` to `Open` to configure
+the state trigger. For example, `WithCompactionThreshold(0.3, 4096)` requires more
+than 30% obsolete records and at least 4,096 obsolete records in that shard.
+The ratio must be finite and in `[0, 1)`; a zero minimum is allowed. Thresholds
+count records, not bytes, so retained disk space also depends on record sizes.
+A larger minimum trades more retained history for fewer compaction passes and
+sync operations. The option has no effect when passed to `Set`.
+
+Every ten seconds, the worker also checks shards with tracked expirations or
+pending cleanup. It prunes expired index entries, then applies the configured
+obsolete ratio without the state trigger's minimum record count. Other shards
+are skipped. Failed passes wait for this ticker to retry, including when pruning
+removed the last expiration entry. Recovery queues eligible history, already
+expired records, and unfinished packing without waiting for another write.
+Pending passes complete even below the configured thresholds.
 
 Pass `WithCompaction(false)` to `Open` to disable background compaction for that
 database handle. Compaction is enabled by default. Disabling it retains obsolete

@@ -12,6 +12,35 @@ import (
 func (s *Shard) compact() error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	err := s.compactLocked()
+	s.compactionRetry = err != nil
+	return err
+}
+
+func (s *Shard) compactQueued() error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	err := s.compactLocked()
+	s.compactionQueued = false
+	s.compactionRetry = err != nil
+	return err
+}
+
+func (s *Shard) compactExpirations() error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	// Let an already queued job own its pass. Clearing its queue flag here
+	// would permit duplicate entries before the worker consumes the first one.
+	if s.closed || s.compactionQueued || (len(s.index.expirations) == 0 && !s.log.compactPending) {
+		return nil
+	}
+	err := s.compactLocked()
+	s.compactionRetry = err != nil
+	return err
+}
+
+// compactLocked requires the shard's exclusive lock for the entire pass.
+func (s *Shard) compactLocked() error {
 	if s.closed {
 		return nil
 	}
@@ -20,11 +49,7 @@ func (s *Shard) compact() error {
 		return l.writeErr
 	}
 	idx.prune()
-	var total uint64
-	for _, count := range l.segmentRecordCounts {
-		total += uint64(count)
-	}
-	if !l.compactPending && (total == 0 || total-uint64(idx.entryCount) <= total/5) {
+	if !l.compactPending && !s.needsCompaction(0) {
 		return nil
 	}
 	l.compactPending = true
@@ -121,6 +146,7 @@ func (l *Log) removeUnusedPrefix(segments []uint64) ([]uint64, error) {
 		if err := os.Remove(l.segmentPath(seg)); err != nil {
 			return segments, err
 		}
+		l.recordCount -= uint64(l.segmentRecordCounts[seg])
 		delete(l.segmentRecordCounts, seg)
 		delete(l.segmentRefCounts, seg)
 		segments = segments[1:]
@@ -229,6 +255,7 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 			}
 		}
 	}
+	l.recordCount = l.recordCount - uint64(l.segmentRecordCounts[seg]) + uint64(len(moves))
 	l.segmentRecordCounts[seg] = uint32(len(moves))
 	if seg == l.headSegment {
 		// Reopen under the published filename so headFile.Name remains useful.

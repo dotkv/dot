@@ -50,6 +50,7 @@ func (f *primitiveFixture) resetValue[T Value](b *testing.B, populated bool, val
 			b.Fatal(err)
 		}
 		s.log.size = 0
+		s.log.recordCount = 0
 		clear(s.log.segmentRecordCounts)
 		s.log.segmentRecordCounts[s.log.headSegment] = 0
 		clear(s.log.segmentRefCounts)

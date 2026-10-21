@@ -14,7 +14,9 @@ func reopenDB(t *testing.T, db *DB) *DB {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(db.path)
+	// Recovery fixtures inspect files and index accounting directly. Dedicated
+	// scheduler tests cover automatic cleanup after Open.
+	reopened, err := Open(db.path, WithCompaction(false))
 	if err != nil {
 		t.Fatal(err)
 	}

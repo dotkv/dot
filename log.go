@@ -31,9 +31,10 @@ type Log struct {
 	headFile            *os.File
 	headSegment         uint64
 	size                uint64
+	recordCount         uint64
 	segmentRecordCounts map[uint64]uint32
 	segmentRefCounts    map[uint64]uint32
-	// Retry unfinished maintenance even after cleanup lowers the dead-record ratio.
+	// Finish queued or interrupted maintenance even if cleanup lowers the ratio.
 	compactPending bool
 
 	// A failed rollback or metadata sync blocks appends until the log is reopened.
@@ -237,6 +238,7 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 			return fmt.Errorf("index record at offset %d: %w", off, err)
 		}
 		l.segmentRecordCounts[seg]++
+		l.recordCount++
 		off += logHeaderSize + keylen + vallen
 	}
 	return nil
@@ -390,6 +392,7 @@ func (l *Log) appendRecord(ty byte, key []byte, val []byte, expiration int64) (u
 	}
 	l.size = off + uint64(n)
 	l.segmentRecordCounts[l.headSegment]++
+	l.recordCount++
 	return segment, off, nil
 }
 

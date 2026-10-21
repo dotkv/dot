@@ -229,11 +229,14 @@ memtable flush backpressure, remain in effect. Results describe performance with
 cleanup deferred, including any read amplification and disk growth that creates.
 They do not measure sustained performance or reclaimed disk space.
 
-The **slow profile** uses normal Dot compaction (a check every 10 seconds, with
-eligible shards compacted) and Pebble's default compaction settings and L0 limit.
-A 45-second target is intended to encounter multiple Dot rounds, but elapsed time
-alone does not establish maintenance coverage or steady state. Interpret short
-or unstable runs accordingly.
+The **slow profile** uses normal Dot compaction: successful mutations queue a
+shard when more than 20% of its records are obsolete and at least 8,192 records
+are obsolete. A single background worker coalesces requests per shard. A
+10-second ticker additionally handles tracked expirations and pending retries.
+Pebble uses its default compaction settings and L0 limit. The 45-second Dot target
+is an estimate; elapsed time alone does not establish maintenance coverage or
+steady state. Results from the earlier ticker-only scheduler must be rerun to
+measure the new policy.
 
 Preload and workload warmup are untimed. Pebble's memtables are flushed after
 each so reads exercise SSTables as well as caches. A final untimed flush and

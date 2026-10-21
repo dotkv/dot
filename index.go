@@ -378,7 +378,13 @@ func (idx *Index) prepareSet(log *Log, key []byte, val []byte, hash uint64, expi
 // replay applies an existing record at addr without writing or deduplicating it.
 // An expired set must remove the previous value so recovery cannot resurrect it.
 func (idx *Index) replay(log *Log, ty byte, key []byte, hash, addr uint64, expiration int64) error {
-	if ty == 'd' || isExpired(expiration) {
+	expired := isExpired(expiration)
+	if ty == 'd' || expired {
+		if expired {
+			// Recovery prunes this TTL from the index immediately. Keep its
+			// history eligible for cleanup even though the expiry map is empty.
+			log.compactPending = true
+		}
 		change, err := idx.prepareDelete(log, key, hash)
 		if err != nil {
 			return err
