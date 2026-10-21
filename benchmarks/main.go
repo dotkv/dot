@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -28,11 +29,14 @@ func main() {
 
 func command(ctx context.Context) error {
 	engineList := flag.String("engines", "dot,pebble", "comma-separated engines")
-	workloadList := flag.String("workloads", "read-heavy,mixed,write-heavy", "comma-separated workloads")
-	sizeList := flag.String("sizes", "8,1024", "comma-separated value sizes in bytes (>= 8)")
+	profile := flag.String("profile", "fast", "benchmark profile: fast, slow, or all")
+	workloadList := flag.String("workloads", "", "comma-separated read/write ratios; default depends on profile")
+	sizeList := flag.String("sizes", "", "comma-separated value sizes in bytes; defaults: fast 8,1024; slow 128")
 	workerList := flag.String("workers", "16", "comma-separated worker counts (1, 16, 128)")
 	keys := flag.Int("keys", 16384, "total preloaded live keys per case")
-	ops := flag.Int("ops", 300000, "total measured operations per case")
+	ops := flag.Int("ops", 0, "fixed measured operations per case; overrides Dot calibration")
+	target := flag.Duration("target", 0, "Dot time target for shared operation budgets; defaults: fast 3s, slow 45s")
+	timeout := flag.Duration("timeout", 10*time.Minute, "timeout for each process, including preparation and drain")
 	warmup := flag.Int("warmup", 30000, "total untimed warmup operations per case")
 	seed := flag.Uint64("seed", 1, "deterministic workload seed")
 	scalar := flag.Bool("scalar", true, "use uint64 operations for 8-byte values; false uses byte slices")
@@ -71,8 +75,11 @@ func command(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "Updated result tables in %s from %s\n", *readme, *fromJSON)
 		return nil
 	}
-	if *repeat < 1 {
-		return fmt.Errorf("repeat must be >= 1")
+	if *repeat < 1 || *ops < 0 || *target < 0 || *timeout <= 0 {
+		return fmt.Errorf("repeat and timeout must be positive; ops and target must be nonnegative")
+	}
+	if *ops > 0 && *target > 0 {
+		return fmt.Errorf("-ops and -target are mutually exclusive")
 	}
 	if *readme != "" {
 		if err := checkReadme(*readme); err != nil {
@@ -83,42 +90,29 @@ func command(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	workloadNames, err := csv(*workloadList)
-	if err != nil {
-		return err
+	var workloadNames []string
+	if *workloadList != "" {
+		workloadNames, err = csv(*workloadList)
+		if err != nil {
+			return err
+		}
 	}
-	sizes, err := integers(*sizeList)
-	if err != nil {
-		return err
+	var sizes []int
+	if *sizeList != "" {
+		sizes, err = integers(*sizeList)
+		if err != nil {
+			return err
+		}
 	}
 	concurrency, err := integers(*workerList)
 	if err != nil {
 		return err
 	}
-	var cases []caseConfig
-	for repetition := range *repeat {
-		configuration := 0
-		for _, workload := range workloadNames {
-			for _, size := range sizes {
-				for _, workers := range concurrency {
-					// Rotate engine order to distribute effects of run order.
-					offset := (configuration + repetition) % len(names)
-					for i := range names {
-						c := caseConfig{
-							Engine: names[(i+offset)%len(names)], Workload: workload,
-							ValueBytes: size, Scalar: *scalar && size == 8, Workers: workers,
-							Keys: *keys, Operations: *ops, Warmup: *warmup, Seed: *seed,
-							Repetition: repetition + 1,
-						}
-						if err := c.validate(); err != nil {
-							return err
-						}
-						cases = append(cases, c)
-					}
-					configuration++
-				}
-			}
-		}
+	cases, err := buildCases(*profile, caseConfig{
+		Keys: *keys, Operations: *ops, DotTarget: *target, Warmup: *warmup, Seed: *seed, Scalar: *scalar,
+	}, names, workloadNames, sizes, concurrency, *repeat)
+	if err != nil {
+		return err
 	}
 	parentDir, err := filepath.Abs(*dir)
 	if err != nil {
@@ -129,13 +123,36 @@ func command(ctx context.Context) error {
 		return err
 	}
 	if !*jsonOutput {
-		fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7s %10s %10s %12s %9s %9s %9s\n",
-			"ENGINE", "WORKLOAD", "VALUE", "WORKERS", "MEAN us", "P99 us", "OPS/s", "PEAK MiB", "DISK MiB", "DRAIN s")
+		fmt.Fprintf(os.Stdout, "%-7s %-8s %-11s %7s %7s %8s %10s %10s %12s %9s %9s %9s\n",
+			"PROFILE", "ENGINE", "READ/WRITE", "VALUE", "WORKERS", "SECONDS", "MEAN us", "P99 us", "OPS/s", "PEAK MiB", "DISK MiB", "DRAIN s")
 	}
 	var results []result
+	budgets := make(map[scenario]int)
+	run := func(c caseConfig) (result, error) {
+		caseCtx, cancel := context.WithTimeout(ctx, *timeout)
+		defer cancel()
+		return isolatedCase(caseCtx, executable, parentDir, c)
+	}
 	for i, c := range cases {
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s %s %dB scalar=%v workers=%d repeat=%d\n", i+1, len(cases), c.Engine, c.Workload, c.ValueBytes, c.Scalar, c.Workers, c.Repetition)
-		out, err := isolatedCase(ctx, executable, parentDir, c)
+		if *ops == 0 {
+			key := scenarioFor(c)
+			if budgets[key] == 0 {
+				fmt.Fprintf(os.Stderr, "Calibrating Dot: %s %s %dB workers=%d target=%s\n", c.Profile, c.Workload, c.ValueBytes, c.Workers, c.DotTarget)
+				probe := c
+				probe.Engine, probe.Operations, probe.CalibrationDuration = "dot", 0, calibrationDuration
+				pilot, err := run(probe)
+				if err != nil {
+					return fmt.Errorf("Dot calibration: %w", err)
+				}
+				budgets[key], err = operationBudget(pilot, c.DotTarget, c.Workers)
+				if err != nil {
+					return err
+				}
+			}
+			c.Operations = budgets[key]
+		}
+		fmt.Fprintf(os.Stderr, "[%d/%d] %s %s %s %dB scalar=%v workers=%d repeat=%d ops=%d compaction=%v\n", i+1, len(cases), c.Profile, c.Engine, c.Workload, c.ValueBytes, c.Scalar, c.Workers, c.Repetition, c.Operations, !c.DisableCompaction)
+		out, err := run(c)
 		if err != nil {
 			return err
 		}
@@ -149,8 +166,8 @@ func command(ctx context.Context) error {
 			if c.Scalar {
 				value = "uint64"
 			}
-			_, err := fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7d %10.3f %10.3f %12.0f %9.1f %9.2f %9.3f\n",
-				c.Engine, c.Workload, value, c.Workers, out.Latency.MeanNS/1000, float64(out.Latency.P99NS)/1000,
+			_, err := fmt.Fprintf(os.Stdout, "%-7s %-8s %-11s %7s %7d %8.3f %10.3f %10.3f %12.0f %9.1f %9.2f %9.3f\n",
+				c.Profile, c.Engine, c.Workload, value, c.Workers, out.ElapsedSeconds, out.Latency.MeanNS/1000, float64(out.Latency.P99NS)/1000,
 				out.OpsPerSecond, float64(out.RSSPeakBytes)/(1<<20),
 				float64(out.DiskFinal.AllocatedBytes)/(1<<20), out.DrainSeconds)
 			if err != nil {
@@ -182,7 +199,7 @@ func isolatedCase(ctx context.Context, executable, parent string, c caseConfig) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return out, fmt.Errorf("%s case: %w", c.Engine, err)
+		return out, fmt.Errorf("%s case: %w", c.Engine, errors.Join(err, ctx.Err()))
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
 		return out, fmt.Errorf("decode %s result: %w", c.Engine, err)

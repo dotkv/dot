@@ -15,7 +15,7 @@ import (
 func TestEngineContracts(t *testing.T) {
 	for _, name := range []string{"dot", "pebble"} {
 		t.Run(name, func(t *testing.T) {
-			db, err := engines[name](t.TempDir())
+			db, err := engines[name](caseConfig{Path: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -21,11 +21,9 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 	b.Helper()
 	// Callers must start the timer after setup, even when using b.Loop.
 	b.StopTimer()
-	db := newInternalDB(b)
 	// Primitive benchmarks reset files and index state directly. Keep background
 	// maintenance out of these fixtures and their foreground measurements.
-	db.backgroundCancel()
-	db.backgroundWG.Wait()
+	db := newInternalDB(b, WithCompaction(false))
 	f := &primitiveFixture{db: db}
 	for i := range f.keys {
 		binary.LittleEndian.PutUint64(f.keys[i][:], uint64(i))

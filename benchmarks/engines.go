@@ -23,26 +23,37 @@ type engine interface {
 	Close() error
 }
 
-var engines = map[string]func(string) (engine, error){
-	"dot": func(path string) (engine, error) {
-		db, err := dot.Open(path)
+var engines = map[string]func(caseConfig) (engine, error){
+	"dot": func(c caseConfig) (engine, error) {
+		db, err := dot.Open(c.Path, dot.WithCompaction(!c.DisableCompaction))
 		if err != nil {
 			return nil, err
 		}
 		return &dotEngine{db}, nil
 	},
-	"pebble": func(path string) (engine, error) {
-		// WAL and automatic compaction remain enabled. Compression is disabled
-		// to match Dot. Other settings, including the cache, use Pebble defaults.
-		opts := &pebble.Options{}
-		opts.EnsureDefaults()
-		opts.ApplyCompressionSettings(func() pebble.DBCompressionSettings { return pebble.DBCompressionNone })
-		db, err := pebble.Open(path, opts)
+	"pebble": func(c caseConfig) (engine, error) {
+		db, err := pebble.Open(c.Path, pebbleOptions(c))
 		if err != nil {
 			return nil, err
 		}
 		return &pebbleEngine{db}, nil
 	},
+}
+
+// A finite fast case must be able to keep flushing without compaction making
+// room in L0. The parent process enforces a timeout for every case.
+const fastL0StopWritesThreshold = 1 << 30
+
+func pebbleOptions(c caseConfig) *pebble.Options {
+	opts := &pebble.Options{DisableAutomaticCompactions: c.DisableCompaction}
+	opts.EnsureDefaults()
+	if c.DisableCompaction {
+		opts.L0StopWritesThreshold = fastL0StopWritesThreshold
+	}
+	// WAL and flushes remain enabled. Disable compression to match Dot, and
+	// retain other defaults, including the cache and memtable sizes.
+	opts.ApplyCompressionSettings(func() pebble.DBCompressionSettings { return pebble.DBCompressionNone })
+	return opts
 }
 
 type dotEngine struct{ db *dot.DB }

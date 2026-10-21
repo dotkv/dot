@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func reportFixture(engine string, mean float64, p99 int64) result {
@@ -18,6 +19,36 @@ func reportFixture(engine string, mean float64, p99 int64) result {
 		Latency: latencySummary{Count: 12000, MeanNS: mean, P99NS: p99}, OpsPerSecond: 1000000,
 		RSSFinalBytes: 12 << 20, RSSPeakBytes: 20 << 20,
 		DiskFinal: diskSize{AllocatedBytes: 4 << 20}, SpaceAmplification: 2,
+	}
+}
+
+func TestReportProfilesAndScenarioBudgets(t *testing.T) {
+	a := reportFixture("dot", 1000, 2000)
+	a.Config.Profile, a.Config.Workload, a.Config.DisableCompaction, a.Config.DotTarget = "fast", "50/50", true, 3*time.Second
+	b := a
+	b.Config.ValueBytes, b.Config.Scalar, b.Config.Operations = 1024, false, 24000
+	b.Latency.Count = 24000
+	slow := a
+	slow.Config.Profile, slow.Config.ValueBytes, slow.Config.Scalar = "slow", 128, false
+	slow.Config.DisableCompaction, slow.Config.DotTarget, slow.Config.Operations = false, 45*time.Second, 48000
+	slow.Latency.Count = 48000
+	data, err := renderResults([]result{a, b, slow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("Partial matrix")) || !bytes.Contains(data, []byte("**16-byte keys**")) || !bytes.Contains(data, []byte("**45s for Dot**")) || !bytes.Contains(data, []byte("**24,000**")) {
+		t.Fatalf("incorrect profile report:\n%s", data)
+	}
+	incompatible := a
+	incompatible.Config.DisableCompaction = false
+	if _, err := renderResults([]result{a, incompatible}); err == nil {
+		t.Fatal("combined different maintenance settings")
+	}
+	incompatible = a
+	incompatible.Config.Engine = "pebble"
+	incompatible.Config.Operations++
+	if _, err := renderResults([]result{a, incompatible}); err == nil {
+		t.Fatal("compared different operation counts across engines")
 	}
 }
 
@@ -82,13 +113,14 @@ func TestReportGroupingAndMedians(t *testing.T) {
 		t.Fatal("scalar and byte-slice configurations were combined")
 	}
 	// Medians are per run: mean=(500+1500)/2 ns, p99=(1000+9000)/2 ns.
-	row := "| Dot | 2 | 1.000 | 5.000 | 1,000,000 | 20.0 | 4.00 |"
+	row := "| Dot | 2 | 0.000 | 1.000 | 5.000 | 1,000,000 | 20.0 | 4.00 |"
 	if !strings.Contains(text, row) {
 		t.Fatalf("missing median/unit-converted row %q:\n%s", row, text)
 	}
 	if strings.Index(text, "| Dot |") > strings.Index(text, "| Pebble |") {
 		t.Fatal("implementation ordering depends on execution order")
 	}
+	other.Config.Scalar = true
 	other.Config.Operations++
 	if _, err := renderResults([]result{reportFixture("dot", 1, 1), other}); err == nil {
 		t.Fatal("combined different operation budgets")

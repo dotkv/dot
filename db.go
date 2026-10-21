@@ -31,11 +31,22 @@ type DB struct {
 
 // Options configures database and key operations.
 type Options struct {
-	expiration int64
+	expiration        int64
+	disableCompaction bool
 }
 
 // Option configures Open or Set.
 type Option func(*Options)
+
+// WithCompaction enables or disables background compaction when passed to Open.
+// Compaction is enabled by default. Disabling it defers obsolete-record and
+// expired-entry reclamation; expired keys still read as missing. This option has
+// no effect when passed to Set.
+func WithCompaction(enabled bool) Option {
+	return func(o *Options) {
+		o.disableCompaction = !enabled
+	}
+}
 
 // WithExpiration sets the time at which a key expires. When passed to Open, it
 // sets the default expiration for Set calls on that database; when passed to
@@ -81,7 +92,9 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
-	db.backgroundWG.Go(func() { db.background(ctx) })
+	if !options.disableCompaction {
+		db.backgroundWG.Go(func() { db.background(ctx) })
+	}
 	return db, nil
 }
 
