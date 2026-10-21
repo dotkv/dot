@@ -11,10 +11,9 @@ import (
 
 const keyBytes = 16
 
-// Ratios are reads/writes. Retain the old names for saved results and opt-in runs.
+// Ratios are reads/writes.
 var workloads = map[string]int{
-	"0/100": 0, "10/90": 10, "50/50": 50, "90/10": 90, "100/0": 100,
-	"read-heavy": 95, "mixed": 50, "write-heavy": 5,
+	"80/20": 80, "20/80": 20,
 }
 
 type operationKind int

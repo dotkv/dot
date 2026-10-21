@@ -33,31 +33,19 @@ type DB struct {
 
 // Options configures database and key operations.
 type Options struct {
-	expiration        int64
-	disableCompaction bool
-	compaction        compactionThreshold
+	expiration int64
+	compaction compactionThreshold
 }
 
 // Option configures Open or Set.
 type Option func(*Options)
-
-// WithCompaction enables or disables background compaction when passed to Open.
-// Compaction is enabled by default. Disabling it defers obsolete-record and
-// expired-entry reclamation; expired keys still read as missing. This option has
-// no effect when passed to Set.
-func WithCompaction(enabled bool) Option {
-	return func(o *Options) {
-		o.disableCompaction = !enabled
-	}
-}
 
 // WithCompactionThreshold configures state-based background compaction in Open.
 // A shard is queued after a mutation when its obsolete-record fraction exceeds
 // ratio and it has at least minObsoleteRecords obsolete records. Defaults are
 // 0.2 and 8192. ratio must be finite and in [0, 1); a zero minimum is allowed.
 // Expiration sweeps use ratio without the minimum; unfinished passes always
-// retry. WithCompaction(false) disables all automatic compaction regardless of
-// these thresholds. This option has no effect when passed to Set.
+// retry. This option has no effect when passed to Set.
 func WithCompactionThreshold(ratio float64, minObsoleteRecords uint64) Option {
 	return func(o *Options) {
 		o.compaction = compactionThreshold{ratio, minObsoleteRecords}
@@ -99,9 +87,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	db := &DB{path: path,
 		expiration:       options.expiration,
 		backgroundCancel: cancel,
-	}
-	if !options.disableCompaction {
-		db.compactionQueue = make(chan *Shard, shardCount)
+		compactionQueue:  make(chan *Shard, shardCount),
 	}
 	for i := range db.shards {
 		db.shards[i].compactionThreshold = &options.compaction
@@ -116,14 +102,12 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
-	if !options.disableCompaction {
-		// Recovery may leave eligible history or unfinished packing without any
-		// subsequent writes. Queue it before exposing the DB to callers.
-		for i := range db.shards {
-			db.shards[i].maybeScheduleCompaction()
-		}
-		db.backgroundWG.Go(func() { db.background(ctx) })
+	// Recovery may leave eligible history or unfinished packing without any
+	// subsequent writes. Queue it before exposing the DB to callers.
+	for i := range db.shards {
+		db.shards[i].maybeScheduleCompaction()
 	}
+	db.backgroundWG.Go(func() { db.background(ctx) })
 	return db, nil
 }
 

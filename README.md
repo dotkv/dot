@@ -42,11 +42,6 @@ removed the last expiration entry. Recovery queues eligible history, already
 expired records, and unfinished packing without waiting for another write.
 Pending passes complete even below the configured thresholds.
 
-Pass `WithCompaction(false)` to `Open` to disable background compaction for that
-database handle. Compaction is enabled by default. Disabling it retains obsolete
-history and defers expired-entry reclamation; expired keys still read as missing.
-The option has no effect when passed to `Set`.
-
 The pass first removes obsolete history from oldest to newest, preserving delete
 and expiration semantics. It then packs current records toward the existing head
 and removes empty files only from the oldest boundary, keeping one filename gap.
@@ -83,14 +78,14 @@ A failed write cannot undo external effects performed by the callback.
 
 ## Benchmarks
 
-The [engine comparison suite](benchmarks/README.md) compares Dot with Pebble using
-16-byte keys and 16 workers by default. Its fast profile disables automatic
-compaction and covers five read/write ratios with 8-byte scalars and 1 KiB values.
-Its slow profile enables normal compaction for a 50/50 workload with 128-byte
-values. A short Dot probe estimates fixed operation budgets targeting about
-3 seconds for fast Dot cases and 45 seconds for slow Dot cases. Every engine
-runs the same operation count; other engines may take longer. It reports latency,
-throughput, RSS, and disk usage. Dependencies live in a separate module.
+The [engine comparison suite](benchmarks/README.md) compares Dot, Pebble, and an
+in-memory Go map using 16-byte keys and 16 workers by default. It covers 80/20 and
+20/80 read/write ratios with 8-byte scalars and 1 KiB values. Dot and Pebble use
+normal automatic compaction. A short Dot probe estimates fixed operation budgets
+targeting about 3 seconds per Dot case. Every engine runs the same operation
+count. The suite reports latency, throughput, RSS, and disk usage, and always
+writes results to its README after a successful run. Dependencies live in a
+separate module.
 
 Root benchmarks include serial, unchanged, and parallel `uint64` updates.
 Their primitive fixtures stop background maintenance to isolate foreground work

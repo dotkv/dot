@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 
 	"dot"
 	"github.com/cockroachdb/pebble/v2"
@@ -25,31 +26,27 @@ type engine interface {
 
 var engines = map[string]func(caseConfig) (engine, error){
 	"dot": func(c caseConfig) (engine, error) {
-		db, err := dot.Open(c.Path, dot.WithCompaction(!c.DisableCompaction))
+		db, err := dot.Open(c.Path)
 		if err != nil {
 			return nil, err
 		}
 		return &dotEngine{db}, nil
 	},
 	"pebble": func(c caseConfig) (engine, error) {
-		db, err := pebble.Open(c.Path, pebbleOptions(c))
+		db, err := pebble.Open(c.Path, pebbleOptions())
 		if err != nil {
 			return nil, err
 		}
 		return &pebbleEngine{db}, nil
 	},
+	"map": func(c caseConfig) (engine, error) {
+		return &mapEngine{values: make(map[string][]byte, c.Keys+c.Workers)}, nil
+	},
 }
 
-// A finite fast case must be able to keep flushing without compaction making
-// room in L0. The parent process enforces a timeout for every case.
-const fastL0StopWritesThreshold = 1 << 30
-
-func pebbleOptions(c caseConfig) *pebble.Options {
-	opts := &pebble.Options{DisableAutomaticCompactions: c.DisableCompaction}
+func pebbleOptions() *pebble.Options {
+	opts := &pebble.Options{}
 	opts.EnsureDefaults()
-	if c.DisableCompaction {
-		opts.L0StopWritesThreshold = fastL0StopWritesThreshold
-	}
 	// WAL and flushes remain enabled. Disable compression to match Dot, and
 	// retain other defaults, including the cache and memtable sizes.
 	opts.ApplyCompressionSettings(func() pebble.DBCompressionSettings { return pebble.DBCompressionNone })
@@ -116,3 +113,53 @@ func (e *pebbleEngine) GetUint64(key []byte) (uint64, bool, error) {
 func (e *pebbleEngine) Delete(key []byte) error { return e.db.Delete(key, pebble.NoSync) }
 func (e *pebbleEngine) Flush() error            { return e.db.Flush() }
 func (e *pebbleEngine) Close() error            { return e.db.Close() }
+
+// One ordinary Go map shared by all workers. Copies preserve the same ownership
+// contract as the persistent adapters; the RWMutex is included in timing.
+type mapEngine struct {
+	mu     sync.RWMutex
+	values map[string][]byte
+}
+
+func (e *mapEngine) Set(key, value []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.values[string(key)] = bytes.Clone(value)
+	return nil
+}
+
+func (e *mapEngine) Get(key []byte) ([]byte, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	value, found := e.values[string(key)]
+	return bytes.Clone(value), found, nil
+}
+
+func (e *mapEngine) SetUint64(key []byte, value uint64) error {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], value)
+	return e.Set(key, encoded[:])
+}
+
+func (e *mapEngine) GetUint64(key []byte) (uint64, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	value, found := e.values[string(key)]
+	if !found {
+		return 0, false, nil
+	}
+	if len(value) != 8 {
+		return 0, false, fmt.Errorf("scalar has %d bytes, want 8", len(value))
+	}
+	return binary.LittleEndian.Uint64(value), true, nil
+}
+
+func (e *mapEngine) Delete(key []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.values, string(key))
+	return nil
+}
+
+func (e *mapEngine) Flush() error { return nil }
+func (e *mapEngine) Close() error { return nil }

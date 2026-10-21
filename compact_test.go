@@ -335,12 +335,8 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRecoverySegment(t, shardPath, maxSegment-2, nil)
-	db, err := Open(path, WithCompaction(false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	stopTestMaintenance(db)
+	db := openRecoveryFixture(t, path)
+	var err error
 	keys := keysForShard(db, &db.shards[0], "random", 24)
 	want := make(map[int]string)
 	random := rand.New(rand.NewPCG(1, 2))
@@ -390,11 +386,7 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			db, err = Open(path, WithCompaction(false))
-			if err != nil {
-				t.Fatal(err)
-			}
-			stopTestMaintenance(db)
+			db = openRecoveryFixture(t, path)
 			check()
 		}
 	}

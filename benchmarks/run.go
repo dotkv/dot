@@ -13,7 +13,6 @@ import (
 )
 
 type caseConfig struct {
-	Profile    string        `json:"profile,omitempty"`
 	Engine     string        `json:"engine"`
 	Workload   string        `json:"workload"`
 	KeyBytes   int           `json:"key_bytes"`
@@ -26,7 +25,6 @@ type caseConfig struct {
 	// Only internal Dot calibration probes stop on time. Reported cases always
 	// execute Operations, identically across engines and repetitions.
 	CalibrationDuration time.Duration `json:"calibration_duration_ns,omitempty"`
-	DisableCompaction   bool          `json:"disable_compaction"`
 	Warmup              int           `json:"warmup_operations"`
 	Seed                uint64        `json:"seed"`
 	Repetition          int           `json:"repetition"`
@@ -34,9 +32,6 @@ type caseConfig struct {
 }
 
 func (c caseConfig) validate() error {
-	if c.Profile != "" && c.Profile != "fast" && c.Profile != "slow" {
-		return fmt.Errorf("unknown profile %q", c.Profile)
-	}
 	if _, ok := engines[c.Engine]; !ok {
 		return fmt.Errorf("unknown engine %q", c.Engine)
 	}

@@ -4,10 +4,36 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Recover shards directly for fixtures that inspect exact file and index state.
+// Open's background scheduling is exercised by the compaction recovery tests.
+func openRecoveryFixture(t *testing.T, path string) *DB {
+	t.Helper()
+	db := &DB{path: path, backgroundCancel: func() {}}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	for i := range db.shards {
+		s := &db.shards[i]
+		var err error
+		s.index, err = newIndex()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.log, err = newLog(filepath.Join(path, fmt.Sprintf("%02d", i)), s.index)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
 
 func reopenDB(t *testing.T, db *DB) *DB {
 	t.Helper()
@@ -16,16 +42,7 @@ func reopenDB(t *testing.T, db *DB) *DB {
 	}
 	// Recovery fixtures inspect files and index accounting directly. Dedicated
 	// scheduler tests cover automatic cleanup after Open.
-	reopened, err := Open(db.path, WithCompaction(false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := reopened.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return reopened
+	return openRecoveryFixture(t, db.path)
 }
 
 func TestDBRecovery(t *testing.T) {

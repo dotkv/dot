@@ -13,7 +13,7 @@ import (
 func reportFixture(engine string, mean float64, p99 int64) result {
 	return result{
 		Config: caseConfig{
-			Engine: engine, Workload: "mixed", ValueBytes: 8, Scalar: true,
+			Engine: engine, Workload: "80/20", ValueBytes: 8, Scalar: true,
 			Workers: 16, Keys: 1024, Operations: 12000, Warmup: 1200, Seed: 1,
 		},
 		Latency: latencySummary{Count: 12000, MeanNS: mean, P99NS: p99}, OpsPerSecond: 1000000,
@@ -22,27 +22,23 @@ func reportFixture(engine string, mean float64, p99 int64) result {
 	}
 }
 
-func TestReportProfilesAndScenarioBudgets(t *testing.T) {
+func TestReportScenarioBudgets(t *testing.T) {
 	a := reportFixture("dot", 1000, 2000)
-	a.Config.Profile, a.Config.Workload, a.Config.DisableCompaction, a.Config.DotTarget = "fast", "50/50", true, 3*time.Second
+	a.Config.DotTarget = 3 * time.Second
 	b := a
 	b.Config.ValueBytes, b.Config.Scalar, b.Config.Operations = 1024, false, 24000
 	b.Latency.Count = 24000
-	slow := a
-	slow.Config.Profile, slow.Config.ValueBytes, slow.Config.Scalar = "slow", 128, false
-	slow.Config.DisableCompaction, slow.Config.DotTarget, slow.Config.Operations = false, 45*time.Second, 48000
-	slow.Latency.Count = 48000
-	data, err := renderResults([]result{a, b, slow})
+	data, err := renderResults([]result{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte("Partial matrix")) || !bytes.Contains(data, []byte("**16-byte keys**")) || !bytes.Contains(data, []byte("**45s for Dot**")) || !bytes.Contains(data, []byte("**24,000**")) {
-		t.Fatalf("incorrect profile report:\n%s", data)
+	if bytes.Contains(data, []byte("Partial matrix")) || !bytes.Contains(data, []byte("**16-byte keys**")) || !bytes.Contains(data, []byte("**3s for Dot**")) || !bytes.Contains(data, []byte("**24,000**")) {
+		t.Fatalf("incorrect report:\n%s", data)
 	}
 	incompatible := a
-	incompatible.Config.DisableCompaction = false
+	incompatible.Config.DotTarget = time.Second
 	if _, err := renderResults([]result{a, incompatible}); err == nil {
-		t.Fatal("combined different maintenance settings")
+		t.Fatal("combined different Dot targets")
 	}
 	incompatible = a
 	incompatible.Config.Engine = "pebble"
@@ -91,7 +87,7 @@ func TestReportMarksMissingConfigurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte("**Partial matrix.**")) || !bytes.Contains(data, []byte("mixed / 1,024 B / 16 workers")) {
+	if !bytes.Contains(data, []byte("**Partial matrix.**")) || !bytes.Contains(data, []byte("80/20 / 1,024 B / 16 workers")) {
 		t.Fatalf("missing configurations were not identified:\n%s", data)
 	}
 }
@@ -101,6 +97,7 @@ func TestReportGroupingAndMedians(t *testing.T) {
 	other.Config.Scalar = false
 	data, err := renderResults([]result{
 		reportFixture("pebble", 1000, 2000),
+		reportFixture("map", 1000, 2000),
 		reportFixture("dot", 500, 1000),
 		reportFixture("dot", 1500, 9000),
 		other,
@@ -116,6 +113,9 @@ func TestReportGroupingAndMedians(t *testing.T) {
 	row := "| Dot | 2 | 0.000 | 1.000 | 5.000 | 1,000,000 | 20.0 | 4.00 |"
 	if !strings.Contains(text, row) {
 		t.Fatalf("missing median/unit-converted row %q:\n%s", row, text)
+	}
+	if !strings.Contains(text, "| Go map (in memory) |") {
+		t.Fatal("missing new engine labels")
 	}
 	if strings.Index(text, "| Dot |") > strings.Index(text, "| Pebble |") {
 		t.Fatal("implementation ordering depends on execution order")

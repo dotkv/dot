@@ -13,7 +13,7 @@ import (
 )
 
 func TestEngineContracts(t *testing.T) {
-	for _, name := range []string{"dot", "pebble"} {
+	for _, name := range []string{"dot", "pebble", "map"} {
 		t.Run(name, func(t *testing.T) {
 			db, err := engines[name](caseConfig{Path: t.TempDir()})
 			if err != nil {
@@ -83,7 +83,7 @@ func TestEngineContracts(t *testing.T) {
 func TestWorkloadSemantics(t *testing.T) {
 	for _, workers := range []int{1, 16, 128} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
-			c := caseConfig{Workload: "mixed", ValueBytes: 8, Scalar: true, Workers: workers, Keys: 2*workers + 1, Seed: 42}
+			c := caseConfig{Workload: "80/20", ValueBytes: 8, Scalar: true, Workers: workers, Keys: 2*workers + 1, Seed: 42}
 			// Keep all historical keys to catch collisions between workers and
 			// accidental reuse of an inserted key after deleting it.
 			seen := make(map[[16]byte]bool)
@@ -149,10 +149,10 @@ func TestRunCase(t *testing.T) {
 		scalar        bool
 	}{{1, 8, true}, {16, 8, false}, {128, 128, false}, {1, 65536, false}} {
 		var previous *result
-		for _, name := range []string{"dot", "pebble"} {
+		for _, name := range []string{"dot", "pebble", "map"} {
 			t.Run(fmt.Sprintf("%s/%d/%d/scalar=%v", name, mode.workers, mode.size, mode.scalar), func(t *testing.T) {
 				c := caseConfig{
-					Engine: name, Workload: "mixed", ValueBytes: mode.size, Scalar: mode.scalar,
+					Engine: name, Workload: "80/20", ValueBytes: mode.size, Scalar: mode.scalar,
 					Workers: mode.workers, Keys: 256, Operations: 3840, Warmup: 600, Seed: 7, Path: t.TempDir(),
 				}
 				out, err := runCase(context.Background(), c)
@@ -181,8 +181,15 @@ func TestRunCase(t *testing.T) {
 				if out.RSSHarnessBytes == 0 || out.RSSPreparedBytes == 0 || out.RSSFinalBytes == 0 || out.RSSPeakBytes < out.RSSFinalBytes {
 					t.Fatal("invalid RSS measurements")
 				}
-				if out.LiveKeys < c.Keys || out.LiveKeys > c.Keys+c.Workers || out.DiskFinal.AllocatedBytes == 0 || out.SpaceAmplification <= 0 {
+				if out.LiveKeys < c.Keys || out.LiveKeys > c.Keys+c.Workers {
 					t.Fatal("invalid disk/live data measurements")
+				}
+				if name == "map" {
+					if out.DiskFinal.AllocatedBytes != 0 || out.SpaceAmplification != 0 {
+						t.Fatal("in-memory map reported disk usage")
+					}
+				} else if out.DiskFinal.AllocatedBytes == 0 || out.SpaceAmplification <= 0 {
+					t.Fatal("persistent engine reported no disk usage")
 				}
 				previous = &out
 			})

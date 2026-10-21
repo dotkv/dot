@@ -23,7 +23,8 @@ func newPrimitiveFixture(b *testing.B) *primitiveFixture {
 	b.StopTimer()
 	// Primitive benchmarks reset files and index state directly. Keep background
 	// maintenance out of these fixtures and their foreground measurements.
-	db := newInternalDB(b, WithCompaction(false))
+	db := newInternalDB(b)
+	stopTestMaintenance(db)
 	f := &primitiveFixture{db: db}
 	for i := range f.keys {
 		binary.LittleEndian.PutUint64(f.keys[i][:], uint64(i))

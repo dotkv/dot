@@ -136,22 +136,9 @@ func TestCompactionThresholdValidation(t *testing.T) {
 	waitForCompaction(t, s, 1)
 }
 
-func TestCompactionDisabledOverridesThreshold(t *testing.T) {
-	db := newInternalDB(t, WithCompaction(false), WithCompactionThreshold(0, 0))
-	key := []byte("key")
-	for i := range 10 {
-		if err := db.Set(key, uint64(i)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	s, _ := db.shard(key)
-	if s.log.recordCount != 10 || s.compactionQueued || s.log.compactPending {
-		t.Fatal("disabled database scheduled automatic compaction")
-	}
-}
-
 func TestTickerCompactionRequiresExpirations(t *testing.T) {
-	db := newInternalDB(t, WithCompaction(false))
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
 	var shards [3]*Shard
 	for i := range shards {
 		s := &db.shards[i]
@@ -182,10 +169,11 @@ func TestCompactionRecoverySchedulesWithoutWrites(t *testing.T) {
 	for _, history := range []string{"head", "packing", "expired"} {
 		t.Run(history, func(t *testing.T) {
 			path := t.TempDir()
-			db, err := Open(path, WithCompaction(false))
+			db, err := Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
+			stopTestMaintenance(db)
 			key := []byte("key")
 			s, hash := db.shard(key)
 			id := int(hash >> (64 - shardBits))
@@ -229,7 +217,8 @@ func TestCompactionRecoverySchedulesWithoutWrites(t *testing.T) {
 }
 
 func TestCompactionFailureRetriesOnTicker(t *testing.T) {
-	db := newInternalDB(t, WithCompaction(false), WithCompactionThreshold(0, 1))
+	db := newInternalDB(t, WithCompactionThreshold(0, 1))
+	stopTestMaintenance(db)
 	// Capture queued jobs without starting a worker, so the failure and retry
 	// can be driven deterministically through the production worker paths.
 	queue := make(chan *Shard, shardCount)
@@ -271,7 +260,8 @@ func TestCompactionFailureRetriesOnTicker(t *testing.T) {
 }
 
 func TestCompactionQueueCoalesces(t *testing.T) {
-	db := newInternalDB(t, WithCompaction(false), WithCompactionThreshold(0, 0))
+	db := newInternalDB(t, WithCompactionThreshold(0, 0))
+	stopTestMaintenance(db)
 	queue := make(chan *Shard, shardCount)
 	var wg sync.WaitGroup
 	for i := range db.shards {
@@ -334,7 +324,7 @@ func TestStateCompactionConcurrentUpdatesAndClose(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(db.path, WithCompaction(false))
+	reopened, err := Open(db.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +333,7 @@ func TestStateCompactionConcurrentUpdatesAndClose(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	stopTestMaintenance(reopened)
 	var records uint64
 	for i, key := range keys {
 		if got, err := reopened.Get[uint64](key); err != nil || got != workers*updates {
