@@ -72,13 +72,3 @@ uses the normal database lifecycle with background maintenance enabled.
 ```sh
 go test -run '^$' -bench '^BenchmarkUpdateUint64' -benchmem
 ```
-
-`BenchmarkOpen` starts with 4,096 keys and 128-byte values, then repeatedly updates
-keys in one shard until it has two full 64 MiB segments and a nonempty active
-head. It verifies the file sizes and reports full segments per open and replay
-throughput. This measures full replay of over 128 MiB of retained history with
-warm filesystem caches. Setup, validation, and close are untimed:
-
-```sh
-go test -run '^$' -bench '^BenchmarkOpen$' -benchmem
-```

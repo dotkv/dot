@@ -3,7 +3,6 @@ package dot
 import (
 	"bytes"
 	"encoding/binary"
-	"os"
 	"sync/atomic"
 	"testing"
 )
@@ -84,89 +83,6 @@ func BenchmarkSet(b *testing.B) {
 		b.StopTimer()
 		done += n
 	}
-}
-
-// Reopen two full segments plus an active head, with warm filesystem caches.
-// Only Open is timed; history creation, validation, and Close are excluded.
-func BenchmarkOpen(b *testing.B) {
-	f := newPrimitiveFixture(b)
-	f.reset(b, true)
-	const fullSegments = 2
-	var hotKeys []int
-	for i := range benchmarkKeyCount {
-		if s, _ := f.db.shard(f.keys[i][:]); s == &f.db.shards[0] {
-			hotKeys = append(hotKeys, i)
-		}
-	}
-	if len(hotKeys) == 0 {
-		b.Fatal("open fixture has no keys in shard zero")
-	}
-	var versions [benchmarkKeyCount]uint64
-	value := f.value
-	recordBytes := logHeaderSize + len(f.keys[0]) + len(value)
-	recordsPerSegment := (logSegmentSize + recordBytes - 1) / recordBytes
-	for i := 0; i < fullSegments*recordsPerSegment+1; i++ {
-		key := hotKeys[i%len(hotKeys)]
-		version := uint64(i + 1)
-		binary.LittleEndian.PutUint64(value[:8], version)
-		if err := f.db.Set(f.keys[key][:], value[:]); err != nil {
-			b.Fatal(err)
-		}
-		versions[key] = version
-	}
-	var replayBytes int64
-	var sealed int
-	for i := range f.db.shards {
-		log := f.db.shards[i].log
-		for seg := uint64(0); seg <= log.headSegment; seg++ {
-			info, err := os.Stat(log.segmentPath(seg))
-			if err != nil {
-				b.Fatal(err)
-			}
-			replayBytes += info.Size()
-			if seg < log.headSegment {
-				if info.Size() < logSegmentSize {
-					b.Fatal("open fixture contains a partially filled sealed segment")
-				}
-				sealed++
-			}
-		}
-	}
-	if sealed < fullSegments || f.db.shards[0].log.size == 0 {
-		b.Fatalf("open fixture has %d full sealed segments or an empty head", sealed)
-	}
-	b.SetBytes(replayBytes)
-	if err := f.db.Close(); err != nil {
-		b.Fatal(err)
-	}
-	// B.Loop requires a running timer; pause only for validation and Close.
-	b.StartTimer()
-	for b.Loop() {
-		db, err := Open(f.db.path)
-		b.StopTimer()
-		if err != nil {
-			b.Fatal(err)
-		}
-		// Preserve the retained history while validating and reusing this fixture.
-		db.backgroundCancel()
-		db.backgroundWG.Wait()
-		for j := range benchmarkKeyCount {
-			want := f.value
-			if versions[j] != 0 {
-				binary.LittleEndian.PutUint64(want[:8], versions[j])
-			}
-			got, err := db.Get[[]byte](f.keys[j][:])
-			if err != nil || !bytes.Equal(got, want[:]) {
-				db.Close()
-				b.Fatalf("recovered key %d: value=%q error=%v", j, got, err)
-			}
-		}
-		if err := db.Close(); err != nil {
-			b.Fatal(err)
-		}
-		b.StartTimer()
-	}
-	b.ReportMetric(float64(sealed), "full-segments/op")
 }
 
 func BenchmarkGetBytesHit(b *testing.B) {

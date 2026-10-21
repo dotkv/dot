@@ -34,7 +34,6 @@ func command(ctx context.Context) error {
 	keys := flag.Int("keys", 16384, "total preloaded live keys per case")
 	ops := flag.Int("ops", 300000, "total measured operations per case")
 	warmup := flag.Int("warmup", 30000, "total untimed warmup operations per case")
-	openSegments := flag.Int("open-segments", 2, "minimum full 64 MiB Dot segments for Open history (>= 2; identical updates in every engine)")
 	seed := flag.Uint64("seed", 1, "deterministic workload seed")
 	scalar := flag.Bool("scalar", true, "use uint64 operations for 8-byte values; false uses byte slices")
 	repeat := flag.Int("repeat", 1, "repetitions of each case")
@@ -75,9 +74,6 @@ func command(ctx context.Context) error {
 	if *repeat < 1 {
 		return fmt.Errorf("repeat must be >= 1")
 	}
-	if *openSegments < 2 {
-		return fmt.Errorf("open-segments must be >= 2")
-	}
 	if *readme != "" {
 		if err := checkReadme(*readme); err != nil {
 			return err
@@ -112,8 +108,7 @@ func command(ctx context.Context) error {
 							Engine: names[(i+offset)%len(names)], Workload: workload,
 							ValueBytes: size, Scalar: *scalar && size == 8, Workers: workers,
 							Keys: *keys, Operations: *ops, Warmup: *warmup, Seed: *seed,
-							Repetition:   repetition + 1,
-							OpenSegments: *openSegments,
+							Repetition: repetition + 1,
 						}
 						if err := c.validate(); err != nil {
 							return err
@@ -134,8 +129,8 @@ func command(ctx context.Context) error {
 		return err
 	}
 	if !*jsonOutput {
-		fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7s %10s %10s %12s %9s %9s %9s %10s %12s\n",
-			"ENGINE", "WORKLOAD", "VALUE", "WORKERS", "MEAN us", "P99 us", "OPS/s", "PEAK MiB", "DISK MiB", "DRAIN s", "OPEN ms", "HISTORY MiB")
+		fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7s %10s %10s %12s %9s %9s %9s\n",
+			"ENGINE", "WORKLOAD", "VALUE", "WORKERS", "MEAN us", "P99 us", "OPS/s", "PEAK MiB", "DISK MiB", "DRAIN s")
 	}
 	var results []result
 	for i, c := range cases {
@@ -154,11 +149,10 @@ func command(ctx context.Context) error {
 			if c.Scalar {
 				value = "uint64"
 			}
-			_, err := fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7d %10.3f %10.3f %12.0f %9.1f %9.2f %9.3f %10.3f %12.2f\n",
+			_, err := fmt.Fprintf(os.Stdout, "%-8s %-11s %7s %7d %10.3f %10.3f %12.0f %9.1f %9.2f %9.3f\n",
 				c.Engine, c.Workload, value, c.Workers, out.Latency.MeanNS/1000, float64(out.Latency.P99NS)/1000,
 				out.OpsPerSecond, float64(out.RSSPeakBytes)/(1<<20),
-				float64(out.DiskFinal.AllocatedBytes)/(1<<20), out.DrainSeconds, out.OpenSeconds*1000,
-				float64(out.OpenHistoryBytes)/(1<<20))
+				float64(out.DiskFinal.AllocatedBytes)/(1<<20), out.DrainSeconds)
 			if err != nil {
 				return err
 			}

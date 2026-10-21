@@ -18,7 +18,6 @@ func reportFixture(engine string, mean float64, p99 int64) result {
 		Latency: latencySummary{Count: 12000, MeanNS: mean, P99NS: p99}, OpsPerSecond: 1000000,
 		RSSFinalBytes: 12 << 20, RSSPeakBytes: 20 << 20,
 		DiskFinal: diskSize{AllocatedBytes: 4 << 20}, SpaceAmplification: 2,
-		OpenSeconds: 0.005, OpenHistoryBytes: 128 << 20,
 	}
 }
 
@@ -69,12 +68,10 @@ func TestReportMarksMissingConfigurations(t *testing.T) {
 func TestReportGroupingAndMedians(t *testing.T) {
 	other := reportFixture("dot", 2000, 4000)
 	other.Config.Scalar = false
-	slowOpen := reportFixture("dot", 1500, 9000)
-	slowOpen.OpenSeconds = 0.009
 	data, err := renderResults([]result{
 		reportFixture("pebble", 1000, 2000),
 		reportFixture("dot", 500, 1000),
-		slowOpen,
+		reportFixture("dot", 1500, 9000),
 		other,
 	})
 	if err != nil {
@@ -85,7 +82,7 @@ func TestReportGroupingAndMedians(t *testing.T) {
 		t.Fatal("scalar and byte-slice configurations were combined")
 	}
 	// Medians are per run: mean=(500+1500)/2 ns, p99=(1000+9000)/2 ns.
-	row := "| Dot | 2 | 1.000 | 5.000 | 1,000,000 | 20.0 | 4.00 | 7.000 | 128.00 |"
+	row := "| Dot | 2 | 1.000 | 5.000 | 1,000,000 | 20.0 | 4.00 |"
 	if !strings.Contains(text, row) {
 		t.Fatalf("missing median/unit-converted row %q:\n%s", row, text)
 	}
@@ -95,38 +92,6 @@ func TestReportGroupingAndMedians(t *testing.T) {
 	other.Config.Operations++
 	if _, err := renderResults([]result{reportFixture("dot", 1, 1), other}); err == nil {
 		t.Fatal("combined different operation budgets")
-	}
-	other = reportFixture("dot", 1, 1)
-	other.Config.OpenSegments = 2
-	if _, err := renderResults([]result{reportFixture("dot", 1, 1), other}); err == nil {
-		t.Fatal("combined small and multiple-segment open fixtures")
-	}
-}
-
-func TestReportLegacyOpenTiming(t *testing.T) {
-	legacy := reportFixture("dot", 1000, 2000)
-	legacy.OpenSeconds = 0
-	var saved bytes.Buffer
-	if err := json.NewEncoder(&saved).Encode(legacy); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "legacy.jsonl")
-	if err := os.WriteFile(path, saved.Bytes(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	runs, err := loadResults(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Missing legacy measurements must not lower the median or look like a
-	// measured zero, including when combined with newer results.
-	runs = append(runs, reportFixture("dot", 1000, 2000))
-	data, err := renderResults(runs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "| 4.00 | — |") {
-		t.Fatalf("missing reopen timing was reported as a measurement:\n%s", data)
 	}
 }
 

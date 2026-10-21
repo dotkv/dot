@@ -35,14 +35,6 @@ func loadResults(path string) ([]result, error) {
 		if r.Latency.Count != uint64(r.Config.Operations) {
 			return nil, fmt.Errorf("result %d has %d completed operations, want %d", len(results)+1, r.Latency.Count, r.Config.Operations)
 		}
-		if r.Config.OpenSegments > 0 {
-			if r.OpenSeconds <= 0 || r.OpenHistoryRecords == 0 || r.OpenHistoryBytes/dotSegmentBytes < uint64(r.Config.OpenSegments) {
-				return nil, fmt.Errorf("result %d lacks the required Open history", len(results)+1)
-			}
-			if r.Config.Engine == "dot" && r.OpenFullSegments < r.Config.OpenSegments {
-				return nil, fmt.Errorf("result %d lacks verified full Dot segments", len(results)+1)
-			}
-		}
 		results = append(results, r)
 	}
 	if len(results) == 0 {
@@ -132,8 +124,8 @@ func renderResults(results []result) ([]byte, error) {
 	groups := make(map[scenario]map[string][]result)
 	for _, r := range results {
 		c := r.Config
-		if c.Keys != first.Config.Keys || c.Operations != first.Config.Operations || c.Warmup != first.Config.Warmup || c.Seed != first.Config.Seed || c.OpenSegments != first.Config.OpenSegments {
-			return nil, fmt.Errorf("cannot combine results with different dataset, operation, warmup, seed, or open-history settings")
+		if c.Keys != first.Config.Keys || c.Operations != first.Config.Operations || c.Warmup != first.Config.Warmup || c.Seed != first.Config.Seed {
+			return nil, fmt.Errorf("cannot combine results with different dataset, operation, warmup, or seed settings")
 		}
 		key := scenario{c.Workload, c.ValueBytes, c.Scalar, c.Workers}
 		if groups[key] == nil {
@@ -156,9 +148,6 @@ func renderResults(results []result) ([]byte, error) {
 	}
 	fmt.Fprintf(&out, "Configuration: **%s initial keys**, **%s measured operations**, **%s warmup operations**, seed **%d**.\n\n",
 		integerWithCommas(first.Config.Keys), integerWithCommas(first.Config.Operations), integerWithCommas(first.Config.Warmup), first.Config.Seed)
-	if first.Config.OpenSegments > 0 {
-		fmt.Fprintf(&out, "Open fixture: at least **%d full 64 MiB Dot segments** in one shard plus a nonempty head, with identical additional updates applied to each engine. History size counts the added records in Dot's log encoding.\n\n", first.Config.OpenSegments)
-	}
 	e := first.Environment
 	fmt.Fprintf(&out, "Environment: %s, %s/%s, %d logical CPUs, GOMAXPROCS=%d.\n\n", e.GoVersion, e.OS, e.Arch, e.CPUs, e.GOMAXPROCS)
 	if e.CPUModel != "" {
@@ -169,7 +158,6 @@ func renderResults(results []result) ([]byte, error) {
 	}
 	out.WriteString("Eight-byte scalar cases use `uint64` in Dot and equivalent encoding/decoding in Pebble.\n\n")
 	out.WriteString("Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.\n\n")
-	out.WriteString("Open times a clean reopen after its history preparation, flush, and close, with warm filesystem caches. Preparation, close, and validation are excluded; operation RSS and disk figures precede the additional Open history. An em dash means a measurement is missing from one or more saved runs.\n\n")
 	for _, key := range order {
 		value := fmt.Sprintf("%s B values", integerWithCommas(key.bytes))
 		if key.scalar {
@@ -180,8 +168,8 @@ func renderResults(results []result) ([]byte, error) {
 			workerLabel = "worker"
 		}
 		fmt.Fprintf(&out, "### %s · %s · %d %s\n\n", strings.ReplaceAll(key.workload, "-", " "), value, key.workers, workerLabel)
-		out.WriteString("| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) | Open (ms) | Added history (MiB) |\n")
-		out.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+		out.WriteString("| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |\n")
+		out.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		var engines []string
 		for name := range groups[key] {
 			engines = append(engines, name)
@@ -195,36 +183,17 @@ func renderResults(results []result) ([]byte, error) {
 			} else if engine == "pebble" {
 				name = "Pebble"
 			}
-			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %s | %.1f | %.2f | %s | %s |\n",
+			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %s | %.1f | %.2f |\n",
 				name, len(runs),
 				median(runs, func(r result) float64 { return r.Latency.MeanNS / 1000 }),
 				median(runs, func(r result) float64 { return float64(r.Latency.P99NS) / 1000 }),
 				integerWithCommas(int(median(runs, func(r result) float64 { return r.OpsPerSecond })+0.5)),
 				median(runs, func(r result) float64 { return float64(r.RSSPeakBytes) / (1 << 20) }),
-				median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) }),
-				openMilliseconds(runs), openHistoryMiB(runs))
+				median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) }))
 		}
 		out.WriteByte('\n')
 	}
 	return []byte(out.String()), nil
-}
-
-func openHistoryMiB(runs []result) string {
-	for _, r := range runs {
-		if r.OpenHistoryBytes == 0 {
-			return "—"
-		}
-	}
-	return fmt.Sprintf("%.2f", median(runs, func(r result) float64 { return float64(r.OpenHistoryBytes) / (1 << 20) }))
-}
-
-func openMilliseconds(runs []result) string {
-	for _, r := range runs {
-		if r.OpenSeconds <= 0 {
-			return "—"
-		}
-	}
-	return fmt.Sprintf("%.3f", median(runs, func(r result) float64 { return r.OpenSeconds * 1000 }))
 }
 
 // Identify gaps within the workload/value/worker axes present in a saved run.
