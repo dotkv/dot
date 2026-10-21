@@ -9,7 +9,13 @@ import (
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 )
 
-var workloads = map[string]int{"read-heavy": 95, "mixed": 50, "write-heavy": 5}
+const keyBytes = 16
+
+// Ratios are reads/writes. Retain the old names for saved results and opt-in runs.
+var workloads = map[string]int{
+	"0/100": 0, "10/90": 10, "50/50": 50, "90/10": 90, "100/0": 100,
+	"read-heavy": 95, "mixed": 50, "write-heavy": 5,
+}
 
 type operationKind int
 
@@ -60,7 +66,7 @@ type worker struct {
 	writeCount  uint64
 	readPercent int
 	scalar      bool
-	key         [16]byte
+	key         [keyBytes]byte
 	payload     []byte
 	stats       [kindCount]latency
 }

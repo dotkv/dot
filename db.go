@@ -2,10 +2,12 @@ package dot
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -20,18 +22,31 @@ const (
 var ErrNotFound = errors.New("key not found")
 
 type DB struct {
-	path       string
-	expiration int64
-	shards     [shardCount]Shard
+	path             string
+	expiration       int64
+	shards           [shardCount]Shard
+	backgroundCancel context.CancelFunc
+	backgroundWG     sync.WaitGroup
 }
 
 // Options configures database and key operations.
 type Options struct {
-	expiration int64
+	expiration        int64
+	disableCompaction bool
 }
 
 // Option configures Open or Set.
 type Option func(*Options)
+
+// WithCompaction enables or disables background compaction when passed to Open.
+// Compaction is enabled by default. Disabling it defers obsolete-record and
+// expired-entry reclamation; expired keys still read as missing. This option has
+// no effect when passed to Set.
+func WithCompaction(enabled bool) Option {
+	return func(o *Options) {
+		o.disableCompaction = !enabled
+	}
+}
 
 // WithExpiration sets the time at which a key expires. When passed to Open, it
 // sets the default expiration for Set calls on that database; when passed to
@@ -61,7 +76,11 @@ func Open(path string, opts ...Option) (*DB, error) {
 			opt(&options)
 		}
 	}
-	db := &DB{path: path, expiration: options.expiration}
+	ctx, cancel := context.WithCancel(context.Background())
+	db := &DB{path: path,
+		expiration:       options.expiration,
+		backgroundCancel: cancel,
+	}
 	for i := range db.shards {
 		var err error
 		db.shards[i].index, err = newIndex()
@@ -73,7 +92,42 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
+	if !options.disableCompaction {
+		db.backgroundWG.Go(func() { db.background(ctx) })
+	}
 	return db, nil
+}
+
+func (db *DB) background(ctx context.Context) {
+	t := time.NewTicker(time.Second * 10)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if ctx.Err() != nil {
+				return
+			}
+			if err := db.compact(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "compact: %v\n", err)
+			}
+		}
+	}
+}
+
+func (db *DB) compact(ctx context.Context) error {
+	var err error
+	for i := range db.shards {
+		// Finish the current shard, then stop before starting more shutdown work.
+		if ctx.Err() != nil {
+			break
+		}
+		if compactErr := db.shards[i].compact(); compactErr != nil {
+			err = errors.Join(err, fmt.Errorf("shard %02d: %w", i, compactErr))
+		}
+	}
+	return err
 }
 
 func (db *DB) shard(key []byte) (*Shard, uint64) {
@@ -251,6 +305,8 @@ func (db *DB) Destroy() error {
 }
 
 func (db *DB) close(removeFiles bool) error {
+	db.backgroundCancel()
+	db.backgroundWG.Wait()
 	// Lock in directory order to wait for in-flight operations on every shard.
 	for i := range db.shards {
 		db.shards[i].lock.Lock()

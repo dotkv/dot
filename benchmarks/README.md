@@ -1,71 +1,91 @@
 # Engine comparisons
 
-Compare Dot and Pebble on Linux. This directory is a separate Go module: its
-engine and histogram dependencies do not enter Dot's root `go.mod` or `go.sum`.
-Run its commands from this directory. Root `go test ./...` does not run this suite.
+Compare Dot and Pebble on Linux using 16-byte keys. This directory is a separate
+Go module: its engine and histogram dependencies do not enter Dot's root
+`go.mod` or `go.sum`. Root `go test ./...` does not run this suite.
 
 ```sh
 cd benchmarks
 go test ./...
 go build -o dot-bench .
 
-# Fewer timed operations; each Open fixture still fills two 64 MiB segments.
-./dot-bench -ops 30000 -warmup 3000
+# Default: fast profile, automatic compaction disabled in both engines.
+./dot-bench
 
-# Default matrix: 12 fresh-process cases, producing six comparison tables.
-./dot-bench -readme README.md
+# Slow profile, normal automatic compaction enabled.
+./dot-bench -profile slow
 
-# Repeat runs and retain all measurements, including operation breakdowns.
-./dot-bench -repeat 5 -readme README.md -json > results.jsonl
+# Both profiles, repeated with one shared budget per configuration.
+./dot-bench -profile all -repeat 3 -readme README.md -json > results.jsonl
 
-# Regenerate the README from saved results without rerunning benchmarks.
+# Regenerate tables without rerunning benchmarks.
 ./dot-bench -from-json results.jsonl -readme README.md
 
-# Exercise byte-slice APIs for the same eight stored bytes.
+# Fixed-operation smoke run; bypass Dot calibration.
+./dot-bench -profile all -ops 30000 -warmup 3000
+
+# Override the Dot target, or select part of the matrix.
+./dot-bench -target 5s -workloads 10/90,90/10 -sizes 1024
+
+# Compare byte-slice APIs rather than scalar APIs for 8-byte values.
 ./dot-bench -sizes 8 -scalar=false
-
-# Compare operation performance and Open over at least two full log segments.
-./dot-bench -workloads write-heavy -repeat 3
-
-# Increase the retained history to at least four full segments in one Dot shard.
-./dot-bench -workloads write-heavy -open-segments 4
 ```
 
-By default temporary databases live in the current directory, on the same
-filesystem as this checkout. Use `-dir /path/on/test/ssd` to select another
-existing directory. Each case is removed after reporting, including failed cases.
-Avoid a tmpfs data directory for on-disk comparisons. The default 1 KiB cases
-preload about 16 MiB of values. Cases run sequentially. Additional sizes and
-worker counts are opt-in through `-sizes` and `-workers`. For example, 64 KiB
-values preload about 1 GiB and can take much longer to benchmark.
+## Profiles and operation budgets
 
-Open preparation adds at least 128 MiB of update history per case by default,
-after the operation measurements. It fills two 64 MiB segments in one Dot shard
-and starts a nonempty third segment. Both engines receive the same updates.
-This is substantial untimed work even when `-ops` is small: eight-byte values
-require about three million additional updates. Use `-open-segments N` (at least
-2) to increase the history. Cases release their files before the next case starts.
+Ratios are **reads/writes**. Writes are equal shares of inserts, updates, and
+deletes; they are not all inserts or all overwrites.
 
-The default matrix is 2 implementations × 3 workloads × 2 value sizes × 1 worker
-count = **12 runs**, six times fewer than the original 72-case matrix. Each
-repetition multiplies that count: `-repeat 3` runs 36 cases. Removing 64 KiB
-values also avoids the slowest cases in the original sweep.
+| Profile          | Read/write ratios                 | Value sizes  | Automatic compaction | Dot time target                       |
+| ---------------- | --------------------------------- | ------------ | -------------------- | ------------------------------------- |
+| `fast` (default) | 0/100, 10/90, 50/50, 90/10, 100/0 | 8 B, 1,024 B | Disabled             | 3 seconds (aiming for 2–5 seconds)    |
+| `slow`           | 50/50                             | 128 B        | Enabled              | 45 seconds (aiming for 30–60 seconds) |
 
-Use `-readme README.md` to update the result tables after a successful run. Each
-workload/value-size/worker-count combination has its own table, with implementations
-as rows and measurements as columns. Repetitions are summarized using the median
-of each measurement, including the median of run p99s. Other README content is
-preserved; a failed run leaves the existing tables intact.
-Saved results can also include completed cases from an interrupted run; gaps in
-the workload/value-size/worker-count matrix are marked in the generated section.
+The target applies **only to Dot's estimated performance**. Each distinct
+profile/workload/value-size/API/worker configuration first runs a fresh-process
+Dot probe with 500 ms of measured work. Its observed throughput estimates a fixed
+operation budget for the Dot target. Budgets are rounded up to complete groups of
+three operations per worker. Every engine and repetition then runs that **same
+fixed count**, with identical seeded per-worker traces. Reported cases never
+stop on a timer. A future slower engine may take minutes for a case that takes
+Dot a few seconds. Dot is used for calibration even if omitted from `-engines`.
+
+Calibration is an estimate, not a runtime guarantee. In particular, a short slow
+profile probe does not capture repeated compaction. Preparation, calibration,
+drain, and process overhead are outside the Dot target. `-target` overrides the
+profile targets; `-ops` bypasses calibration and supplies one explicit budget for
+all configurations. These flags are mutually exclusive. Budgets are reused across
+repetitions within a command, not recalibrated for each repetition. Independent
+commands can choose different budgets; the report refuses to combine different
+budgets for the same configuration. Use `-repeat` to collect comparable repeats.
+
+Defaults are two engines, 16 workers, 16,384 initial live keys, 30,000 untimed
+warmup operations, and seed 1. This gives **20 fast cases**, **2 slow cases**, or
+**22 cases** for `-profile all`, before repetitions. Workloads, sizes, and worker
+counts can be overridden; overrides apply to every selected profile. Supported
+worker counts are 1, 16, and 128. The legacy workload names `read-heavy` (95/5),
+`mixed` (50/50), and `write-heavy` (5/95) remain available for saved results and
+opt-in runs. Keys are always 16 bytes; there is no key-size sweep.
+
+Each case starts a fresh process and database, and cases run sequentially.
+Engine order rotates across configurations and repetitions. Temporary databases
+live on the current filesystem by default; use `-dir /path/on/test/ssd` to select
+another existing directory. Avoid tmpfs for disk comparisons. Each database is
+removed after reporting, including failed cases. `-timeout` limits each child
+process, including preparation and drain, to 10 minutes by default. Increase it
+for slower contenders or larger opt-in datasets; it does not change the workload.
 
 ## Results
 
 <!-- benchmark-results:start -->
 
-Completed cases: **36**, covering **6 configurations**.
+Completed cases: **22**, covering **11 configurations**.
 
-Configuration: **16,384 initial keys**, **300,000 measured operations**, **30,000 warmup operations**, seed **1**.
+Configuration: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**. Operation budgets are fixed per configuration and shared across engines and repetitions.
+
+Profile **fast**: automatic compaction **disabled**; budgets estimated from a short Dot probe targeting **3s for Dot**; Pebble L0 write-stop threshold **1,073,741,824**.
+
+Profile **slow**: automatic compaction **enabled**; budgets estimated from a short Dot probe targeting **45s for Dot**.
 
 Environment: go1.27.2, linux/amd64, 16 logical CPUs, GOMAXPROCS=16.
 
@@ -75,176 +95,211 @@ Pebble: `v2.1.7`. Eight-byte scalar cases use `uint64` in Dot and equivalent enc
 
 Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.
 
-### read heavy · 8 B uint64 values · 16 workers
+### fast · 0/100 · 8 B uint64 values · 16 workers
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 2.407 | 33.535 | 6,167,402 | 57.5 | 1.50 |
-| Pebble | 3 | 3.065 | 26.239 | 4,795,192 | 38.6 | 18.54 |
+Measured operations per engine: **4,002,192**. Ratios are reads/writes.
 
-### read heavy · 1,024 B values · 16 workers
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.050 |    11.990 |   88.575 |          1,312,065 |           60.1 |     163.63 |
+| Pebble         |    1 |   2.288 |     9.004 |   68.607 |          1,749,394 |           42.3 |      82.05 |
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 5.738 | 78.847 | 2,652,177 | 70.8 | 28.11 |
-| Pebble | 3 | 50.195 | 284.671 | 315,296 | 50.8 | 36.56 |
+### fast · 0/100 · 1,024 B values · 16 workers
 
-### mixed · 8 B uint64 values · 16 workers
+Measured operations per engine: **2,980,560**. Ratios are reads/writes.
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 5.764 | 47.615 | 2,667,896 | 60.2 | 7.49 |
-| Pebble | 3 | 5.921 | 63.999 | 2,576,548 | 45.3 | 19.01 |
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.110 |    16.430 |  125.439 |            958,459 |           62.3 |    2082.92 |
+| Pebble         |    1 |  20.142 |   107.293 |  117.759 |            147,979 |           61.9 |    1868.31 |
 
-### mixed · 1,024 B values · 16 workers
+### fast · 10/90 · 8 B uint64 values · 16 workers
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 10.831 | 92.159 | 1,431,149 | 65.7 | 129.95 |
-| Pebble | 3 | 79.358 | 471.039 | 195,931 | 51.1 | 38.96 |
+Measured operations per engine: **4,809,024**. Ratios are reads/writes.
 
-### write heavy · 8 B uint64 values · 16 workers
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.386 |    11.076 |   79.871 |          1,420,394 |           62.3 |     176.62 |
+| Pebble         |    1 |   3.353 |    10.864 |   69.631 |          1,434,109 |           45.8 |      86.85 |
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 9.345 | 64.767 | 1,674,509 | 60.2 | 13.48 |
-| Pebble | 3 | 9.705 | 71.679 | 1,605,759 | 44.3 | 18.98 |
+### fast · 10/90 · 1,024 B values · 16 workers
 
-### write heavy · 1,024 B values · 16 workers
+Measured operations per engine: **3,152,640**. Ratios are reads/writes.
 
-| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dot | 3 | 17.551 | 110.591 | 891,505 | 65.1 | 231.73 |
-| Pebble | 3 | 150.051 | 137.215 | 104,478 | 50.9 | 39.94 |
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.274 |    16.355 |  143.359 |            962,800 |           65.7 |    1982.31 |
+| Pebble         |    1 |  21.343 |   105.883 |  856.063 |            147,714 |           95.6 |    1734.22 |
+
+### fast · 50/50 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **6,475,584**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   2.959 |     7.129 |   55.807 |          2,188,536 |           62.2 |     132.11 |
+| Pebble         |    1 |  12.727 |    31.013 | 1028.095 |            508,805 |           47.2 |      69.70 |
+
+### fast · 50/50 · 1,024 B values · 16 workers
+
+Measured operations per engine: **4,239,024**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.191 |    11.800 |  103.423 |          1,328,331 |           69.7 |    1481.93 |
+| Pebble         |    1 |  81.232 |   303.374 | 9568.255 |             52,184 |           60.4 |    1334.12 |
+
+### fast · 90/10 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **14,859,840**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.006 |     3.090 |   37.375 |          4,942,715 |           62.3 |      60.88 |
+| Pebble         |    1 |  28.819 |    30.550 |  626.687 |            515,630 |           46.9 |      41.76 |
+
+### fast · 90/10 · 1,024 B values · 16 workers
+
+Measured operations per engine: **6,813,552**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   3.100 |     7.060 |   89.087 |          2,197,720 |           77.8 |     486.00 |
+| Pebble         |    1 | 117.209 |   271.173 | 3588.095 |             58,131 |           49.4 |     451.11 |
+
+### fast · 100/0 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **31,703,376**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   2.945 |     1.314 |    8.383 |         10,765,050 |           59.4 |       0.78 |
+| Pebble         |    1 |   5.648 |     2.680 |   20.351 |          5,613,036 |           38.0 |      13.76 |
+
+### fast · 100/0 · 1,024 B values · 16 workers
+
+Measured operations per engine: **10,720,944**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |   2.938 |     4.179 |   25.727 |          3,649,057 |          117.5 |      16.71 |
+| Pebble         |    1 |  90.132 |   128.283 |  456.703 |            118,948 |           50.8 |      34.21 |
+
+### slow · 50/50 · 128 B values · 16 workers
+
+Measured operations per engine: **101,716,128**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    1 |  53.209 |     8.190 |   59.391 |          1,911,622 |           67.4 |     278.26 |
+| Pebble         |    1 |  79.305 |    12.250 |  152.575 |          1,282,589 |           49.7 |      20.46 |
 
 
 <!-- benchmark-results:end -->
 
-## Workloads
+## Workload semantics
 
-| Setting | Default |
-| --- | --- |
-| Engines | `dot,pebble` |
-| Value sizes | `8,1024` bytes |
-| Workers | `16` |
-| Initial live keys | 16,384 total, divided across workers |
-| Measured operations | 300,000 total per case |
-| Warmup operations | 30,000 total per case |
-| Open history | At least two full 64 MiB Dot segments plus an active head |
-| Read heavy | 95% reads / 5% mutations |
-| Mixed | 50% reads / 50% mutations |
-| Write heavy | 5% reads / 95% mutations |
-| Read outcomes | 95% hits / 5% guaranteed misses |
-| Mutations | Equal inserts, updates, deletes |
-
-Use `-help` for flags. The read percentages are seeded random draws; JSON contains
-the actual operation counts. Each worker cycles insert/update/delete, keeping
-their counts within one of each other over any measurement interval. Inserts
-use fresh keys, updates change existing values, and deletes remove existing keys.
-Live population remains between the initial count and that count plus workers.
-
-Keys are 16 bytes with permuted IDs, so insertion order is unrelated to key order.
 Each worker owns a disjoint partition of live keys and selects uniformly within
-it. Misses use a separate, never-inserted key space. This avoids scheduling races
-in the expected outcomes while exercising the same shared engine and locks.
-The measured operation workloads do not simulate hot-key contention or skewed access.
+it. Reads are 95% hits and 5% guaranteed misses in a never-inserted key space.
+Workers cycle insert/update/delete, keeping mutation counts within one of each
+other. Inserts use fresh keys, updates change existing values, and deletes remove
+existing keys. Live population stays between the initial key count and that
+count plus workers. Pure-read cases perform no measured mutations, and pure-write
+cases perform no measured reads. Ratios use seeded random draws; JSON includes the
+actual operation counts. The workload does not simulate hot-key contention or
+skewed access.
 
-Eight-byte values use Dot's `Set[uint64]` and `Get[uint64]` by default. Pebble stores
-the same little-endian bytes and encodes/decodes the integer inside the timed
-adapter call. Set `-scalar=false` to compare byte-slice APIs instead. Larger
-values use byte slices. Their payloads are generated before measurement, with
-pseudorandom bodies and a per-key revision in the first eight bytes. Every read
-checks the returned size and revision outside latency measurement. Byte-slice
-reads return caller-owned bytes in both engines; Pebble's copy and release are
-included in latency. Scalar reads avoid that copy in both adapters.
+Keys contain permuted IDs, so insertion order is unrelated to sort order.
+Eight-byte values use Dot's `Set[uint64]` and `Get[uint64]` by default. Pebble
+stores the same little-endian bytes and encodes/decodes inside the timed adapter
+call. Set `-scalar=false` for byte-slice APIs. Larger values use byte slices with
+pseudorandom payloads generated before measurement and a per-key revision in the
+first eight bytes. Every read checks size and revision outside latency timing.
+Byte-slice reads return caller-owned bytes in both engines; Pebble's copy and
+release are included in latency. Scalar reads avoid that copy in both adapters.
 
-## Measurement
+## Maintenance configuration
 
-Every case also measures one clean reopen with a large retained history, reported as
-`OPEN ms` in the terminal, `Open (ms)` in generated tables, and `open_seconds` in
-JSON. After capturing the operation and space metrics, the harness adds enough
-changed-value updates to fill at least two 64 MiB segments in one Dot shard, plus
-a nonempty active head. On-disk file sizes verify that sealed segments are full;
-merely creating several partial files does not qualify. Keys cycle over a subset
-of the existing live keys, keeping the live population fixed while retaining
-overwritten history. Pebble receives the identical key/value update sequence.
+The **fast profile** opens Dot with `dot.WithCompaction(false)` and Pebble with
+`DisableAutomaticCompactions: true`. WAL writes, log rotation, and memtable
+flushes still occur. Pebble's `L0StopWritesThreshold` is raised to **1,073,741,824**
+for these finite cases: otherwise accumulated L0 sublevels can stop writes while
+the compaction needed to unblock them is disabled. Other default limits, including
+memtable flush backpressure, remain in effect. Results describe performance with
+cleanup deferred, including any read amplification and disk growth that creates.
+They do not measure sustained performance or reclaimed disk space.
 
-The timer covers only the engine's open call, including Dot's log replay and
-index rebuild. History creation, flush/close, correctness checks of every
-surviving key, and the subsequent close are excluded. Each repetition starts fresh
-and supplies one open sample; tables use their median.
-Older saved results without this measurement display an em dash.
+The **slow profile** uses normal Dot compaction (a check every 10 seconds, with
+eligible shards compacted) and Pebble's default compaction settings and L0 limit.
+A 45-second target is intended to encounter multiple Dot rounds, but elapsed time
+alone does not establish maintenance coverage or steady state. Interpret short
+or unstable runs accordingly.
 
-`HISTORY MiB` / `Added history (MiB)` reports the extra record bytes using Dot's
-21-byte header, 16-byte key, and configured value size. It is write history, not
-Pebble's physical disk size. JSON also records `open_history_records`,
-`open_preparation_seconds`, and the verified `open_dot_full_segments` for Dot.
-Saved runs with different `open_full_segments` settings cannot be combined.
+Preload and workload warmup are untimed. Pebble's memtables are flushed after
+each so reads exercise SSTables as well as caches. A final untimed flush and
+close materializes pending writes for disk accounting, without forcing a full
+compaction. Dot's flush adapter is a no-op and closing cancels its compactor after
+finishing any current shard; the drain does not reclaim outstanding garbage.
+`drain_seconds` is reported separately from foreground throughput.
 
-This is a **warm-cache clean reopen**, with filesystem caches left intact. Pebble
-has flushed its memtables to SSTables before closing, so this does not compare
-crash recovery or recovery of an unflushed Pebble WAL. Dot still replays its full
-log history, including overwritten and deleted records, without hint files or
-checkpoints. Operation RSS and disk measurements precede the additional recovery
-history; operation latency and throughput exclude all Open preparation and timing.
+## Measurement and reports
 
-Each case starts a fresh process and database. Preload and a workload warmup are
-untimed. Pebble's memtables are flushed after preload and warmup, so the read
-comparison exercises SSTables as well as caches. Measurements use fixed operation
-counts; engine order rotates across cases and repetitions. The seed and per-worker
-operation budgets are identical for corresponding Dot and Pebble cases.
+This is a **closed-loop saturation benchmark**: each worker issues its next
+operation after the previous one finishes. Throughput is fixed completed
+operations divided by wall time, including generation, validation, and histogram
+recording. Latency measures the adapter call, including lock waits and necessary
+conversion/copying, and excludes generation, validation, and time between requests.
+Mean is the arithmetic mean of observed latencies. p99 comes from merged
+per-worker HDR histograms with two significant figures (about 1% quantization).
+No samples are dropped; operations exceeding the one-hour histogram bound fail
+the case. These p99s describe the achieved saturation load, not latency at a
+matched external request rate.
 
-This is a **closed-loop saturation benchmark**: workers issue the next operation
-when the previous one finishes. Throughput is completed operations divided by
-wall time, including workload generation, validation, and histogram recording.
-Latency times the adapter call, including its internal lock waits and required
-conversion/copying. It excludes trace generation, validation, and time between
-requests. Mean is the arithmetic mean of observed operation latencies, not wall
-time divided by operation count. p99 comes from merged per-worker HDR histograms
-with two significant figures (about 1% quantization). No samples are dropped;
-operations exceeding the histogram's one-hour bound fail the case.
+JSON includes the profile, compaction setting, 16-byte key size, Dot target in
+nanoseconds, actual fixed operation budget, elapsed time, aggregate and per-type
+latencies and counts, memory/disk measurements, and environment metadata.
+Calibration probes are excluded from results. Terminal output includes actual
+elapsed seconds so differences between engines remain visible.
 
-JSON reports aggregate and separate hit/miss/insert/update/delete latency and
-counts. The terminal table shows the aggregate. These p99 values describe the
-achieved saturation load, not response time at a matched external request rate.
-Increase keys and operations for longer runs, datasets exceeding available cache,
-and runs that encounter log rotation and repeated LSM maintenance. Use repetitions
-and compare their spread; smoke-run numbers are not stable performance estimates.
+`-readme README.md` updates only the generated result section after all cases
+succeed. Each profile/workload/value/API/worker configuration has its own table
+and recorded operation budget. Repetitions use the median of each measurement,
+including the median of run p99s, rather than a pooled percentile. Saved results
+can include completed cases from interrupted runs; missing combinations within
+each profile are marked. Fast and slow matrices are kept separate.
 
-**Memory is RSS, not Go heap.** JSON includes RSS after harness allocation, after
-preparation, and immediately after measurement. Peak is the process high-water
-mark through measurement, including preparation. The terminal and README tables
-show peak RSS. This captures Dot's anonymous mmap index and the engine's resident
-process memory. It also includes runtime, worker state, and histogram overhead;
-the harness baseline provides context rather than a precise subtractable engine
-footprint. RSS excludes filesystem cache that is not mapped into the process.
-No claim is made that it represents total system memory consumed by storage I/O.
+**Memory is RSS, not Go heap.** JSON records RSS after harness allocation, after
+preparation, and after measurement. Peak is the process high-water mark through
+measurement, including preparation. It captures Dot's anonymous mmap index as
+well as runtime and harness memory. The harness baseline is context, not a
+precisely subtractable engine footprint. RSS excludes filesystem cache that is
+not mapped into the process. Calibration runs in a separate process and does not
+inflate the measured case's peak.
 
-**Disk usage** includes apparent regular-file bytes and allocated bytes
-(`stat.st_blocks * 512`), before measurement and after a final flush and close.
-JSON also includes space amplification: final allocated bytes / live key-and-value
-bytes, including the 16-byte keys. Comparisons use the same initial dataset, warmup count, and
-measured operation count. The final untimed drain is reported separately as
-`drain_seconds`; it materializes pending writes for disk accounting, without
-forcing a full database compaction. Normal Pebble maintenance stays enabled.
-The RSS figure is captured before this drain. Final disk figures include any
-file preallocation and engine metadata; directory metadata is excluded.
+**Disk usage** records apparent regular-file bytes and allocated bytes
+(`stat.st_blocks * 512`), before measurement and after the final drain. Space
+amplification is final allocated bytes / live key-and-value bytes, including the
+16-byte keys. Engines compared in one configuration perform the same work.
+Results include preallocation and engine metadata, excluding directory metadata.
+Compaction-disabled disk figures include retained obsolete history.
 
 ## Engine configuration and interpretation
 
-Pebble is pinned in this module, with WAL and automatic compaction enabled,
-compression disabled, and other defaults retained. Mutations use `pebble.NoSync`.
-Dot uses its current public API, including syncing at log rotation. This compares
-writes without a per-operation fsync guarantee. Acknowledgment semantics still
-differ: Pebble may buffer an acknowledged WAL write in userspace; Dot issues a
-file write before returning. See [Pebble's WriteOptions documentation](https://pkg.go.dev/github.com/cockroachdb/pebble/v2#WriteOptions).
+Pebble is pinned in this module, with WAL enabled, compression disabled, and
+`pebble.NoSync` mutations. Dot uses its public API, including syncing at log
+rotation. Writes have no per-operation fsync guarantee. Acknowledgment semantics
+still differ: Pebble may buffer an acknowledged WAL write in userspace; Dot
+issues a file write before returning. See
+[Pebble's WriteOptions documentation](https://pkg.go.dev/github.com/cockroachdb/pebble/v2#WriteOptions).
 
-Results compare the engines as implemented. They do not attribute every difference
-to sortedness. Record the CPU, storage device, filesystem, available RAM, and
-power settings when sharing results. JSON includes Go version, OS, architecture,
-CPU count, GOMAXPROCS, dependency versions, configuration, and available build VCS
-metadata. Results from a modified tree should identify that revision separately.
+Record the storage device, filesystem, available RAM, and power settings when
+sharing results. JSON includes Go version, OS, architecture, CPU model/count,
+GOMAXPROCS, dependency versions, and available build VCS metadata. Identify
+modified-tree results separately. Results compare the engines as configured;
+they do not attribute every difference to sortedness.
 
-To add a contender, implement `engine` and register an opener in `engines.go`.
-Keep it in this module. A future Go map adapter can use the same workload and
-result format, with synchronization and its in-memory-only nature documented.
+To add a contender, implement `engine` and register a configuration-aware opener
+in `engines.go`. Keep dependencies in this module. An in-memory adapter should
+document synchronization and lack of persistence. A future SQLite WAL adapter
+should explicitly configure its checkpoint/vacuum behavior for each profile,
+rather than treating checkpointing as identical to LSM compaction.

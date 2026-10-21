@@ -13,21 +13,30 @@ import (
 )
 
 type caseConfig struct {
-	Engine       string `json:"engine"`
-	Workload     string `json:"workload"`
-	ValueBytes   int    `json:"value_bytes"`
-	Scalar       bool   `json:"scalar"`
-	Workers      int    `json:"workers"`
-	Keys         int    `json:"initial_keys"`
-	Operations   int    `json:"operations"`
-	Warmup       int    `json:"warmup_operations"`
-	Seed         uint64 `json:"seed"`
-	Repetition   int    `json:"repetition"`
-	OpenSegments int    `json:"open_full_segments,omitempty"`
-	Path         string `json:"data_path"`
+	Profile    string        `json:"profile,omitempty"`
+	Engine     string        `json:"engine"`
+	Workload   string        `json:"workload"`
+	KeyBytes   int           `json:"key_bytes"`
+	ValueBytes int           `json:"value_bytes"`
+	Scalar     bool          `json:"scalar"`
+	Workers    int           `json:"workers"`
+	Keys       int           `json:"initial_keys"`
+	Operations int           `json:"operations"`
+	DotTarget  time.Duration `json:"dot_target_ns,omitempty"`
+	// Only internal Dot calibration probes stop on time. Reported cases always
+	// execute Operations, identically across engines and repetitions.
+	CalibrationDuration time.Duration `json:"calibration_duration_ns,omitempty"`
+	DisableCompaction   bool          `json:"disable_compaction"`
+	Warmup              int           `json:"warmup_operations"`
+	Seed                uint64        `json:"seed"`
+	Repetition          int           `json:"repetition"`
+	Path                string        `json:"data_path"`
 }
 
 func (c caseConfig) validate() error {
+	if c.Profile != "" && c.Profile != "fast" && c.Profile != "slow" {
+		return fmt.Errorf("unknown profile %q", c.Profile)
+	}
 	if _, ok := engines[c.Engine]; !ok {
 		return fmt.Errorf("unknown engine %q", c.Engine)
 	}
@@ -40,11 +49,25 @@ func (c caseConfig) validate() error {
 	if c.ValueBytes < 8 {
 		return fmt.Errorf("value size must be at least 8 bytes")
 	}
-	if c.Keys < c.Workers || c.Operations < c.Workers || c.Warmup < 0 {
-		return fmt.Errorf("keys and operations must be >= workers; warmup must be >= 0")
+	// Zero key_bytes is accepted for results saved before the field existed.
+	if c.KeyBytes != 0 && c.KeyBytes != keyBytes {
+		return fmt.Errorf("keys must be %d bytes", keyBytes)
 	}
-	if c.OpenSegments != 0 && c.OpenSegments < 2 {
-		return fmt.Errorf("open history must fill at least 2 segments")
+	if c.Scalar && c.ValueBytes != 8 {
+		return fmt.Errorf("scalar operations require 8-byte values")
+	}
+	if c.Keys < c.Workers || c.Warmup < 0 {
+		return fmt.Errorf("keys must be >= workers; warmup must be >= 0")
+	}
+	if c.DotTarget < 0 || c.CalibrationDuration < 0 {
+		return fmt.Errorf("Dot target and calibration duration must be nonnegative")
+	}
+	if c.CalibrationDuration > 0 {
+		if c.Operations != 0 || c.Engine != "dot" {
+			return fmt.Errorf("calibration requires Dot with no fixed operation budget")
+		}
+	} else if c.Operations < c.Workers {
+		return fmt.Errorf("operations must be >= workers")
 	}
 	return nil
 }
@@ -76,27 +99,22 @@ type environment struct {
 }
 
 type result struct {
-	Config                 caseConfig                `json:"config"`
-	Environment            environment               `json:"environment"`
-	ElapsedSeconds         float64                   `json:"elapsed_seconds"`
-	OpsPerSecond           float64                   `json:"ops_per_second"`
-	Latency                latencySummary            `json:"latency"`
-	ByOperation            map[string]latencySummary `json:"by_operation"`
-	RSSHarnessBytes        uint64                    `json:"rss_harness_bytes"`
-	RSSPreparedBytes       uint64                    `json:"rss_prepared_bytes"`
-	RSSFinalBytes          uint64                    `json:"rss_final_bytes"`
-	RSSPeakBytes           uint64                    `json:"rss_peak_bytes"`
-	DiskPrepared           diskSize                  `json:"disk_prepared"`
-	DiskFinal              diskSize                  `json:"disk_final"`
-	DrainSeconds           float64                   `json:"drain_seconds"`
-	OpenSeconds            float64                   `json:"open_seconds,omitempty"`
-	OpenPreparationSeconds float64                   `json:"open_preparation_seconds,omitempty"`
-	OpenHistoryRecords     uint64                    `json:"open_history_records,omitempty"`
-	OpenHistoryBytes       uint64                    `json:"open_history_bytes,omitempty"`
-	OpenFullSegments       int                       `json:"open_dot_full_segments,omitempty"`
-	LiveKeys               int                       `json:"live_keys"`
-	LogicalBytes           uint64                    `json:"logical_bytes"`
-	SpaceAmplification     float64                   `json:"space_amplification"`
+	Config             caseConfig                `json:"config"`
+	Environment        environment               `json:"environment"`
+	ElapsedSeconds     float64                   `json:"elapsed_seconds"`
+	OpsPerSecond       float64                   `json:"ops_per_second"`
+	Latency            latencySummary            `json:"latency"`
+	ByOperation        map[string]latencySummary `json:"by_operation"`
+	RSSHarnessBytes    uint64                    `json:"rss_harness_bytes"`
+	RSSPreparedBytes   uint64                    `json:"rss_prepared_bytes"`
+	RSSFinalBytes      uint64                    `json:"rss_final_bytes"`
+	RSSPeakBytes       uint64                    `json:"rss_peak_bytes"`
+	DiskPrepared       diskSize                  `json:"disk_prepared"`
+	DiskFinal          diskSize                  `json:"disk_final"`
+	DrainSeconds       float64                   `json:"drain_seconds"`
+	LiveKeys           int                       `json:"live_keys"`
+	LogicalBytes       uint64                    `json:"logical_bytes"`
+	SpaceAmplification float64                   `json:"space_amplification"`
 }
 
 func currentEnvironment() environment {
@@ -132,6 +150,7 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 		return out, err
 	}
 	out.Config = c
+	out.Config.KeyBytes = keyBytes
 	out.Environment = currentEnvironment()
 	workers := make([]*worker, c.Workers)
 	for i := range workers {
@@ -142,7 +161,7 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 		return out, err
 	}
 	out.RSSHarnessBytes = baseline.Current
-	db, err := engines[c.Engine](c.Path)
+	db, err := engines[c.Engine](c)
 	if err != nil {
 		return out, err
 	}
@@ -152,7 +171,7 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 		}
 	}()
 	// Populate using the same ownership and encoding as the timed operations.
-	if _, err := parallel(ctx, workers, func(ctx context.Context, i int, w *worker) error {
+	if _, err := parallel(ctx, workers, func(ctx context.Context, i int, w *worker, _ time.Time) error {
 		for _, entry := range w.live {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -171,11 +190,16 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 	if err := db.Flush(); err != nil {
 		return out, err
 	}
-	phase := func(total int, measured bool) (time.Duration, error) {
-		return parallel(ctx, workers, func(ctx context.Context, id int, w *worker) error {
-			for j := 0; j < share(total, c.Workers, id); j++ {
+	phase := func(total int, duration time.Duration, measured bool) (time.Duration, error) {
+		return parallel(ctx, workers, func(ctx context.Context, id int, w *worker, begin time.Time) error {
+			deadline := begin.Add(duration)
+			budget := share(total, c.Workers, id)
+			for j := 0; duration > 0 || j < budget; j++ {
 				if err := ctx.Err(); err != nil {
 					return err
+				}
+				if duration > 0 && !time.Now().Before(deadline) {
+					break
 				}
 				if err := w.step(db, measured); err != nil {
 					return err
@@ -184,7 +208,7 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 			return nil
 		})
 	}
-	if _, err := phase(c.Warmup, false); err != nil {
+	if _, err := phase(c.Warmup, 0, false); err != nil {
 		return out, fmt.Errorf("warmup: %w", err)
 	}
 	if err := db.Flush(); err != nil {
@@ -199,12 +223,11 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 	if err != nil {
 		return out, err
 	}
-	elapsed, err := phase(c.Operations, true)
+	elapsed, err := phase(c.Operations, c.CalibrationDuration, true)
 	if err != nil {
 		return out, fmt.Errorf("measurement: %w", err)
 	}
 	out.ElapsedSeconds = elapsed.Seconds()
-	out.OpsPerSecond = float64(c.Operations) / elapsed.Seconds()
 	finalRSS, err := readRSS()
 	if err != nil {
 		return out, err
@@ -225,16 +248,6 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 	if err != nil {
 		return out, err
 	}
-	// Expand the history only after capturing operation metrics, so the large
-	// recovery fixture does not change the operation or space measurements.
-	opened, err := measureOpen(ctx, c, workers)
-	if err != nil {
-		return out, err
-	}
-	out.OpenSeconds = opened.elapsed.Seconds()
-	out.OpenPreparationSeconds = opened.preparation.Seconds()
-	out.OpenHistoryRecords, out.OpenHistoryBytes = opened.records, opened.historyBytes
-	out.OpenFullSegments = opened.fullSegments
 	aggregate := newLatency()
 	out.ByOperation = make(map[string]latencySummary)
 	for kind, name := range operationNames {
@@ -254,32 +267,37 @@ func runCase(ctx context.Context, c caseConfig) (out result, err error) {
 			return out, fmt.Errorf("merging total latency dropped %d samples", dropped)
 		}
 	}
-	if aggregate.count != uint64(c.Operations) {
+	if c.CalibrationDuration == 0 && aggregate.count != uint64(c.Operations) {
 		return out, fmt.Errorf("recorded %d operations, want %d", aggregate.count, c.Operations)
 	}
+	if aggregate.count == 0 {
+		return out, fmt.Errorf("measurement completed no operations")
+	}
 	out.Latency = summarize(aggregate)
+	out.OpsPerSecond = float64(aggregate.count) / elapsed.Seconds()
 	for _, w := range workers {
 		out.LiveKeys += len(w.live)
 	}
-	out.LogicalBytes = uint64(out.LiveKeys) * uint64(16+c.ValueBytes)
+	out.LogicalBytes = uint64(out.LiveKeys) * uint64(keyBytes+c.ValueBytes)
 	out.SpaceAmplification = float64(out.DiskFinal.AllocatedBytes) / float64(out.LogicalBytes)
 	return out, nil
 }
 
 // Workers own disjoint key sets, so expected hits, updates and deletes are
 // deterministic despite scheduling. They still share one engine and its locks.
-func parallel(ctx context.Context, workers []*worker, fn func(context.Context, int, *worker) error) (time.Duration, error) {
+func parallel(ctx context.Context, workers []*worker, fn func(context.Context, int, *worker, time.Time) error) (time.Duration, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := make(chan struct{})
 	errs := make(chan error, 1)
 	var ready, done sync.WaitGroup
+	var begin time.Time // Published to every worker by closing start.
 	ready.Add(len(workers))
 	for i, w := range workers {
 		done.Go(func() {
 			ready.Done()
 			<-start
-			if err := fn(ctx, i, w); err != nil {
+			if err := fn(ctx, i, w, begin); err != nil {
 				select {
 				case errs <- err:
 				default:
@@ -289,7 +307,7 @@ func parallel(ctx context.Context, workers []*worker, fn func(context.Context, i
 		})
 	}
 	ready.Wait()
-	begin := time.Now()
+	begin = time.Now()
 	close(start)
 	done.Wait()
 	elapsed := time.Since(begin)

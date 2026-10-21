@@ -31,9 +31,12 @@ type Index struct {
 	// continuation and shifted belong to the entry. Together these bits encode
 	// displacement without a per-entry counter or a limit on collision chains.
 	slots       []uint64
-	population  int
+	entryCount  int
 	memory      indexMemory
 	expirations map[uint64]indexExpiration
+	// Shared with Log so every index mutation, including expiry pruning,
+	// keeps the per-segment reference counts current. Nil for standalone indexes.
+	segmentRefCounts map[uint64]uint32
 }
 
 // Carry changes by value so insertion/deletion shifts happen only after the
@@ -70,8 +73,9 @@ func newIndex() (*Index, error) {
 // close requires the shard's exclusive lock, as does grow.
 func (idx *Index) close() error {
 	idx.slots = nil
-	idx.population = 0
+	idx.entryCount = 0
 	idx.expirations = nil
+	clear(idx.segmentRefCounts)
 	return idx.memory.close()
 }
 
@@ -140,12 +144,12 @@ func empty(slot uint64) bool {
 
 func (idx *Index) grow() error {
 	n := len(idx.slots)
-	if idx.population < n-n/4 {
+	if idx.entryCount < n-n/4 {
 		return nil
 	}
 	if len(idx.expirations) > 0 {
 		idx.prune()
-		if idx.population < n-n/4-n/8 {
+		if idx.entryCount < n-n/4-n/8 {
 			return nil
 		}
 	}
@@ -237,7 +241,10 @@ func (idx *Index) run(home int) int {
 }
 
 func (idx *Index) insert(home int, slot uint64) {
-	idx.population++
+	idx.entryCount++
+	if idx.segmentRefCounts != nil {
+		idx.segmentRefCounts[slot&segmentMask>>26]++
+	}
 	if empty(idx.slots[home]) {
 		idx.slots[home] = slot | occupiedMask
 		return
@@ -270,6 +277,9 @@ func (idx *Index) insert(home int, slot uint64) {
 }
 
 func (idx *Index) remove(home, pos int) {
+	if idx.segmentRefCounts != nil {
+		idx.segmentRefCounts[idx.slots[pos]&segmentMask>>26]--
+	}
 	mask := len(idx.slots) - 1
 	next := (pos + 1) & mask
 	first := idx.slots[pos]&continuationMask == 0
@@ -301,7 +311,7 @@ func (idx *Index) remove(home, pos int) {
 		next = (next + 1) & mask
 	}
 	idx.slots[pos] = 0
-	idx.population--
+	idx.entryCount--
 }
 
 // findPayload returns the matching slot, value, and expiration, or position -1
@@ -473,6 +483,10 @@ func (idx *Index) commit(change indexChange) {
 			idx.setExpiration(change.slot&addressMask, change.expiration, change.hash)
 		}
 	case indexUpdate:
+		if idx.segmentRefCounts != nil {
+			idx.segmentRefCounts[change.prevAddr>>26]--
+			idx.segmentRefCounts[change.slot&segmentMask>>26]++
+		}
 		if change.hasPrevExp {
 			idx.deleteExpiration(change.prevAddr)
 		}

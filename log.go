@@ -22,14 +22,21 @@ const (
 	logSegmentSize     = 1 << 26
 	logWriteBufferSize = 4 << 10
 	logHeaderSize      = 21
+	segmentCount       = 1 << 20
+	maxSegment         = segmentCount - 1
 )
 
 type Log struct {
-	path        string
-	headFile    *os.File
-	headSegment uint64
-	size        uint64
-	// A failed rollback blocks further appends until the log is reopened.
+	path                string
+	headFile            *os.File
+	headSegment         uint64
+	size                uint64
+	segmentRecordCounts map[uint64]uint32
+	segmentRefCounts    map[uint64]uint32
+	// Retry unfinished maintenance even after cleanup lowers the dead-record ratio.
+	compactPending bool
+
+	// A failed rollback or metadata sync blocks appends until the log is reopened.
 	writeErr error
 	// Writes and their index lookups share this buffer under the shard's
 	// exclusive lock. Concurrent Get calls use their own read buffers.
@@ -53,7 +60,17 @@ func newLog(name string, idx *Index) (*Log, error) {
 		return nil, fmt.Errorf("read directory: %w", err)
 	}
 	var segments []uint64
+	var unfinished []string
 	for _, entry := range entries {
+		// Unpublished replacements never contain the only copy of a value.
+		// Remove them only after all published logs pass recovery validation.
+		if strings.HasSuffix(entry.Name(), ".log.compact") {
+			seg, err := strconv.ParseUint(strings.TrimSuffix(entry.Name(), ".log.compact"), 10, 20)
+			if err == nil && entry.Name() == filepath.Base(l.segmentPath(seg))+".compact" && entry.Type().IsRegular() {
+				unfinished = append(unfinished, filepath.Join(name, entry.Name()))
+			}
+			continue
+		}
 		if !strings.HasSuffix(entry.Name(), ".log") {
 			continue
 		}
@@ -63,18 +80,83 @@ func newLog(name string, idx *Index) (*Log, error) {
 		}
 		segments = append(segments, seg)
 	}
-	slices.Sort(segments)
+	segments, err = orderSegments(segments)
+	if err != nil {
+		return nil, err
+	}
+	l.segmentRecordCounts = make(map[uint64]uint32, len(segments))
+	l.segmentRefCounts = make(map[uint64]uint32, len(segments))
+	idx.segmentRefCounts = l.segmentRefCounts
 	var head uint64
 	for i, seg := range segments {
+		l.segmentRecordCounts[seg] = 0
+		// Initialize only this segment; preserve counts from earlier replay.
+		l.segmentRefCounts[seg] = 0
 		if err := l.replaySegment(idx, seg, i == len(segments)-1); err != nil {
 			return nil, fmt.Errorf("replay segment %d: %w", seg, err)
 		}
 		head = seg
 	}
+	for _, seg := range segments {
+		// Packing may have published copies without retiring their sources yet.
+		if seg != head && l.segmentRefCounts[seg] != l.segmentRecordCounts[seg] {
+			l.compactPending = true
+		}
+	}
 	if err := l.openHead(head); err != nil {
 		return nil, fmt.Errorf("open head: %w", err)
 	}
+	for _, path := range unfinished {
+		if err := os.Remove(path); err != nil {
+			return nil, errors.Join(fmt.Errorf("remove unfinished compaction: %w", err), l.headFile.Close())
+		}
+	}
+	if len(unfinished) > 0 {
+		if err := l.syncDirectory(); err != nil {
+			return nil, errors.Join(err, l.headFile.Close())
+		}
+	}
 	return &l, nil
+}
+
+func incrementSegment(seg uint64) uint64 { return (seg + 1) & maxSegment }
+
+// Published filenames form one occupied arc of the ring, leaving one nonempty
+// gap. Its predecessor is the head; multiple gaps cannot identify a unique head.
+func orderSegments(segments []uint64) ([]uint64, error) {
+	if len(segments) == 0 {
+		return segments, nil
+	}
+	if len(segments) >= segmentCount {
+		return nil, fmt.Errorf("segment ring has no vacant ID")
+	}
+	slices.Sort(segments)
+	start, gaps := 0, 0
+	for i, seg := range segments {
+		next := (i + 1) % len(segments)
+		if incrementSegment(seg) != segments[next] {
+			start = next
+			gaps++
+		}
+	}
+	if gaps != 1 {
+		return nil, fmt.Errorf("segment ring has %d gaps; cannot infer head", gaps)
+	}
+	ordered := make([]uint64, 0, len(segments))
+	ordered = append(ordered, segments[start:]...)
+	return append(ordered, segments[:start]...), nil
+}
+
+func (l *Log) syncDirectory() error {
+	path := l.path
+	if path == "" {
+		path = "."
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open log directory: %w", err)
+	}
+	return errors.Join(f.Sync(), f.Close())
 }
 
 // replaySegment streams records into the index without retaining their values.
@@ -101,6 +183,9 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		return fmt.Errorf("not a regular file")
 	}
 	size := uint64(info.Size())
+	if !head && size < logSegmentSize {
+		l.compactPending = true
+	}
 	r := bufio.NewReaderSize(f, 64<<10)
 	var header [logHeaderSize]byte
 	var key []byte
@@ -151,6 +236,7 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		if err := idx.replay(l, ty, key, xxhash.Sum64(key), seg<<26|off, expiration); err != nil {
 			return fmt.Errorf("index record at offset %d: %w", off, err)
 		}
+		l.segmentRecordCounts[seg]++
 		off += logHeaderSize + keylen + vallen
 	}
 	return nil
@@ -183,21 +269,44 @@ func (l *Log) openFile(seg uint64, flag int) (*os.File, error) {
 }
 
 func (l *Log) openHead(seg uint64) error {
-	if seg > segmentMask>>26 {
+	if seg > maxSegment {
 		return fmt.Errorf("segment capacity exceeded")
 	}
-	f, err := l.openFile(seg, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	_, exists := l.segmentRecordCounts[seg]
+	if l.headFile != nil && (seg != incrementSegment(l.headSegment) || exists) {
+		return fmt.Errorf("next segment %d is not vacant or adjacent", seg)
+	}
+	if !exists && len(l.segmentRecordCounts) >= segmentCount-1 {
+		return fmt.Errorf("segment ring must retain one vacant ID")
+	}
+	flag := os.O_RDWR | os.O_APPEND
+	if !exists {
+		flag |= os.O_CREATE | os.O_EXCL
+	}
+	f, err := l.openFile(seg, flag)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return errors.Join(fmt.Errorf("stat file: %w", err), f.Close())
+	var size uint64
+	if exists {
+		info, err := f.Stat()
+		if err != nil {
+			return errors.Join(fmt.Errorf("stat file: %w", err), f.Close())
+		}
+		size = uint64(info.Size())
+	} else {
+		// O_EXCL created an empty file, so no Stat can strand an untracked head.
+		if err := errors.Join(f.Sync(), l.syncDirectory()); err != nil {
+			l.writeErr = fmt.Errorf("persist new head; log requires recovery: %w", err)
+			return errors.Join(l.writeErr, f.Close())
+		}
+		l.segmentRecordCounts[seg] = 0
+		l.segmentRefCounts[seg] = 0
 	}
 	old := l.headFile
 	l.headFile = f
 	l.headSegment = seg
-	l.size = uint64(info.Size())
+	l.size = size
 	if old != nil {
 		if err := old.Close(); err != nil {
 			return fmt.Errorf("close sealed log: %w", err)
@@ -233,10 +342,16 @@ func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, 
 		if err := l.headFile.Sync(); err != nil {
 			return 0, 0, fmt.Errorf("sync file: %w", err)
 		}
-		if err := l.openHead(l.headSegment + 1); err != nil {
+		if err := l.openHead(incrementSegment(l.headSegment)); err != nil {
 			return 0, 0, fmt.Errorf("open head: %w", err)
 		}
 	}
+	return l.appendRecord(ty, key, val, expiration)
+}
+
+// appendRecord also serves compaction's unpublished replacement files. The
+// caller ensures the next record starts within the segment's offset range.
+func (l *Log) appendRecord(ty byte, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
 	segment, off := l.headSegment, l.size
 	size := logHeaderSize + len(key) + len(val)
 	var record []byte
@@ -274,6 +389,7 @@ func (l *Log) write(ty byte, key []byte, val []byte, expiration int64) (uint64, 
 		return 0, 0, err
 	}
 	l.size = off + uint64(n)
+	l.segmentRecordCounts[l.headSegment]++
 	return segment, off, nil
 }
 

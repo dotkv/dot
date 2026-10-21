@@ -12,6 +12,35 @@ import (
 	"testing"
 )
 
+func TestLogRotationWraps(t *testing.T) {
+	path := t.TempDir()
+	writeRecoverySegment(t, path, maxSegment, nil)
+	log, _ := openRecoveryLog(t, path)
+	padLog(t, log, logSegmentSize)
+	seg, off, err := log.write('s', []byte("key"), []byte("new"), 0)
+	if err != nil || seg != 0 || off != 0 {
+		t.Fatalf("wrapped rotation: segment=%d offset=%d error=%v", seg, off, err)
+	}
+	if len(log.segmentRecordCounts) != 2 || log.segmentRecordCounts[0] != 1 {
+		t.Fatalf("rotated counts=%v", log.segmentRecordCounts)
+	}
+}
+
+func TestLogRotationPreservesLastVacantID(t *testing.T) {
+	log, _ := openRecoveryLog(t, t.TempDir())
+	// Populate accounting without creating a million files: reservation must
+	// reject the rotation before attempting any filesystem operation.
+	for seg := uint64(2); seg <= maxSegment; seg++ {
+		log.segmentRecordCounts[seg] = 0
+	}
+	if err := log.openHead(1); err == nil || log.headSegment != 0 {
+		t.Fatalf("rotation consumed the last vacant ID: %v", err)
+	}
+	if _, err := os.Stat(log.segmentPath(1)); !os.IsNotExist(err) {
+		t.Fatalf("rotation created the last vacant segment: %v", err)
+	}
+}
+
 func TestNewLogCurrentDirectory(t *testing.T) {
 	t.Chdir(t.TempDir())
 	log, err := newLog(".", newInternalIndex(t))
@@ -48,7 +77,7 @@ func TestLogCRCCompatibility(t *testing.T) {
 }
 
 func TestLogBufferedWrites(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	key := []byte("key")
 	records := []struct {
 		ty         byte
@@ -94,7 +123,7 @@ func TestLogBufferedWrites(t *testing.T) {
 }
 
 func TestLogReadRejectsCorruption(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	key, value := []byte("key"), []byte("value")
 	if _, _, err := log.write('s', key, value, 42); err != nil {
 		t.Fatal(err)
@@ -129,7 +158,7 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 }
 
 func TestLogBufferedReads(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	for _, size := range []int{0, 144, logWriteBufferSize - 1, logWriteBufferSize, logWriteBufferSize + 1, 64 << 10, 144} {
 		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, min(16, size))
@@ -160,7 +189,7 @@ func padLog(t *testing.T, log *Log, size uint64) {
 func TestLogSealingBoundary(t *testing.T) {
 	for _, extra := range []uint64{0, 1} {
 		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
-			log := newInternalDB(t).shards[0].log
+			log, _ := openRecoveryLog(t, t.TempDir())
 			key, value := []byte("boundary"), []byte("value spanning the boundary")
 			offset := logSegmentSize - uint64(logHeaderSize+len(key)+len(value)) + extra
 			padLog(t, log, offset)
@@ -298,7 +327,7 @@ func TestDBLogSealingOpenFailure(t *testing.T) {
 			if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 				t.Fatal("failed rotation changed the head")
 			}
-			if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
+			if !slices.Equal(before, s.index.slots) || s.index.entryCount != 1 {
 				t.Fatal("failed rotation changed the index")
 			}
 			info, err := head.Stat()
@@ -354,7 +383,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 	if s.log.headFile != head || s.log.headSegment != 0 || s.log.size != logSegmentSize {
 		t.Fatal("failed sync changed the head")
 	}
-	if !slices.Equal(before, s.index.slots) || s.index.population != 1 {
+	if !slices.Equal(before, s.index.slots) || s.index.entryCount != 1 {
 		t.Fatal("failed sync changed the index")
 	}
 	var err error
@@ -374,7 +403,7 @@ func TestDBLogSealingSyncFailure(t *testing.T) {
 }
 
 func TestLogSealedReadsCloseFiles(t *testing.T) {
-	log := newInternalDB(t).shards[0].log
+	log, _ := openRecoveryLog(t, t.TempDir())
 	if _, _, err := log.write('s', []byte("old"), []byte("value"), 0); err != nil {
 		t.Fatal(err)
 	}

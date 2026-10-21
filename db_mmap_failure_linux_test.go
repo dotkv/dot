@@ -33,6 +33,9 @@ func TestDBMappingFailure(t *testing.T) {
 
 	// Warm constructor/cleanup paths before forbidding new OS mappings.
 	db := newInternalDB(t)
+	// The worker can allocate lazily; stop it before restricting address space.
+	db.backgroundCancel()
+	db.backgroundWG.Wait()
 	if mode == "new" {
 		path := t.TempDir()
 		marker := filepath.Join(path, "preserve")
@@ -69,14 +72,14 @@ func TestDBMappingFailure(t *testing.T) {
 		}
 	}
 	before := slices.Clone(s.index.slots)
-	size, population := s.log.size, s.index.population
+	size, entryCount := s.log.size, s.index.entryCount
 	key := keys[len(keys)-1]
 	var setErr error
 	withoutNewMappings(t, func() { setErr = db.Set(key, value) })
 	if !errors.Is(setErr, syscall.ENOMEM) {
 		t.Fatalf("Set: got %v, want ENOMEM", setErr)
 	}
-	if !slices.Equal(before, s.index.slots) || s.index.population != population || s.log.size != size {
+	if !slices.Equal(before, s.index.slots) || s.index.entryCount != entryCount || s.log.size != size {
 		t.Fatal("failed mapping changed the index or appended a log record")
 	}
 	if got, err := db.Get[[]byte](keys[0]); err != nil || !bytes.Equal(got, value) {

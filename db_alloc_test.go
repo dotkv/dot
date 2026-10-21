@@ -140,20 +140,19 @@ func TestDBGetScalarAllocations(t *testing.T) {
 }
 
 func TestIndexFindScalarCollisionAllocations(t *testing.T) {
-	db := newInternalDB(t)
-	s := &db.shards[0]
+	log, idx := openRecoveryLog(t, t.TempDir())
 	const hash = uint64(0x123456789abcdef)
-	home := int(hash & uint64(len(s.index.slots)-1))
+	home := int(hash & uint64(len(idx.slots)-1))
 	for _, entry := range []struct{ key, value []byte }{
 		// This candidate exceeds the initial read, but still fits on the stack.
 		{bytes.Repeat([]byte{'k'}, 144), []byte{1}},
 		{[]byte("target"), []byte{42, 0, 0, 0, 0, 0, 0, 0}},
 	} {
-		segment, off, err := s.log.write('s', entry.key, entry.value, 0)
+		segment, off, err := log.write('s', entry.key, entry.value, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.index.insert(home, hashtag(hash)|segment<<26|off)
+		idx.insert(home, hashtag(hash)|segment<<26|off)
 	}
 	for _, hit := range []bool{false, true} {
 		key := []byte("missing")
@@ -162,7 +161,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 			key, want = []byte("target"), scalarValue{bits: 42, size: 8}
 		}
 		allocations := testing.AllocsPerRun(100, func() {
-			pos, got, _, err := s.index.findScalar(s.log, key, hash)
+			pos, got, _, err := idx.findScalar(log, key, hash)
 			if err != nil || (pos >= 0) != hit || got != want {
 				t.Fatalf("position %d, got %v, want %v, error %v", pos, got, want, err)
 			}

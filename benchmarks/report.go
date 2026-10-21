@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const resultsStart = "<!-- benchmark-results:start -->"
@@ -32,16 +33,12 @@ func loadResults(path string) ([]result, error) {
 		if err := r.Config.validate(); err != nil {
 			return nil, fmt.Errorf("result %d: %w", len(results)+1, err)
 		}
+		if r.Config.CalibrationDuration != 0 {
+			return nil, fmt.Errorf("result %d is a calibration probe, not a fixed-work case", len(results)+1)
+		}
+		r.Config.KeyBytes = keyBytes
 		if r.Latency.Count != uint64(r.Config.Operations) {
 			return nil, fmt.Errorf("result %d has %d completed operations, want %d", len(results)+1, r.Latency.Count, r.Config.Operations)
-		}
-		if r.Config.OpenSegments > 0 {
-			if r.OpenSeconds <= 0 || r.OpenHistoryRecords == 0 || r.OpenHistoryBytes/dotSegmentBytes < uint64(r.Config.OpenSegments) {
-				return nil, fmt.Errorf("result %d lacks the required Open history", len(results)+1)
-			}
-			if r.Config.Engine == "dot" && r.OpenFullSegments < r.Config.OpenSegments {
-				return nil, fmt.Errorf("result %d lacks verified full Dot segments", len(results)+1)
-			}
 		}
 		results = append(results, r)
 	}
@@ -117,10 +114,15 @@ func writeReadme(path string, results []result) error {
 }
 
 type scenario struct {
+	profile  string
 	workload string
 	bytes    int
 	scalar   bool
 	workers  int
+}
+
+func scenarioFor(c caseConfig) scenario {
+	return scenario{c.Profile, c.Workload, c.ValueBytes, c.Scalar, c.Workers}
 }
 
 func renderResults(results []result) ([]byte, error) {
@@ -130,12 +132,36 @@ func renderResults(results []result) ([]byte, error) {
 	first := results[0]
 	var order []scenario
 	groups := make(map[scenario]map[string][]result)
+	type profileSettings struct {
+		target            time.Duration
+		disableCompaction bool
+	}
+	settings := make(map[string]profileSettings)
+	var profileOrder []string
+	budgets := make(map[scenario]int)
 	for _, r := range results {
 		c := r.Config
-		if c.Keys != first.Config.Keys || c.Operations != first.Config.Operations || c.Warmup != first.Config.Warmup || c.Seed != first.Config.Seed || c.OpenSegments != first.Config.OpenSegments {
-			return nil, fmt.Errorf("cannot combine results with different dataset, operation, warmup, seed, or open-history settings")
+		if err := c.validate(); err != nil {
+			return nil, err
 		}
-		key := scenario{c.Workload, c.ValueBytes, c.Scalar, c.Workers}
+		if c.Keys != first.Config.Keys || c.Warmup != first.Config.Warmup || c.Seed != first.Config.Seed {
+			return nil, fmt.Errorf("cannot combine results with different dataset, warmup, or seed settings")
+		}
+		if c.CalibrationDuration != 0 {
+			return nil, fmt.Errorf("cannot report calibration probes")
+		}
+		setting := profileSettings{c.DotTarget, c.DisableCompaction}
+		if previous, ok := settings[c.Profile]; ok && previous != setting {
+			return nil, fmt.Errorf("cannot combine results with different target or compaction settings for profile %q", c.Profile)
+		} else if !ok {
+			profileOrder = append(profileOrder, c.Profile)
+			settings[c.Profile] = setting
+		}
+		key := scenarioFor(c)
+		if budget, ok := budgets[key]; ok && budget != c.Operations {
+			return nil, fmt.Errorf("cannot combine different operation budgets for %s %s %d B %d workers", c.Profile, c.Workload, c.ValueBytes, c.Workers)
+		}
+		budgets[key] = c.Operations
 		if groups[key] == nil {
 			order = append(order, key)
 			groups[key] = make(map[string][]result)
@@ -150,14 +176,33 @@ func renderResults(results []result) ([]byte, error) {
 			if i > 0 {
 				out.WriteString("; ")
 			}
+			if key.profile != "" {
+				fmt.Fprintf(&out, "%s / ", key.profile)
+			}
 			fmt.Fprintf(&out, "%s / %s B / %d workers", key.workload, integerWithCommas(key.bytes), key.workers)
 		}
 		out.WriteString(".\n\n")
 	}
-	fmt.Fprintf(&out, "Configuration: **%s initial keys**, **%s measured operations**, **%s warmup operations**, seed **%d**.\n\n",
-		integerWithCommas(first.Config.Keys), integerWithCommas(first.Config.Operations), integerWithCommas(first.Config.Warmup), first.Config.Seed)
-	if first.Config.OpenSegments > 0 {
-		fmt.Fprintf(&out, "Open fixture: at least **%d full 64 MiB Dot segments** in one shard plus a nonempty head, with identical additional updates applied to each engine. History size counts the added records in Dot's log encoding.\n\n", first.Config.OpenSegments)
+	fmt.Fprintf(&out, "Configuration: **%s initial keys**, **%d-byte keys**, **%s warmup operations**, seed **%d**. Operation budgets are fixed per configuration and shared across engines and repetitions.\n\n",
+		integerWithCommas(first.Config.Keys), keyBytes, integerWithCommas(first.Config.Warmup), first.Config.Seed)
+	for _, name := range profileOrder {
+		setting := settings[name]
+		label := name
+		if label == "" {
+			label = "legacy"
+		}
+		compaction := "enabled"
+		if setting.disableCompaction {
+			compaction = "disabled"
+		}
+		fmt.Fprintf(&out, "Profile **%s**: automatic compaction **%s**", label, compaction)
+		if setting.target > 0 {
+			fmt.Fprintf(&out, "; budgets estimated from a short Dot probe targeting **%s for Dot**", setting.target)
+		}
+		if setting.disableCompaction {
+			fmt.Fprintf(&out, "; Pebble L0 write-stop threshold **%s**", integerWithCommas(fastL0StopWritesThreshold))
+		}
+		out.WriteString(".\n\n")
 	}
 	e := first.Environment
 	fmt.Fprintf(&out, "Environment: %s, %s/%s, %d logical CPUs, GOMAXPROCS=%d.\n\n", e.GoVersion, e.OS, e.Arch, e.CPUs, e.GOMAXPROCS)
@@ -169,7 +214,6 @@ func renderResults(results []result) ([]byte, error) {
 	}
 	out.WriteString("Eight-byte scalar cases use `uint64` in Dot and equivalent encoding/decoding in Pebble.\n\n")
 	out.WriteString("Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.\n\n")
-	out.WriteString("Open times a clean reopen after its history preparation, flush, and close, with warm filesystem caches. Preparation, close, and validation are excluded; operation RSS and disk figures precede the additional Open history. An em dash means a measurement is missing from one or more saved runs.\n\n")
 	for _, key := range order {
 		value := fmt.Sprintf("%s B values", integerWithCommas(key.bytes))
 		if key.scalar {
@@ -179,9 +223,14 @@ func renderResults(results []result) ([]byte, error) {
 		if key.workers == 1 {
 			workerLabel = "worker"
 		}
-		fmt.Fprintf(&out, "### %s · %s · %d %s\n\n", strings.ReplaceAll(key.workload, "-", " "), value, key.workers, workerLabel)
-		out.WriteString("| Implementation | Runs | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) | Open (ms) | Added history (MiB) |\n")
-		out.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+		title := strings.ReplaceAll(key.workload, "-", " ")
+		if key.profile != "" {
+			title = key.profile + " · " + title
+		}
+		fmt.Fprintf(&out, "### %s · %s · %d %s\n\n", title, value, key.workers, workerLabel)
+		fmt.Fprintf(&out, "Measured operations per engine: **%s**. Ratios are reads/writes.\n\n", integerWithCommas(budgets[key]))
+		out.WriteString("| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |\n")
+		out.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		var engines []string
 		for name := range groups[key] {
 			engines = append(engines, name)
@@ -190,69 +239,61 @@ func renderResults(results []result) ([]byte, error) {
 		for _, engine := range engines {
 			runs := groups[key][engine]
 			name := engine
-			if engine == "dot" {
+			switch engine {
+			case "dot":
 				name = "Dot"
-			} else if engine == "pebble" {
+			case "pebble":
 				name = "Pebble"
 			}
-			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %s | %.1f | %.2f | %s | %s |\n",
+			fmt.Fprintf(&out, "| %s | %d | %.3f | %.3f | %.3f | %s | %.1f | %.2f |\n",
 				name, len(runs),
+				median(runs, func(r result) float64 { return r.ElapsedSeconds }),
 				median(runs, func(r result) float64 { return r.Latency.MeanNS / 1000 }),
 				median(runs, func(r result) float64 { return float64(r.Latency.P99NS) / 1000 }),
 				integerWithCommas(int(median(runs, func(r result) float64 { return r.OpsPerSecond })+0.5)),
 				median(runs, func(r result) float64 { return float64(r.RSSPeakBytes) / (1 << 20) }),
-				median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) }),
-				openMilliseconds(runs), openHistoryMiB(runs))
+				median(runs, func(r result) float64 { return float64(r.DiskFinal.AllocatedBytes) / (1 << 20) }))
 		}
 		out.WriteByte('\n')
 	}
 	return []byte(out.String()), nil
 }
 
-func openHistoryMiB(runs []result) string {
-	for _, r := range runs {
-		if r.OpenHistoryBytes == 0 {
-			return "—"
-		}
-	}
-	return fmt.Sprintf("%.2f", median(runs, func(r result) float64 { return float64(r.OpenHistoryBytes) / (1 << 20) }))
-}
-
-func openMilliseconds(runs []result) string {
-	for _, r := range runs {
-		if r.OpenSeconds <= 0 {
-			return "—"
-		}
-	}
-	return fmt.Sprintf("%.3f", median(runs, func(r result) float64 { return r.OpenSeconds * 1000 }))
-}
-
 // Identify gaps within the workload/value/worker axes present in a saved run.
 // This keeps a snapshot from an interrupted run from looking like a full sweep.
 func missingScenarios(order []scenario) []scenario {
-	workloads := make(map[string]bool)
-	values := make(map[scenario]bool)
-	workers := make(map[int]bool)
-	present := make(map[scenario]bool)
+	byProfile := make(map[string][]scenario)
 	for _, key := range order {
-		workloads[key.workload] = true
-		values[scenario{bytes: key.bytes, scalar: key.scalar}] = true
-		workers[key.workers] = true
-		present[key] = true
+		byProfile[key.profile] = append(byProfile[key.profile], key)
 	}
 	var missing []scenario
-	for workload := range workloads {
-		for value := range values {
-			for worker := range workers {
-				key := scenario{workload, value.bytes, value.scalar, worker}
-				if !present[key] {
-					missing = append(missing, key)
+	for profile, scenarios := range byProfile {
+		workloads := make(map[string]bool)
+		values := make(map[scenario]bool)
+		workers := make(map[int]bool)
+		present := make(map[scenario]bool)
+		for _, key := range scenarios {
+			workloads[key.workload] = true
+			values[scenario{bytes: key.bytes, scalar: key.scalar}] = true
+			workers[key.workers] = true
+			present[key] = true
+		}
+		for workload := range workloads {
+			for value := range values {
+				for worker := range workers {
+					key := scenario{profile, workload, value.bytes, value.scalar, worker}
+					if !present[key] {
+						missing = append(missing, key)
+					}
 				}
 			}
 		}
 	}
 	sort.Slice(missing, func(i, j int) bool {
 		a, b := missing[i], missing[j]
+		if a.profile != b.profile {
+			return a.profile < b.profile
+		}
 		if a.workload != b.workload {
 			return a.workload < b.workload
 		}

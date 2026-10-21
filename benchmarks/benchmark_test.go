@@ -15,7 +15,7 @@ import (
 func TestEngineContracts(t *testing.T) {
 	for _, name := range []string{"dot", "pebble"} {
 		t.Run(name, func(t *testing.T) {
-			db, err := engines[name](t.TempDir())
+			db, err := engines[name](caseConfig{Path: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,9 +183,6 @@ func TestRunCase(t *testing.T) {
 				}
 				if out.LiveKeys < c.Keys || out.LiveKeys > c.Keys+c.Workers || out.DiskFinal.AllocatedBytes == 0 || out.SpaceAmplification <= 0 {
 					t.Fatal("invalid disk/live data measurements")
-				}
-				if out.OpenSeconds <= 0 {
-					t.Fatal("reopen time was not recorded")
 				}
 				previous = &out
 			})

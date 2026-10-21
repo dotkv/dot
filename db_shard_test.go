@@ -63,8 +63,8 @@ func TestDBShards(t *testing.T) {
 				t.Fatalf("shard %d log: key=%q value=%q error=%v", i, k, v, err)
 			}
 		}
-		if s.index.population != len(keys) {
-			t.Fatalf("shard %d: got population %d, want %d", i, s.index.population, len(keys))
+		if s.index.entryCount != len(keys) {
+			t.Fatalf("shard %d: got entryCount %d, want %d", i, s.index.entryCount, len(keys))
 		}
 		if got := s.log.headFile.Name(); got != filepath.Join(db.path, dir.Name(), "0000000.log") {
 			t.Fatalf("shard %d: unexpected log path %q", i, got)
