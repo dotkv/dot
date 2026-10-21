@@ -2,6 +2,7 @@ package dot
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
@@ -94,7 +95,7 @@ func TestDBCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkSegmentAccounting(t, s)
-	if err := db.compact(); err != nil {
+	if err := db.compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	checkSegmentAccounting(t, s)
@@ -108,7 +109,7 @@ func TestDBCompaction(t *testing.T) {
 		t.Fatalf("oldest source was not removed: %v", err)
 	}
 	before := s.log.size
-	if err := db.compact(); err != nil || s.log.size != before {
+	if err := db.compact(context.Background()); err != nil || s.log.size != before {
 		t.Fatalf("repeat compaction: size=%d error=%v", s.log.size, err)
 	}
 	db = reopenDB(t, db)
@@ -155,7 +156,7 @@ func TestCompactionConcurrentUpdates(t *testing.T) {
 	compacted := make(chan error, 1)
 	go func() {
 		for range requests {
-			if err := db.compact(); err != nil {
+			if err := db.compact(context.Background()); err != nil {
 				compacted <- err
 				return
 			}
@@ -297,7 +298,7 @@ func TestCompactionFailurePreservesIndexAndLog(t *testing.T) {
 	if err := os.Mkdir(blocker, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.compact(); err == nil {
+	if err := db.compact(context.Background()); err == nil {
 		t.Fatal("compaction unexpectedly succeeded")
 	}
 	current, err := os.ReadFile(s.log.segmentPath(0))
@@ -308,7 +309,7 @@ func TestCompactionFailurePreservesIndexAndLog(t *testing.T) {
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.compact(); err != nil {
+	if err := db.compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if value, err := db.Get[[]byte](key); err != nil || string(value) != "new" {
@@ -371,7 +372,7 @@ func TestCompactionRandomizedWrapAndReopen(t *testing.T) {
 		}
 		if step%60 == 59 {
 			check()
-			if err := db.compact(); err != nil {
+			if err := db.compact(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			check()
@@ -413,7 +414,7 @@ func TestCompactionFillsAndSealsOutputs(t *testing.T) {
 	if err := db.Set(keys[5], []byte("small")); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.compact(); err != nil {
+	if err := db.compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(s.log.segmentRefCounts, map[uint64]uint32{1: 2, 2: 3}) {

@@ -33,6 +33,8 @@ type Log struct {
 	size                uint64
 	segmentRecordCounts map[uint64]uint32
 	segmentRefCounts    map[uint64]uint32
+	// Retry unfinished maintenance even after cleanup lowers the dead-record ratio.
+	compactPending bool
 
 	// A failed rollback or metadata sync blocks appends until the log is reopened.
 	writeErr error
@@ -88,12 +90,18 @@ func newLog(name string, idx *Index) (*Log, error) {
 	var head uint64
 	for i, seg := range segments {
 		l.segmentRecordCounts[seg] = 0
-		// Replay may already have inserted references to earlier segments.
+		// Initialize only this segment; preserve counts from earlier replay.
 		l.segmentRefCounts[seg] = 0
 		if err := l.replaySegment(idx, seg, i == len(segments)-1); err != nil {
 			return nil, fmt.Errorf("replay segment %d: %w", seg, err)
 		}
 		head = seg
+	}
+	for _, seg := range segments {
+		// Packing may have published copies without retiring their sources yet.
+		if seg != head && l.segmentRefCounts[seg] != l.segmentRecordCounts[seg] {
+			l.compactPending = true
+		}
 	}
 	if err := l.openHead(head); err != nil {
 		return nil, fmt.Errorf("open head: %w", err)
@@ -175,6 +183,9 @@ func (l *Log) replaySegment(idx *Index, seg uint64, head bool) (err error) {
 		return fmt.Errorf("not a regular file")
 	}
 	size := uint64(info.Size())
+	if !head && size < logSegmentSize {
+		l.compactPending = true
+	}
 	r := bufio.NewReaderSize(f, 64<<10)
 	var header [logHeaderSize]byte
 	var key []byte
@@ -276,22 +287,26 @@ func (l *Log) openHead(seg uint64) error {
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return errors.Join(fmt.Errorf("stat file: %w", err), f.Close())
-	}
-	if !exists {
-		l.segmentRecordCounts[seg] = 0
-		l.segmentRefCounts[seg] = 0
+	var size uint64
+	if exists {
+		info, err := f.Stat()
+		if err != nil {
+			return errors.Join(fmt.Errorf("stat file: %w", err), f.Close())
+		}
+		size = uint64(info.Size())
+	} else {
+		// O_EXCL created an empty file, so no Stat can strand an untracked head.
 		if err := errors.Join(f.Sync(), l.syncDirectory()); err != nil {
 			l.writeErr = fmt.Errorf("persist new head; log requires recovery: %w", err)
 			return errors.Join(l.writeErr, f.Close())
 		}
+		l.segmentRecordCounts[seg] = 0
+		l.segmentRefCounts[seg] = 0
 	}
 	old := l.headFile
 	l.headFile = f
 	l.headSegment = seg
-	l.size = uint64(info.Size())
+	l.size = size
 	if old != nil {
 		if err := old.Close(); err != nil {
 			return fmt.Errorf("close sealed log: %w", err)

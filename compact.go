@@ -24,9 +24,10 @@ func (s *Shard) compact() error {
 	for _, count := range l.segmentRecordCounts {
 		total += uint64(count)
 	}
-	if total == 0 || total-uint64(idx.entryCount) <= total/5 {
+	if !l.compactPending && (total == 0 || total-uint64(idx.entryCount) <= total/5) {
 		return nil
 	}
+	l.compactPending = true
 	// Older records may be omitted because of a newer set/delete in the
 	// active head. Persist that snapshot before discarding any older history.
 	if err := l.headFile.Sync(); err != nil {
@@ -40,45 +41,44 @@ func (s *Shard) compact() error {
 	if err != nil {
 		return err
 	}
-	positions := make(map[uint64][]int, len(segments))
-	for pos, slot := range idx.slots {
-		if !empty(slot) {
-			seg := slot & segmentMask >> 26
-			positions[seg] = append(positions[seg], pos)
-		}
+	segments, err = l.removeUnusedPrefix(segments)
+	if err != nil {
+		return err
 	}
-	var pending []int
 	rank := make(map[uint64]int, len(segments))
 	for i, seg := range segments {
 		rank[seg] = i
-		slices.SortFunc(positions[seg], func(a, b int) int {
+	}
+	positions := make([][]int, len(segments))
+	for pos, slot := range idx.slots {
+		if !empty(slot) {
+			seg := slot & segmentMask >> 26
+			positions[rank[seg]] = append(positions[rank[seg]], pos)
+		}
+	}
+	// Clean oldest first; defer head cleanup to packing so it is written once.
+	for i, seg := range segments {
+		slices.SortFunc(positions[i], func(a, b int) int {
 			return int(idx.slots[a]&offsetMask) - int(idx.slots[b]&offsetMask)
 		})
-		pending = append(pending, positions[seg]...)
-		// Clean history oldest first. A delete or expired set is discarded
-		// only after all earlier versions it could suppress are gone.
-		if l.segmentRecordCounts[seg] != l.segmentRefCounts[seg] {
-			if err := l.replaceSegment(idx, seg, positions[seg], nil); err != nil {
+		if i < len(segments)-1 && l.segmentRecordCounts[seg] != l.segmentRefCounts[seg] {
+			if err := l.replaceSegment(idx, seg, positions[i], nil); err != nil {
 				return fmt.Errorf("clean segment %d: %w", seg, err)
 			}
 		}
 	}
-
-	// All remaining physical records now represent the snapshot's current
-	// values. Pack them toward the head, publishing identical copies before
-	// removing any source. Duplicate copies are harmless after a crash.
-	cursor := 0
-	for dest := len(segments) - 1; dest >= 0 && cursor < len(pending); dest-- {
-		seg := segments[dest]
-		own := make([]int, 0, len(positions[seg]))
-		for _, pos := range positions[seg] {
-			if idx.slots[pos]&segmentMask>>26 == seg {
-				own = append(own, pos)
-			}
+	// Consume each source list as its records move toward the head.
+	src := 0
+	for dest := len(segments) - 1; dest >= 0; dest-- {
+		for src < dest && len(positions[src]) == 0 {
+			src++
 		}
-		hasEarlier := rank[idx.slots[pending[cursor]]&segmentMask>>26] < dest
-		if !hasEarlier && l.segmentRecordCounts[seg] == l.segmentRefCounts[seg] {
-			break
+		seg := segments[dest]
+		hasEarlier := src < dest
+		if !hasEarlier {
+			if (dest < len(segments)-1 && len(positions[dest]) == 0) || l.segmentRecordCounts[seg] == l.segmentRefCounts[seg] {
+				break
+			}
 		}
 		info, err := os.Stat(l.segmentPath(seg))
 		if err != nil {
@@ -88,14 +88,17 @@ func (s *Shard) compact() error {
 			continue
 		}
 		next := func() (int, bool) {
-			if cursor == len(pending) || rank[idx.slots[pending[cursor]]&segmentMask>>26] >= dest {
+			for src < dest && len(positions[src]) == 0 {
+				src++
+			}
+			if src >= dest {
 				return 0, false
 			}
-			pos := pending[cursor]
-			cursor++
+			pos := positions[src][0]
+			positions[src] = positions[src][1:]
 			return pos, true
 		}
-		if err := l.replaceSegment(idx, seg, own, next); err != nil {
+		if err := l.replaceSegment(idx, seg, positions[dest], next); err != nil {
 			return fmt.Errorf("pack segment %d: %w", seg, err)
 		}
 		if !hasEarlier {
@@ -103,40 +106,62 @@ func (s *Shard) compact() error {
 		}
 	}
 
-	// Only remove the oldest empty prefix. Sync each removal before the next
-	// so a crash cannot persist an interior hole and lose the head boundary.
-	for _, seg := range segments {
-		if seg == l.headSegment || l.segmentRefCounts[seg] != 0 {
-			break
-		}
-		if err := os.Remove(l.segmentPath(seg)); err != nil {
-			return err
-		}
-		delete(l.segmentRecordCounts, seg)
-		delete(l.segmentRefCounts, seg)
-		if err := l.syncDirectory(); err != nil {
-			l.writeErr = fmt.Errorf("persist segment removal; log requires recovery: %w", err)
-			return l.writeErr
-		}
+	if _, err := l.removeUnusedPrefix(segments); err != nil {
+		return err
 	}
+	l.compactPending = false
 	return nil
 }
 
+// The caller has synced the head snapshot. Only remove the oldest unused prefix,
+// syncing each removal before the next so recovery never sees an interior hole.
+func (l *Log) removeUnusedPrefix(segments []uint64) ([]uint64, error) {
+	for len(segments) > 1 && l.segmentRefCounts[segments[0]] == 0 {
+		seg := segments[0]
+		if err := os.Remove(l.segmentPath(seg)); err != nil {
+			return segments, err
+		}
+		delete(l.segmentRecordCounts, seg)
+		delete(l.segmentRefCounts, seg)
+		segments = segments[1:]
+		if err := l.syncDirectory(); err != nil {
+			l.writeErr = fmt.Errorf("persist segment removal; log requires recovery: %w", err)
+			return segments, l.writeErr
+		}
+	}
+	return segments, nil
+}
+
 type recordMove struct {
-	pos                 int
-	oldAddress, address uint64
-	expiration          indexExpiration
-	hasExpiration       bool
+	pos     int
+	address uint64
 }
 
 // replaceSegment atomically publishes a complete replacement. Before rename,
 // the original file is authoritative; afterward, the replacement is. Sources
 // copied from other segments stay intact until their duplicates can be retired.
-// next supplies older records to fill spare space after the segment's own keys.
+// own must be sorted by source offset; next supplies only older segments.
+// Each record starts below logSegmentSize, but its end may cross that boundary.
 func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int, bool)) (err error) {
 	path := l.segmentPath(seg)
 	staging := path + ".compact"
-	f, err := os.OpenFile(staging, os.O_CREATE|os.O_EXCL|os.O_RDWR|os.O_APPEND, 0600)
+	const flags = os.O_CREATE | os.O_EXCL | os.O_RDWR | os.O_APPEND
+	f, err := os.OpenFile(staging, flags, 0600)
+	if errors.Is(err, os.ErrExist) {
+		info, statErr := os.Lstat(staging)
+		if statErr != nil {
+			return statErr
+		}
+		if !info.Mode().IsRegular() {
+			return err
+		}
+		// A previous failed cleanup may have left this file. Unlink and create
+		// exclusively so a stale hard link cannot truncate a published source.
+		if err := os.Remove(staging); err != nil {
+			return err
+		}
+		f, err = os.OpenFile(staging, flags, 0600)
+	}
 	if err != nil {
 		return err
 	}
@@ -153,21 +178,20 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 	var moves []recordMove
 	buffer := l.writeBuffer[:]
 	copyRecord := func(pos int) error {
+		if output.size >= logSegmentSize {
+			return fmt.Errorf("compaction record start exceeds segment offset range")
+		}
 		old := idx.slots[pos] & addressMask
 		key, value, expiration, err := l.readPayload(old>>26, old&offsetMask, buffer)
 		if err != nil {
 			return err
 		}
 		buffer = key[:cap(key)]
-		if output.size >= logSegmentSize {
-			return fmt.Errorf("compaction record exceeds segment capacity")
-		}
 		_, off, err := output.appendRecord('s', key, value, expiration)
 		if err != nil {
 			return err
 		}
-		exp, hasExp := idx.expirations[old]
-		moves = append(moves, recordMove{pos: pos, oldAddress: old, address: seg<<26 | off, expiration: exp, hasExpiration: hasExp})
+		moves = append(moves, recordMove{pos: pos, address: seg<<26 | off})
 		return nil
 	}
 	for _, pos := range own {
@@ -191,17 +215,18 @@ func (l *Log) replaceSegment(idx *Index, seg uint64, own []int, next func() (int
 		return err
 	}
 	published = true
-	// Remove all old expiry addresses first: new offsets may reuse another
-	// moved entry's old address in this same segment.
+	// Own records move backward in offset order; imported records come last.
+	// A new address can reuse an earlier old address, never a later one.
 	for _, move := range moves {
-		delete(idx.expirations, move.oldAddress)
-	}
-	for _, move := range moves {
+		old := idx.slots[move.pos] & addressMask
 		idx.slots[move.pos] = idx.slots[move.pos]&^addressMask | move.address
-		l.segmentRefCounts[move.oldAddress>>26]--
+		l.segmentRefCounts[old>>26]--
 		l.segmentRefCounts[seg]++
-		if move.hasExpiration {
-			idx.expirations[move.address] = move.expiration
+		if old != move.address && len(idx.expirations) > 0 {
+			if exp, ok := idx.expirations[old]; ok {
+				delete(idx.expirations, old)
+				idx.expirations[move.address] = exp
+			}
 		}
 	}
 	l.segmentRecordCounts[seg] = uint32(len(moves))

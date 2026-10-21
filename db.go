@@ -96,16 +96,20 @@ func (db *DB) background(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := db.compact(); err != nil {
+			if err := db.compact(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "compact: %v\n", err)
 			}
 		}
 	}
 }
 
-func (db *DB) compact() error {
+func (db *DB) compact(ctx context.Context) error {
 	var err error
 	for i := range db.shards {
+		// Finish the current shard, then stop before starting more shutdown work.
+		if ctx.Err() != nil {
+			break
+		}
 		if compactErr := db.shards[i].compact(); compactErr != nil {
 			err = errors.Join(err, fmt.Errorf("shard %02d: %w", i, compactErr))
 		}

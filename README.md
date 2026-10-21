@@ -22,6 +22,8 @@ the database is reopened. Successful writes are not synced individually.
 Every ten seconds, shards with more than 20% obsolete records are compacted.
 Compaction holds one shard's exclusive lock for its pass; other shards can
 continue serving requests. Expired index entries are pruned before counting.
+Interrupted passes are retried even below that threshold. Recovery schedules a
+pass for underfilled sealed segments or sealed segments with obsolete records.
 
 The pass first removes obsolete history from oldest to newest, preserving delete
 and expiration semantics. It then packs current records toward the existing head
