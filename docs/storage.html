@@ -81,6 +81,13 @@ or opening an unsupported format requires a data migration, which is not yet
 automatic. <code>Open</code> reports the reason as a migration failure and leaves
 the existing data unchanged. Missing or invalid metadata also fails opening.</p>
 
+<p><code>META</code> is a fixed 64-byte binary header with the eight-byte signature
+<code>DOTMETAD</code>, a numeric database disk-format version, the shard count,
+segment/alignment parameters, and a CRC32 checksum. The checksum covers every
+header field and the reserved bytes. Metadata is validated before log recovery;
+corruption or an unsupported version fails opening without modifying stored
+records. Only the current binary format is supported.</p>
+
 <h2 id="compaction">Background cleanup</h2>
 
 <p>Dot automatically reclaims overwritten, deleted, and expired data. Expired keys

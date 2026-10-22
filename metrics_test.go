@@ -20,7 +20,7 @@ import (
 func TestMetricsAccounting(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(2))
 	stopTestMaintenance(db)
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	cache := &metricsCache{shards: make([]metricsShard, len(db.shards))}
 	if got := h.snapshot(cache); !got.Ready || got.DiskBytes != allocatedTreeBytes(t, db.path) || got.ObsoleteBytes != 0 || got.EntryCount != 0 {
 		t.Fatalf("empty metrics: %+v", got)
@@ -61,7 +61,7 @@ func TestMetricsAccounting(t *testing.T) {
 		}
 	})
 	stopTestMaintenance(db)
-	h = db.MetricsHandler().(*metricsHandler)
+	h = db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	assert(obsolete)
 	for i := range db.shards {
 		db.shards[i].log.compactPending = true
@@ -75,7 +75,7 @@ func TestMetricsAccounting(t *testing.T) {
 func TestMetricsBusyShard(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(1))
 	stopTestMaintenance(db)
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	cache := &metricsCache{shards: make([]metricsShard, 1)}
 	s := &db.shards[0]
 	s.lock.Lock()
@@ -121,7 +121,7 @@ func TestMetricsBusyShard(t *testing.T) {
 func TestMetricsHTTP(t *testing.T) {
 	db := newInternalDB(t)
 	mux := http.NewServeMux()
-	mux.Handle("/nested/dot/", http.StripPrefix("/nested/dot", db.MetricsHandler()))
+	mux.Handle("/nested/dot/", http.StripPrefix("/nested/dot", db.MetricsHandler(WithMetricsHistory(0))))
 	for _, tc := range []struct {
 		method, path, contentType string
 		status                    int
@@ -156,7 +156,7 @@ func TestMetricsPrefixedDashboard(t *testing.T) {
 	mux := http.NewServeMux()
 	// Match the example's mount: strip the prefix while preserving the path's slash.
 	const prefix = "/dot/metrics"
-	mux.Handle(prefix+"/", http.StripPrefix(prefix, db.MetricsHandler()))
+	mux.Handle(prefix+"/", http.StripPrefix(prefix, db.MetricsHandler(WithMetricsHistory(0))))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	for _, asset := range []string{"", "app.css", "app.js", "dot128.png", "dot512.png"} {
@@ -189,7 +189,7 @@ func TestMetricsWebSocket(t *testing.T) {
 	for _, custom := range []bool{false, true} {
 		t.Run(fmt.Sprintf("custom=%v", custom), func(t *testing.T) {
 			db := newInternalDB(t, WithShardCount(2))
-			opts := []MetricsOption(nil)
+			opts := []MetricsOption{WithMetricsHistory(0)}
 			wantInterval := int64(1000)
 			if custom {
 				opts = append(opts, WithMetricsInterval(20*time.Millisecond))
@@ -263,7 +263,7 @@ func TestMetricsWebSocket(t *testing.T) {
 
 func TestMetricsOriginAndDisconnect(t *testing.T) {
 	db := newInternalDB(t)
-	h := db.MetricsHandler(WithMetricsInterval(10 * time.Millisecond)).(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0), WithMetricsInterval(10*time.Millisecond)).(*metricsHandler)
 	server := httptest.NewServer(h)
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

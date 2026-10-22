@@ -52,6 +52,7 @@ function dashboard() {
     constructor() { super(); socket = this; }
     close() { this.emit("close"); }
   }
+  const requests = [];
   let scheduled;
   const styles = { "--muted": "gray", "--grid": "silver", "--accent": "blue", "--obsolete": "orange", "--entries": "green", "--update": "purple" };
   const environment = {
@@ -66,7 +67,10 @@ function dashboard() {
       location: { href: "http://localhost/nested/dot/", protocol: "http:" },
       matchMedia: () => new Element(), addEventListener() {},
     },
-    WebSocket, URL, Intl,
+    WebSocket, URL, Intl, AbortController,
+    fetch(url, { signal }) {
+      return new Promise((resolve, reject) => requests.push({ url: new URL(url), signal, resolve, reject }));
+    },
     Date: class extends Date { static now() { return currentTime; } },
     getComputedStyle: () => ({ getPropertyValue: (key) => styles[key] }),
     requestAnimationFrame(callback) { scheduled = callback; return 1; },
@@ -76,7 +80,15 @@ function dashboard() {
   vm.runInNewContext(source, environment);
   function flush() { const callback = scheduled; scheduled = null; callback?.(); }
   return {
-    elements, labels, paths,
+    elements, labels, paths, requests,
+    async completeHistory(index, values, resolution = 1000) {
+      const reading = { ops_per_second: 0, latency_samples: 0, mean_ns: null, p99_ns: null };
+      const operations = Object.fromEntries(["get", "set", "delete", "update"].map((op) => [op, reading]));
+      const samples = values.map((value) => ({ interval_ms: 1000, ready: true, disk_bytes: 4096, obsolete_bytes: 0, entry_count: 1, index_mapped_bytes: 0, operations, ...value }));
+      requests[index].resolve({ ok: true, json: async () => ({ resolution_ms: resolution, samples }) });
+      await new Promise(setImmediate);
+      flush();
+    },
     receive(values = {}) {
       const reading = { ops_per_second: 0, latency_samples: 0, mean_ns: null, p99_ns: null };
       const operations = Object.fromEntries(["get", "set", "delete", "update"].map((op) => [op, reading]));
@@ -88,6 +100,7 @@ function dashboard() {
     },
     pressed: (key) => buttons.find((button) => button.dataset.metric === key).attributes["aria-pressed"],
     disconnect: () => socket.emit("close"),
+    open: () => socket.emit("open"),
     advance: (ms) => { currentTime += ms; },
     flush,
   };
@@ -241,7 +254,40 @@ function loadHistory(ui, seconds = 180) {
   ui.flush();
 }
 
-test("pausing holds the drawn time window, scale, and hover while new readings arrive", () => {
+test("axes use all loaded samples and stay stable while scrolling, dragging, and changing ranges", () => {
+  const ui = dashboard();
+  for (let i = 180; i >= 0; i--) ui.receive({
+    time: now - i * 1000,
+    disk_bytes: (i === 150 ? 256 : 16) * 1024,
+    obsolete_bytes: (i === 20 ? 768 : 16) * 1024,
+  });
+  ui.flush();
+  assert.deepEqual(yLabels(ui), ["0 KiB", "100 KiB", "200 KiB", "300 KiB"],
+    "An older loaded peak must set the scale even outside the visible window");
+  ui.click("obsolete_bytes");
+  const labels = ["0 KiB", "200 KiB", "400 KiB", "600 KiB", "800 KiB"];
+  assert.deepEqual(yLabels(ui), labels);
+  const originalWindow = windowDescription(ui);
+  ui.elements.chart.emit("wheel", { deltaX: 0, deltaY: -397, deltaMode: 0, preventDefault() {} }); ui.flush();
+  assert.notEqual(windowDescription(ui), originalWindow);
+  assert.deepEqual(yLabels(ui), labels, "Scrolling past a peak must keep the same scale");
+  const scrolledWindow = windowDescription(ui);
+  ui.elements.chart.emit("pointerdown", pointerEvent(300));
+  ui.elements.chart.emit("pointermove", pointerEvent(697)); ui.flush();
+  ui.elements.chart.emit("pointerup");
+  assert.notEqual(windowDescription(ui), scrolledWindow);
+  assert.deepEqual(yLabels(ui), labels, "Dragging must keep the same scale");
+  for (const key of ["Home", "End"]) {
+    ui.elements.scrubber.emit("keydown", keyEvent(key)); ui.flush();
+    assert.deepEqual(yLabels(ui), labels, "Peaks on either side of the viewport must set the scale");
+  }
+  for (const range of ["3600000", "60000", "all"]) {
+    ui.click(range);
+    assert.deepEqual(yLabels(ui), labels, "Changing the time range must keep the same scale");
+  }
+});
+
+test("pausing holds the time window and hover while axes include newly loaded peaks", () => {
   const ui = dashboard();
   loadHistory(ui);
   ui.elements.scrubber.emit("keydown", keyEvent("Home")); ui.flush();
@@ -253,15 +299,20 @@ test("pausing holds the drawn time window, scale, and hover while new readings a
   assert.equal(windowDescription(ui), description, "Pausing must retain the already drawn window");
   ui.advance(9500);
   ui.receive({ time: now + 10_000, disk_bytes: 1024 ** 4 }); ui.flush();
-  assert.deepEqual(ui.labels, labels, "Off-screen peaks must not rescale a paused chart");
-  assert.deepEqual(ui.paths, paths, "New samples must not slide existing points");
+  assert.deepEqual(ui.labels.filter((label) => label.y === 321), labels.filter((label) => label.y === 321),
+    "New samples must not move the paused time axis");
+  const scaledLabels = yLabels(ui);
+  assert.notDeepEqual(scaledLabels, labels.filter((label) => label.y !== 321).map((label) => label.text),
+    "New loaded peaks must update the value axis even outside the paused window");
+  assert.deepEqual(ui.paths.filter((point) => point.color === "blue").map((point) => point.x),
+    paths.filter((point) => point.color === "blue").map((point) => point.x), "New samples must not slide existing points");
   ui.elements.chart.emit("pointermove", pointerEvent(880));
   assert.equal(ui.elements["tooltip-time"].dateTime, new Date(now - 120_000).toISOString());
   assert.match(ui.elements.chart.attributes["aria-label"], /Paused.*61 snapshots/);
   ui.elements.scrubber.emit("keydown", keyEvent("End")); ui.flush();
   assert.equal(isFollowing(ui), true);
   assert.notEqual(windowDescription(ui), description);
-  assert.notDeepEqual(yLabels(ui), labels.filter((label) => label.y !== 321).map((label) => label.text));
+  assert.deepEqual(yLabels(ui), scaledLabels, "Returning to live must keep the scale for the same loaded data");
 });
 
 test("scrolling and dragging pan a fixed-size window within loaded history", () => {
@@ -376,4 +427,116 @@ test("short histories do not intercept page scrolling or browser zoom gestures",
     ui.elements.chart.emit("wheel", { deltaX: 0, deltaY: -100, [modifier]: true, preventDefault: unexpected });
   }
   assert.equal(isFollowing(ui), true);
+});
+
+
+test("server history bootstraps after refresh and browsing older ranges preserves live values", async () => {
+  const ui = dashboard();
+  const oldest = now - 6 * 86_400_000;
+  ui.receive({ history_start: oldest }); ui.flush();
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.requests[0].url.pathname, "/nested/dot/history");
+  assert.equal(ui.requests[0].url.searchParams.get("metrics"), "disk_bytes");
+  await ui.completeHistory(0, [{ time: now - 59_000, disk_bytes: 2_000_000 }, { time: now - 1000 }]);
+  assert.ok(ui.labels.some((label) => label.text.includes("MiB")));
+  ui.elements.scrubber.emit("keydown", keyEvent("Home")); ui.flush();
+  assert.equal(ui.requests.length, 2);
+  assert.equal(Number(ui.requests[1].url.searchParams.get("start")), oldest);
+  ui.receive({ time: now + 1000, history_start: oldest, operations: {
+    get: { ops_per_second: 123, mean_ns: null, p99_ns: null },
+    set: { ops_per_second: 0, mean_ns: null, p99_ns: null },
+    delete: { ops_per_second: 0, mean_ns: null, p99_ns: null },
+    update: { ops_per_second: 0, mean_ns: null, p99_ns: null },
+  } });
+  await ui.completeHistory(1, [{ time: oldest }, { time: oldest + 1000 }]);
+  assert.equal(ui.elements["value-get_ops"].textContent, "123.00");
+  assert.equal(isFollowing(ui), false);
+  ui.elements.chart.emit("pointermove", { clientX: 86, clientY: 100 });
+  assert.equal(ui.elements["tooltip-time"].dateTime, new Date(oldest).toISOString());
+  assert.equal(ui.elements["loaded-start"].dateTime, new Date(oldest).toISOString());
+});
+
+test("refresh history loading retains the first live point when newer updates arrive", async () => {
+  const ui = dashboard();
+  const oldest = now - 86_400_000;
+  ui.receive({ time: now - 500, history_start: oldest }); ui.flush();
+  assert.ok(Number(ui.requests[0].url.searchParams.get("end")) > now - 500);
+  ui.receive({ time: now + 500, history_start: oldest });
+  ui.receive({ time: now + 1500, history_start: oldest });
+  ui.advance(2000);
+  await ui.completeHistory(0, [{ time: now - 2500 }, { time: now - 1500 }]);
+  assert.match(ui.elements.chart.attributes["aria-label"], /5 snapshots/);
+  const points = ui.paths.filter((point) => point.color === "blue");
+  assert.equal(points.length, 5, "The history/live handoff must retain every received point");
+});
+
+test("server retention drives browsing beyond seven days and expires old history", async () => {
+  const ui = dashboard();
+  const day = 86_400_000;
+  const retention = 45 * day;
+  const oldest = now - retention;
+  ui.receive({ history_start: oldest, history_retention_ms: retention }); ui.flush();
+  ui.click("all");
+  const index = ui.requests.length - 1;
+  assert.equal(Number(ui.requests[index].url.searchParams.get("start")), oldest,
+    "A custom retention must not be clamped to seven days");
+  await ui.completeHistory(index, [{ time: oldest }, { time: now - 1000 }], Math.floor(retention / 500) + 1);
+  assert.equal(ui.elements["loaded-start"].dateTime, new Date(oldest).toISOString());
+  ui.advance(day);
+  ui.receive({ time: now + day, history_start: oldest, history_retention_ms: retention }); ui.flush();
+  assert.equal(ui.elements["loaded-start"].dateTime, new Date(oldest + day).toISOString());
+  ui.click("2592000000");
+  assert.equal(ui.requests.at(-1).url.searchParams.get("metrics"), "disk_bytes");
+});
+
+test("week history keeps outage breaks after downsampling and refetches selected extrema", async () => {
+  const ui = dashboard();
+  const oldest = now - 6 * 86_400_000;
+  ui.receive({ history_start: oldest }); ui.flush();
+  ui.click("604800000");
+  assert.equal(ui.requests[0].signal.aborted, true);
+  const index = ui.requests.length - 1;
+  await ui.completeHistory(index, [
+    { time: oldest, disk_bytes: 1000 },
+    { time: oldest + 1000, disk_bytes: 1000 },
+    { time: oldest + 12_000, disk_bytes: 1000, gap_before: true },
+    { time: now - 1000, disk_bytes: 1000, gap_before: true },
+  ], 1_200_000);
+  const paths = ui.paths.filter((point) => point.color === "blue");
+  assert.ok(paths.filter((point) => point.move).length >= 3, "Both outages must split the line at week scale");
+  assert.equal(ui.requests.length, index + 1, "Completed history must be cached");
+  ui.click("obsolete_bytes");
+  assert.equal(ui.requests.at(-1).url.searchParams.get("metrics"), "disk_bytes,obsolete_bytes");
+  ui.click("60000");
+  assert.ok(Number(ui.requests.at(-1).url.searchParams.get("start")) >= now - 75_000, "Zooming in loads original readings");
+});
+
+test("failed history loads retain live data and report an error", async () => {
+  const ui = dashboard();
+  ui.receive({ history_start: now - 86_400_000 }); ui.flush();
+  ui.requests[0].reject(new Error("offline"));
+  await new Promise(setImmediate);
+  assert.match(ui.elements.notice.textContent, /history could not be loaded/);
+  ui.receive({ time: now + 1000, history_start: now - 86_400_000 }); ui.flush();
+  assert.equal(ui.requests.length, 1, "Failed requests must not retry every frame");
+  assert.match(ui.elements.chart.attributes["aria-label"], /Following latest samples/);
+});
+
+
+test("reconnecting backfills server history collected while the browser was offline", async () => {
+  const ui = dashboard();
+  const oldest = now - 86_400_000;
+  ui.receive({ history_start: oldest }); ui.flush();
+  await ui.completeHistory(0, [{ time: now - 1000 }, { time: now }]);
+  ui.disconnect();
+  ui.advance(30_000);
+  ui.open();
+  ui.receive({ time: now + 30_000, history_start: oldest }); ui.flush();
+  assert.equal(ui.requests.length, 2);
+  await ui.completeHistory(1, [
+    { time: now - 1000 }, { time: now }, { time: now + 10_000 },
+    { time: now + 20_000 }, { time: now + 30_000 },
+  ], 10_000);
+  assert.equal(ui.paths.filter((point) => point.color === "blue" && point.move).length, 1,
+    "A browser disconnect must not introduce a gap in retained server data");
 });

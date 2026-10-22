@@ -12,8 +12,8 @@ import (
 
 func TestOperationMetricsLifecycle(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(2))
-	h := db.MetricsHandler().(*metricsHandler)
-	counts := db.MetricsHandler(WithMetricsLatency(false)).(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
+	counts := db.MetricsHandler(WithMetricsHistory(0), WithMetricsLatency(false)).(*metricsHandler)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	if db.operationMetrics.Load() != nil {
 		t.Fatal("constructing or serving dashboard assets enabled operation metrics")
@@ -85,7 +85,7 @@ func TestOperationMetricsLifecycle(t *testing.T) {
 
 func TestOperationMetricsCalls(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(4))
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	_, stop := h.subscribe()
 	defer stop()
 	abort := errors.New("abort callback")
@@ -140,7 +140,7 @@ func TestOperationMetricsCalls(t *testing.T) {
 
 func TestOperationLatencyIncludesCallback(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(1))
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	_, stop := h.subscribe()
 	defer stop()
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -245,7 +245,7 @@ func TestOperationHistogramPrecision(t *testing.T) {
 
 func TestOperationMetricsConcurrent(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(4))
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	_, stop := h.subscribe()
 	defer stop()
 	m := db.operationMetrics.Load()
@@ -295,8 +295,8 @@ func TestOperationMetricsConcurrent(t *testing.T) {
 func TestOperationMetricsConcurrentViewers(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(2))
 	handlers := []*metricsHandler{
-		db.MetricsHandler(WithMetricsInterval(time.Millisecond)).(*metricsHandler),
-		db.MetricsHandler(WithMetricsLatency(false)).(*metricsHandler),
+		db.MetricsHandler(WithMetricsHistory(0), WithMetricsInterval(time.Millisecond)).(*metricsHandler),
+		db.MetricsHandler(WithMetricsHistory(0), WithMetricsLatency(false)).(*metricsHandler),
 	}
 	stopCalls, callsDone := make(chan struct{}), make(chan struct{})
 	go func() {

@@ -1,9 +1,10 @@
 package dot
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,27 +12,76 @@ import (
 )
 
 const (
-	// Version 1 pins the record encoding, 16-byte alignment, and XXH64 shard
-	// routing. Layout fields below must also match before logs can be opened.
-	metaVersion  = 1
-	metaName     = "META"
-	metaTempName = "META.tmp"
+	// Version 1 pins this metadata layout, log record encoding, alignment, and
+	// XXH64 shard routing. It is independent of the metrics history format.
+	diskFormatVersion = 1
+	metaMagic         = "DOTMETAD"
+	metaSize          = 64
+	metaName          = "META"
+	metaTempName      = "META.tmp"
 )
 
 type metaData struct {
-	Version             uint16 `json:"version"`
-	ShardCount          int    `json:"shardCount"`
-	SegmentIDBits       byte   `json:"segmentIDBits"`
-	SegmentSizeBits     byte   `json:"segmentSizeBits"`
-	RecordAlignmentBits byte   `json:"recordAlignmentBits"`
+	DiskFormatVersion   uint32
+	ShardCount          int
+	SegmentIDBits       byte
+	SegmentSizeBits     byte
+	RecordAlignmentBits byte
 }
 
 func currentMeta(count int) metaData {
 	return metaData{
-		Version: metaVersion, ShardCount: count,
+		DiskFormatVersion: diskFormatVersion, ShardCount: count,
 		SegmentIDBits: segmentIDBits, SegmentSizeBits: segmentSizeBits,
 		RecordAlignmentBits: logAlignmentBits,
 	}
+}
+
+// META is exactly 64 bytes, with explicit little-endian fields:
+// [0:8] signature, [8:12] disk format version, [12:14] shards,
+// [14:17] segment/alignment bits, [17:60] reserved zeros, [60:64] CRC32-IEEE.
+func encodeMeta(meta metaData) [metaSize]byte {
+	var data [metaSize]byte
+	copy(data[:8], metaMagic)
+	binary.LittleEndian.PutUint32(data[8:12], meta.DiskFormatVersion)
+	binary.LittleEndian.PutUint16(data[12:14], uint16(meta.ShardCount))
+	data[14], data[15], data[16] = meta.SegmentIDBits, meta.SegmentSizeBits, meta.RecordAlignmentBits
+	binary.LittleEndian.PutUint32(data[60:], crc32.ChecksumIEEE(data[:60]))
+	return data
+}
+
+func decodeMeta(data []byte) (metaData, error) {
+	var meta metaData
+	if len(data) != metaSize {
+		return meta, fmt.Errorf("invalid meta file: expected exactly %d bytes", metaSize)
+	}
+	if binary.LittleEndian.Uint32(data[60:]) != crc32.ChecksumIEEE(data[:60]) {
+		return meta, errors.New("invalid meta file: checksum mismatch")
+	}
+	if string(data[:8]) != metaMagic {
+		return meta, errors.New("invalid meta file: unknown signature")
+	}
+	meta = metaData{
+		DiskFormatVersion: binary.LittleEndian.Uint32(data[8:12]),
+		ShardCount:        int(binary.LittleEndian.Uint16(data[12:14])),
+		SegmentIDBits:     data[14], SegmentSizeBits: data[15], RecordAlignmentBits: data[16],
+	}
+	if meta.DiskFormatVersion != diskFormatVersion {
+		return meta, fmt.Errorf("unsupported disk format version %d (want %d)", meta.DiskFormatVersion, diskFormatVersion)
+	}
+	for _, value := range data[17:60] {
+		if value != 0 {
+			return meta, errors.New("invalid meta file: nonzero reserved bytes")
+		}
+	}
+	if !validShardCount(meta.ShardCount) {
+		return meta, fmt.Errorf("invalid meta shard count %d: must be a power of two between 1 and %d", meta.ShardCount, maxShardCount)
+	}
+	if meta.SegmentIDBits != segmentIDBits || meta.SegmentSizeBits != segmentSizeBits || meta.RecordAlignmentBits != logAlignmentBits {
+		return meta, fmt.Errorf("unsupported segment layout (ID bits %d, size bits %d, alignment bits %d)",
+			meta.SegmentIDBits, meta.SegmentSizeBits, meta.RecordAlignmentBits)
+	}
+	return meta, nil
 }
 
 // migrate runs under the database lock, before recovery can modify any log.
@@ -59,32 +109,21 @@ func (db *DB) migrate(options Options) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stat meta file: %w", err)
 	}
-	if !fi.Mode().IsRegular() || fi.Size() == 0 || fi.Size() > 4096 {
-		return 0, fmt.Errorf("invalid meta file: expected a nonempty regular file of at most 4096 bytes")
+	if !fi.Mode().IsRegular() || fi.Size() != metaSize {
+		return 0, fmt.Errorf("invalid meta file: expected a regular file of exactly %d bytes", metaSize)
 	}
 	f, err := os.Open(metaPath)
 	if err != nil {
 		return 0, fmt.Errorf("open meta file: %w", err)
 	}
 	defer f.Close()
-	var meta metaData
-	decoder := json.NewDecoder(f)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&meta); err != nil {
-		return 0, fmt.Errorf("decode meta file: %w", err)
+	var data [metaSize]byte
+	if _, err := io.ReadFull(f, data[:]); err != nil {
+		return 0, fmt.Errorf("read meta file: %w", err)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return 0, fmt.Errorf("invalid meta file: trailing data")
-	}
-	if meta.Version != metaVersion {
-		return 0, fmt.Errorf("unsupported meta version %d (want %d)", meta.Version, metaVersion)
-	}
-	if !validShardCount(meta.ShardCount) {
-		return 0, fmt.Errorf("invalid meta shard count %d: must be a power of two between 1 and %d", meta.ShardCount, maxShardCount)
-	}
-	if meta.SegmentIDBits != segmentIDBits || meta.SegmentSizeBits != segmentSizeBits || meta.RecordAlignmentBits != logAlignmentBits {
-		return 0, fmt.Errorf("unsupported segment layout (ID bits %d, size bits %d, alignment bits %d)",
-			meta.SegmentIDBits, meta.SegmentSizeBits, meta.RecordAlignmentBits)
+	meta, err := decodeMeta(data[:])
+	if err != nil {
+		return 0, err
 	}
 	if options.shardCountSet && options.shardCount != meta.ShardCount {
 		return 0, fmt.Errorf("changing shard count from %d to %d requires rewriting database data", meta.ShardCount, options.shardCount)
@@ -122,7 +161,8 @@ func (db *DB) migrateWriteMeta(meta metaData) error {
 		return fmt.Errorf("create meta file: %w", err)
 	}
 	defer os.Remove(staging)
-	writeErr := json.NewEncoder(f).Encode(meta)
+	data := encodeMeta(meta)
+	_, writeErr := f.Write(data[:])
 	if writeErr == nil {
 		writeErr = f.Sync()
 	}

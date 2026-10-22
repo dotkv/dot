@@ -5,7 +5,7 @@ import "testing"
 func TestMetricsIndexMappedBytes(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(1))
 	stopTestMaintenance(db)
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
 	cache := &metricsCache{shards: make([]metricsShard, 1)}
 	s := &db.shards[0]
 	initial := uint64(len(s.index.memory.current))

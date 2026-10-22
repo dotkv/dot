@@ -281,7 +281,7 @@ func TestOperationMetricsAllocations(t *testing.T) {
 			if err := db.Set("a", uint64(42)); err != nil {
 				t.Fatal(err)
 			}
-			h := db.MetricsHandler(WithMetricsLatency(latency)).(*metricsHandler)
+			h := db.MetricsHandler(WithMetricsHistory(0), WithMetricsLatency(latency)).(*metricsHandler)
 			_, stop := h.subscribe()
 			defer stop()
 			for name, run := range map[string]func() error{

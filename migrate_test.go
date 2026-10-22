@@ -3,9 +3,11 @@ package dot
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,6 +17,23 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 )
+
+func TestMetaBinaryFormat(t *testing.T) {
+	// Pin signature, offsets, byte order, reserved bytes, and CRC independently
+	// of the decoder. This fixture describes format 1 with 64 shards.
+	want, err := hex.DecodeString("444f544d45544144010000004000141a0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000858d6229")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := encodeMeta(currentMeta(64))
+	if !bytes.Equal(got[:], want) {
+		t.Fatalf("binary META = %x, want %x", got, want)
+	}
+	meta, err := decodeMeta(want)
+	if err != nil || meta != currentMeta(64) {
+		t.Fatalf("decoded META = %+v, error = %v", meta, err)
+	}
+}
 
 func TestWithShardCount(t *testing.T) {
 	for _, count := range []int{1, 4, 128} {
@@ -49,11 +68,11 @@ func TestWithShardCount(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var meta metaData
-			if err := json.Unmarshal(data, &meta); err != nil {
+			meta, err := decodeMeta(data)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if meta != (metaData{Version: 1, ShardCount: count, SegmentIDBits: 20, SegmentSizeBits: 26, RecordAlignmentBits: 4}) {
+			if meta != (metaData{DiskFormatVersion: 1, ShardCount: count, SegmentIDBits: 20, SegmentSizeBits: 26, RecordAlignmentBits: 4}) {
 				t.Fatalf("unexpected persisted layout: %+v", meta)
 			}
 			if err := db.Close(); err != nil {
@@ -176,7 +195,7 @@ func TestMigrationRejectsUnsupportedLayouts(t *testing.T) {
 		reason string
 		change func(*metaData)
 	}{
-		{"version", "unsupported meta version", func(m *metaData) { m.Version++ }},
+		{"version", "unsupported disk format version", func(m *metaData) { m.DiskFormatVersion++ }},
 		{"segment-id-bits", "unsupported segment layout", func(m *metaData) { m.SegmentIDBits-- }},
 		{"segment-size-bits", "unsupported segment layout", func(m *metaData) { m.SegmentSizeBits++ }},
 		{"alignment-bits", "unsupported segment layout", func(m *metaData) { m.RecordAlignmentBits-- }},
@@ -200,11 +219,8 @@ func TestMigrationRejectsUnsupportedLayouts(t *testing.T) {
 			}
 			meta := currentMeta(1)
 			tc.change(&meta)
-			data, err := json.Marshal(meta)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(db.path, metaName), data, 0600); err != nil {
+			data := encodeMeta(meta)
+			if err := os.WriteFile(filepath.Join(db.path, metaName), data[:], 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := rejectedOpen(t, db.path); !strings.Contains(err.Error(), "migration failed: "+tc.reason) {
@@ -214,29 +230,80 @@ func TestMigrationRejectsUnsupportedLayouts(t *testing.T) {
 	}
 }
 
+func TestMigrationRejectsCorruptMetadataBeforeRecovery(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	if err := db.Set("key", "value"); err != nil {
+		t.Fatal(err)
+	}
+	logName := db.shards[0].log.headFile.Name()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(logName, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.Write([]byte("partial"))
+	if err := errors.Join(writeErr, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	valid := encodeMeta(currentMeta(1))
+	for offset := range valid {
+		t.Run(fmt.Sprintf("byte=%d", offset), func(t *testing.T) {
+			corrupt := valid
+			corrupt[offset] ^= 1
+			if err := os.WriteFile(filepath.Join(db.path, metaName), corrupt[:], 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := rejectedOpen(t, db.path); !strings.Contains(err.Error(), "checksum mismatch") {
+				t.Fatalf("corrupt META byte %d: %v", offset, err)
+			}
+		})
+	}
+}
+
 func TestMigrationRejectsInvalidMetadata(t *testing.T) {
-	valid := `{"version":1,"shardCount":1,"segmentIDBits":20,"segmentSizeBits":26,"recordAlignmentBits":4}`
-	for _, tc := range []struct{ name, data string }{
-		{"empty", ""},
-		{"null", "null"},
-		{"missing-fields", `{"version":1,"shardCount":1}`},
-		{"zero-shards", `{"version":1,"shardCount":0}`},
-		{"invalid-shards", `{"version":1,"shardCount":3}`},
-		{"too-many-shards", `{"version":1,"shardCount":2048}`},
-		{"truncated", valid[:len(valid)-1]},
-		{"trailing-object", valid + "{}"},
-		{"trailing-junk", valid + "junk"},
-		{"unknown-field", valid[:len(valid)-1] + `,"unknown":1}`},
-		{"oversized", valid + string(bytes.Repeat([]byte(" "), 4096))},
+	valid := encodeMeta(currentMeta(1))
+	changed := func(offset int, value byte) []byte {
+		data := valid
+		data[offset] = value
+		binary.LittleEndian.PutUint32(data[60:], crc32.ChecksumIEEE(data[:60]))
+		return data[:]
+	}
+	zeroShards := currentMeta(0)
+	invalidShards := currentMeta(3)
+	tooManyShards := currentMeta(2048)
+	missingFields := metaData{DiskFormatVersion: 1, ShardCount: 1}
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"empty", nil},
+		{"zeros", make([]byte, 64)},
+		{"json", []byte(`{"version":1,"shardCount":1,"segmentIDBits":20,"segmentSizeBits":26,"recordAlignmentBits":4}`)},
+		{"zero-shards", metaBytes(zeroShards)},
+		{"invalid-shards", metaBytes(invalidShards)},
+		{"too-many-shards", metaBytes(tooManyShards)},
+		{"missing-fields", metaBytes(missingFields)},
+		{"signature", changed(0, 'X')},
+		{"reserved", changed(17, 1)},
+		{"truncated", valid[:63]},
+		{"trailing-data", append(bytes.Clone(valid[:]), 0)},
+		{"oversized", append(bytes.Clone(valid[:]), make([]byte, 4096)...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := t.TempDir()
-			if err := os.WriteFile(filepath.Join(path, metaName), []byte(tc.data), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(path, metaName), tc.data, 0600); err != nil {
 				t.Fatal(err)
 			}
 			rejectedOpen(t, path)
 		})
 	}
+}
+
+func metaBytes(meta metaData) []byte {
+	data := encodeMeta(meta)
+	return data[:]
 }
 
 func TestMigrationRejectsMissingMetadata(t *testing.T) {
@@ -270,7 +337,7 @@ func TestMigrationRejectsUnexpectedShardDirectory(t *testing.T) {
 
 func TestMigrationResumesMetadataInitialization(t *testing.T) {
 	path := t.TempDir()
-	if err := os.WriteFile(filepath.Join(path, metaTempName), []byte(`{"version":`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(path, metaTempName), []byte("DOTMETAD"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := Open(path, WithShardCount(1))

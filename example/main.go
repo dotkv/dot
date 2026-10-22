@@ -5,7 +5,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/dotkv/dot"
@@ -18,10 +17,7 @@ func check(err error) {
 }
 
 func main() {
-	path, err := os.MkdirTemp("", "dot-example-")
-	check(err)
-	defer os.RemoveAll(path)
-	db, err := dot.Open(path,
+	db, err := dot.Open("db",
 		dot.WithShardCount(16),
 		dot.WithCompactionThreshold(0.33, 32<<10),
 	)

@@ -44,7 +44,8 @@
 <p>Mount the embedded dashboard in your application's HTTP server:</p>
 
 <pre><code class="language-go">mux := http.NewServeMux()
-mux.Handle(&quot;/debug/dot/&quot;, http.StripPrefix(&quot;/debug/dot&quot;, db.MetricsHandler()))
+mux.Handle(&quot;/debug/dot/&quot;, http.StripPrefix(&quot;/debug/dot&quot;,
+    db.MetricsHandler()))
 if err := http.ListenAndServe(&quot;127.0.0.1:8080&quot;, mux); err != nil {
     log.Print(err)
 }</code></pre>
@@ -55,8 +56,20 @@ and HTTP server shutdown belong to your application.</p>
 
 <h2 id="configure-collection">Configure collection</h2>
 
-<p>The dashboard receives a snapshot every second while viewers are connected.
-Set a different positive interval or disable latency timing:</p>
+<p>The dashboard records one day of persistent history by default. Collection
+starts when the handler is constructed and continues until <code>db.Close()</code>,
+including without viewers. Set a different duration, or use zero to disable
+persistence and collect only while viewers are connected:</p>
+
+<pre><code class="language-go">handler := db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))
+liveOnly := db.MetricsHandler(dot.WithMetricsHistory(0))</code></pre>
+
+<p>Positive durations round up to whole seconds; negative durations panic.
+History-enabled handlers sharing the same database must request the same
+retention. Changing retention when reopening the database resizes the history
+file and preserves existing samples that fit the new duration.</p>
+
+<p>Set a different positive live interval or disable latency timing:</p>
 
 <pre><code class="language-go">handler := db.MetricsHandler(
     dot.WithMetricsInterval(250*time.Millisecond),
@@ -64,8 +77,11 @@ Set a different positive interval or disable latency timing:</p>
 )</code></pre>
 
 <p>Disabling latency keeps throughput counts. Timing remains active if another
-connected handler needs it. Collection stops when viewers disconnect;
-<code>db.Close()</code> closes the streams.</p>
+connected handler needs it. Persistent history records every second regardless
+of the live interval. The default live stream uses these same snapshots, so page
+refreshes do not reset collection. Once a history handler requests latency, timing
+continues until <code>db.Close()</code>. With history disabled, collection stops when viewers
+disconnect. <code>db.Close()</code> flushes history and closes the streams.</p>
 
 <h2 id="storage-metrics">Storage metrics</h2>
 
@@ -73,7 +89,7 @@ connected handler needs it. Collection stops when viewers disconnect;
 <table>
 <thead><tr><th scope="col">Metric</th><th scope="col">Meaning</th></tr></thead>
 <tbody>
-<tr><td>On-disk size</td><td>Allocated filesystem space under the database path, including metadata and temporary cleanup files.</td></tr>
+<tr><td>On-disk size</td><td>Allocated filesystem space under the database path, including metadata and temporary cleanup files, excluding the METRICS history file.</td></tr>
 <tr><td>Obsolete bytes</td><td>Retained history that cleanup can reclaim.</td></tr>
 <tr><td>Entries</td><td>Indexed keys, including expired keys awaiting cleanup.</td></tr>
 <tr><td>Index mmap</td><td>Mapped index space, including pages not resident in RAM.</td></tr>
@@ -95,20 +111,48 @@ few samples. Empty windows show zero throughput and unavailable latency.</p>
 
 <p>Select table values or metric buttons to graph them. Multiple series can share
 a graph when their units match; selecting a different unit replaces the selection.
+The Y-axis covers all loaded samples for the selected metrics, keeping its scale
+stable while scrolling. It adjusts when the loaded data or selection changes.
 Hover for exact sample values.</p>
 
-<h2 id="browser-history">Browser history</h2>
+<h2 id="browser-history">Persistent history</h2>
 
-<p>Choose a one-minute window, a one-hour window, or all retained samples. The graph
+<p>Choose a one-minute, one-hour, one-day, seven-day, or 30-day window, or all retained samples. The graph
 follows new samples by default. Scroll or drag the graph to browse older readings
 and hold the time window still. The scrubber below shows the
-visible window within loaded data; click or drag it to move, or focus it and use
+visible window within retained history; click or drag it to move, or focus it and use
 the arrow keys, Page Up, Page Down, Home, and End. Moving to the latest end
 automatically resumes following new samples.</p>
 
-<p>Each browser keeps
-up to 20,000 snapshots, about 5.5 hours at the default interval. Reloading clears
-the graph history; disconnecting the last viewer also resets the operation window.</p>
+<p>Persistent history survives page refreshes and application restarts. The
+<code>METRICS</code> file stores one snapshot per second in a fixed-size ring,
+retaining the configured duration and using approximately 21.1 MiB per day
+(21.1 MiB for the default one day). It is created as a
+sparse file, allocating storage as samples arrive. History is excluded from the
+on-disk database size shown in the dashboard. No additional in-memory copy of the
+retained history is kept.</p>
+
+<p>The binary history header uses the eight-byte signature <code>DOTMETRX</code>,
+its own numeric format version, and CRC32. Its version is independent of the
+database disk format; unsupported history formats are not migrated.</p>
+
+<p>The browser loads only the requested range, keeping at most 20,000 samples.
+Wide views preserve first/last samples and the selected series' minima and maxima
+in time buckets. Hover values remain original readings, including the original
+ten-second p99 rather than an aggregate percentile. Narrower views request finer
+readings. Restart or crash gaps longer than three seconds break the line; no zero
+values or interpolated readings are inserted. Gaps are detected before reducing
+samples, so overview lines do not bridge outages. An overview break can be wider
+by one bucket; use a shorter window for its precise boundaries. Operation windows
+warm up again after restart.</p>
+
+<p>History writes run in the background and are synced every minute and on
+<code>db.Close()</code>. A power loss can lose recent unsynced readings. Torn or
+corrupt records are skipped; history errors appear in the dashboard and do not
+prevent database operations. History begins when enabled; earlier samples cannot
+be reconstructed. With history disabled, each browser retains up to 20,000 live
+snapshots until reload, and disconnecting the last viewer resets the operation
+window.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="storage.html" rel="prev"><span>Previous</span>Storage &amp; recovery</a><a href="development.html" rel="next"><span>Next</span>Development <span aria-hidden="true">→</span></a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/metrics.html">Edit this page <span aria-hidden="true">↗</span></a></footer>
@@ -120,7 +164,7 @@ the graph history; disconnecting the last viewer also resets the operation windo
         <a href="#configure-collection">Configure collection</a>
         <a href="#storage-metrics">Storage metrics</a>
         <a href="#operation-metrics">Operation metrics</a>
-        <a href="#browser-history">Browser history</a>
+        <a href="#browser-history">Persistent history</a>
       </nav>
     </aside>
   </div>

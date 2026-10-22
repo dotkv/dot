@@ -24,18 +24,43 @@ type MetricsOption func(*metricsOptions)
 type metricsOptions struct {
 	interval time.Duration
 	latency  bool
+	history  time.Duration
 }
 
 // WithMetricsLatency controls latency timing for dashboard viewers. It defaults
 // to true. If false, this handler requests only operation counts; timing stops
-// when no connected handler requests it. With no viewers, operations perform
-// only an enabled check, regardless of this option.
+// when no connected handler or persistent history collector requests it.
 func WithMetricsLatency(enabled bool) MetricsOption {
 	return func(o *metricsOptions) { o.latency = enabled }
 }
 
+// WithMetricsHistory sets the duration of persistent, one-second snapshots.
+// It defaults to 24 hours. Zero disables history; negative durations panic, and
+// positive durations round up to whole seconds. Collection starts when the
+// handler is constructed and continues until DB.Close, including without viewers.
+// History-enabled handlers sharing a DB must request the same retention. Changing
+// retention after reopening resizes the METRICS ring, preserving samples that fit.
+// Storage is bounded to about 21.1 MiB per retained day.
+// Latency recording stays enabled until Close once any history handler requests
+// it. Writes are synced every minute and on Close; a crash can lose recent
+// history. History failures are shown in the dashboard and do not fail DB calls.
+func WithMetricsHistory(retention time.Duration) MetricsOption {
+	if retention < 0 {
+		panic("dot: metrics history retention must not be negative")
+	}
+	if retention > 0 {
+		seconds := (retention-1)/time.Second + 1
+		if seconds > time.Duration(1<<63-1)/time.Second {
+			panic("dot: metrics history retention is too large")
+		}
+		retention = seconds * time.Second
+	}
+	return func(o *metricsOptions) { o.history = retention }
+}
+
 // WithMetricsInterval sets the interval between metric snapshots. The default
 // is one second. Like time.NewTicker, it panics if interval is not positive.
+// Persistent history always records at one-second intervals.
 func WithMetricsInterval(interval time.Duration) MetricsOption {
 	if interval <= 0 {
 		panic("dot: metrics interval must be positive")
@@ -65,8 +90,9 @@ func renderMetricsIndex(version string) ([]byte, error) {
 // MetricsHandler serves an embedded dashboard at / and current metrics over a
 // WebSocket at /ws. Mount it on a standard http.ServeMux, using http.StripPrefix
 // with the prefix excluding its trailing slash, so the handler receives paths
-// beginning with /. The browser keeps graph history; the handler keeps only the
-// most recent reading for each shard. It samples only while connected.
+// beginning with /. By default it records 24 hours of persistent history and
+// collects without viewers. WithMetricsHistory(0) keeps history in the browser
+// and collects only while connected. /history returns bounded historical views.
 // Operation rates, means, and approximate p99 latencies cover a trailing ten
 // seconds at one-second resolution (a shorter window during initial warm-up).
 // All calls count, including misses, errors, and no-ops. Timings include lock
@@ -74,42 +100,51 @@ func renderMetricsIndex(version string) ([]byte, error) {
 // at most 12.5%. Operation snapshots, like shard readings, are not transactional.
 //
 // On-disk size scans allocated filesystem blocks under the database path,
-// including directories, metadata, and temporary files, without following child
-// symlinks. Obsolete bytes are retained log bytes no longer referenced by the
-// index. Entry counts include expired entries until pruning. Snapshots skip busy
-// shard locks and reuse their previous readings. Failed disk scans also reuse
+// including directories, metadata, and temporary files, excluding the METRICS
+// history file, without following child symlinks. Obsolete bytes are retained
+// log bytes no longer referenced by the index. Entry counts include expired
+// entries until pruning. Snapshots skip busy shard locks and reuse their previous readings. Failed disk scans also reuse
 // the previous reading; snapshots report stale or incomplete data.
 // Index mapped bytes describe this database's index mappings, including pages
 // not resident in RAM.
 //
 // Storage collection is shared by clients of this handler. Operation recording
 // is shared across all handlers on this DB and stops when the last client
-// disconnects or the database closes. With no viewers, key operations only check
-// whether recording is enabled. Origin checks use coder/websocket defaults;
+// disconnects or the database closes, unless persistent history is enabled.
+// With no viewers or history, key operations only check whether recording is
+// enabled. Origin checks use coder/websocket defaults;
 // authentication and HTTP server lifecycle belong to the calling application.
 func (db *DB) MetricsHandler(opts ...MetricsOption) http.Handler {
-	o := metricsOptions{interval: time.Second, latency: true}
+	o := metricsOptions{interval: time.Second, latency: true, history: defaultMetricsHistoryRetention}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&o)
 		}
 	}
-	return &metricsHandler{db: db, interval: o.interval, latency: o.latency}
+	h := &metricsHandler{db: db, interval: o.interval, latency: o.latency}
+	if o.history > 0 {
+		h.history = db.startMetricsHistory(o.history, o.latency)
+	}
+	return h
 }
 
 type metricsSnapshot struct {
-	Time              int64            `json:"time"`
-	IntervalMS        int64            `json:"interval_ms"`
-	DiskBytes         uint64           `json:"disk_bytes"`
-	ObsoleteBytes     uint64           `json:"obsolete_bytes"`
-	EntryCount        uint64           `json:"entry_count"`
-	IndexMappedBytes  uint64           `json:"index_mapped_bytes"`
-	StaleShards       int              `json:"stale_shards"`
-	DiskStale         bool             `json:"disk_stale"`
-	Ready             bool             `json:"ready"`
-	Operations        operationMetrics `json:"operations"`
-	OperationWindowMS float64          `json:"operation_window_ms"`
-	LatencyEnabled    bool             `json:"latency_enabled"`
+	Time               int64            `json:"time"`
+	IntervalMS         int64            `json:"interval_ms"`
+	DiskBytes          uint64           `json:"disk_bytes"`
+	ObsoleteBytes      uint64           `json:"obsolete_bytes"`
+	EntryCount         uint64           `json:"entry_count"`
+	IndexMappedBytes   uint64           `json:"index_mapped_bytes"`
+	StaleShards        int              `json:"stale_shards"`
+	DiskStale          bool             `json:"disk_stale"`
+	Ready              bool             `json:"ready"`
+	Operations         operationMetrics `json:"operations"`
+	OperationWindowMS  float64          `json:"operation_window_ms"`
+	LatencyEnabled     bool             `json:"latency_enabled"`
+	HistoryRetentionMS int64            `json:"history_retention_ms,omitempty"`
+	HistoryStart       int64            `json:"history_start,omitempty"`
+	HistoryError       string           `json:"history_error,omitempty"`
+	GapBefore          bool             `json:"gap_before,omitempty"`
 }
 
 type metricsShard struct {
@@ -137,6 +172,7 @@ type metricsHandler struct {
 	latency  bool
 	mu       sync.Mutex // Guards stream, its clients, and its last snapshot.
 	stream   *metricsStream
+	history  *metricsHistory
 }
 
 func (h *metricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +185,10 @@ func (h *metricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/ws" {
 		h.serveWebSocket(w, r)
+		return
+	}
+	if r.URL.Path == "/history" {
+		h.serveHistory(w, r)
 		return
 	}
 	var name, contentType string
@@ -226,7 +266,11 @@ func (h *metricsHandler) subscribe() (<-chan metricsSnapshot, func()) {
 		}
 		h.stream = s
 		s.cache.operations = h.db.acquireOperationMetrics(h.latency)
-		go h.collect(s)
+		if h.history != nil && h.interval == time.Second {
+			go h.collectHistory(s)
+		} else {
+			go h.collect(s)
+		}
 	}
 	ch := make(chan metricsSnapshot, 1)
 	s.clients[ch] = struct{}{}
@@ -260,17 +304,11 @@ func (h *metricsHandler) collect(s *metricsStream) {
 		default:
 		}
 		snapshot := h.snapshot(&s.cache)
-		h.mu.Lock()
-		s.last = snapshot
-		for ch := range s.clients {
-			// A slow viewer gets the latest snapshot without blocking collection.
-			select {
-			case <-ch:
-			default:
-			}
-			ch <- snapshot
+		if h.history != nil {
+			snapshot.HistoryStart, snapshot.HistoryError = h.history.status(time.Now())
+			snapshot.HistoryRetentionMS = h.history.retention.Milliseconds()
 		}
-		h.mu.Unlock()
+		h.publish(s, snapshot)
 		select {
 		case <-s.stop:
 			return
@@ -278,6 +316,51 @@ func (h *metricsHandler) collect(s *metricsStream) {
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// The default live stream uses the recorder's snapshots and cadence, including
+// across disconnects. Refreshing must not create a second sampling clock whose
+// readings disappear when the browser reloads history.
+func (h *metricsHandler) collectHistory(s *metricsStream) {
+	var lastTime int64
+	for {
+		h.history.mu.RLock()
+		snapshot, updated := h.history.last, h.history.updated
+		h.history.mu.RUnlock()
+		if snapshot.Time != 0 && snapshot.Time != lastTime {
+			lastTime = snapshot.Time
+			if !h.latency {
+				snapshot.LatencyEnabled = false
+				for _, op := range []*operationMetric{&snapshot.Operations.Get, &snapshot.Operations.Set, &snapshot.Operations.Delete, &snapshot.Operations.Update} {
+					op.LatencySamples, op.MeanNS, op.P99NS = 0, nil, nil
+				}
+			}
+			snapshot.HistoryStart, snapshot.HistoryError = h.history.status(time.Now())
+			snapshot.HistoryRetentionMS = h.history.retention.Milliseconds()
+			h.publish(s, snapshot)
+		}
+		select {
+		case <-s.stop:
+			return
+		case <-h.db.metricsContext.Done():
+			return
+		case <-updated:
+		}
+	}
+}
+
+func (h *metricsHandler) publish(s *metricsStream, snapshot metricsSnapshot) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s.last = snapshot
+	for ch := range s.clients {
+		// A slow viewer gets the latest snapshot without blocking collection.
+		select {
+		case <-ch:
+		default:
+		}
+		ch <- snapshot
 	}
 }
 
@@ -336,6 +419,9 @@ func metricsDiskUsage(ctx context.Context, root string) (uint64, error) {
 		}
 		if err != nil {
 			return err
+		}
+		if path == filepath.Join(root, metricsHistoryName) || path == filepath.Join(root, metricsHistoryTempName) {
+			return nil
 		}
 		info, err := entry.Info() // Lstat: symlink targets outside the path are excluded.
 		if os.IsNotExist(err) && path != root {

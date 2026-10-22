@@ -75,6 +75,20 @@
   let socket = null;
   let retry = null;
   let stopped = false;
+  let serverStart = 0;
+  let serverRetention = 0;
+  let historyError = "";
+  let historyLoadError = "";
+  let diskStale = false;
+  let loaded = null;
+  let pending = null;
+  let historyRequest = null;
+  let historyRetryAt = 0;
+
+  const oldestTime = () => serverStart ? Math.max(serverStart, serverRetention ? Date.now() - serverRetention : serverStart) : at(0).time;
+  function updateNotice() {
+    notice([diskStale ? "Disk usage is unavailable; showing its previous reading." : "", historyError || historyLoadError].filter(Boolean).join(" "));
+  }
 
   function byteUnit(value) {
     return Math.min(byteUnits.length - 1, Math.max(0, Math.floor(Math.log2(value || 1) / 10)));
@@ -120,15 +134,11 @@
     frame = requestAnimationFrame(() => { frame = null; draw(); });
   }
 
-  function receive(sample) {
+  function chartSample(sample, resolution = sample.interval_ms) {
     if (![sample.time, sample.interval_ms, sample.disk_bytes, sample.obsolete_bytes, sample.entry_count, sample.index_mapped_bytes]
       .every((value) => Number.isFinite(value) && value >= 0)) throw new Error("Invalid snapshot");
-    interval = Math.max(1, sample.interval_ms);
-    status("Connected", true);
-    // Reconnecting can send the current snapshot again. Store only chart fields.
-    if (latest && sample.time < latest.time) return;
-    latest = {
-      time: sample.time, disk_bytes: sample.disk_bytes,
+    const point = {
+      time: sample.time, interval_ms: Math.max(1, resolution), gap_before: Boolean(sample.gap_before), disk_bytes: sample.disk_bytes,
       obsolete_bytes: sample.obsolete_bytes, entry_count: sample.entry_count,
       index_mapped_bytes: sample.index_mapped_bytes,
     };
@@ -136,9 +146,28 @@
       const reading = sample.operations?.[op];
       if (!reading || !Number.isFinite(reading.ops_per_second) || reading.ops_per_second < 0
         || ![reading.mean_ns, reading.p99_ns].every((value) => value === null || (Number.isFinite(value) && value >= 0))) throw new Error("Invalid operation metrics");
-      latest[`${op}_ops`] = reading.ops_per_second;
-      latest[`${op}_mean_ns`] = reading.mean_ns;
-      latest[`${op}_p99_ns`] = reading.p99_ns;
+      point[`${op}_ops`] = reading.ops_per_second;
+      point[`${op}_mean_ns`] = reading.mean_ns;
+      point[`${op}_p99_ns`] = reading.p99_ns;
+    }
+    if (!sample.ready) point.disk_bytes = point.obsolete_bytes = point.entry_count = point.index_mapped_bytes = null;
+    return point;
+  }
+
+  function receive(sample) {
+    const point = chartSample(sample);
+    interval = Math.max(1, sample.interval_ms);
+    status("Connected", true);
+    if (Number.isFinite(sample.history_start) && sample.history_start > 0) serverStart = sample.history_start;
+    if (Number.isFinite(sample.history_retention_ms) && sample.history_retention_ms > 0) serverRetention = sample.history_retention_ms;
+    historyError = sample.history_error || "";
+    diskStale = sample.disk_stale;
+    updateNotice();
+    // Reconnecting can send the current snapshot again. Store only chart fields.
+    if (latest && sample.time < latest.time) return;
+    point.gap_before ||= Boolean(latest && point.time - latest.time > interval * 3);
+    latest = point;
+    for (const op of operations) {
       for (const suffix of ["ops", "mean_ns", "p99_ns"]) {
         const key = `${op}_${suffix}`;
         byID(`value-${key}`).textContent = format(key, latest[key]);
@@ -147,12 +176,72 @@
     if (!count || sample.time > at(count - 1).time) {
       history[(head + count) % capacity] = latest;
       if (count < capacity) count++;
-      else head = (head + 1) % capacity;
+      else { head = (head + 1) % capacity; loaded = null; }
     }
-    if (!sample.ready) latest.disk_bytes = latest.obsolete_bytes = latest.entry_count = latest.index_mapped_bytes = null;
-    notice(sample.disk_stale ? "Disk usage is unavailable; showing its previous reading." : "");
     byID("empty").hidden = true;
     requestDraw();
+  }
+
+  function loadHistory(start, span) {
+    if (!serverStart || stopped || historyError || Date.now() < historyRetryAt) return;
+    const end = Math.min(start + span, latest.time);
+    start = Math.max(start, oldestTime());
+    const keys = [...selected].sort().join(",");
+    const resolution = Math.max(1000, span * 1.5 / 500 + 1);
+    const covers = (cache) => cache && cache.keys === keys && cache.start <= start && cache.end >= end && cache.resolution <= resolution;
+    if (covers(loaded)) {
+      if (pending && !covers(pending)) { historyRequest?.abort(); pending = null; }
+      return;
+    }
+    if (covers(pending)) return;
+    historyRequest?.abort();
+    const controller = new AbortController();
+    historyRequest = controller;
+    const queryStart = Math.max(oldestTime(), Math.floor(start - span / 4));
+    const queryEnd = Math.max(queryStart, Math.floor(Math.min(Date.now(), end + span / 4)));
+    const liveAfter = latest.time;
+    const coverage = { keys, start: queryStart, end: queryEnd >= latest.time ? Infinity : queryEnd,
+      resolution: Math.max(1000, Math.floor((queryEnd - queryStart) / 500) + 1) };
+    pending = coverage;
+    const url = new URL("history", window.location.href);
+    url.searchParams.set("start", queryStart);
+    url.searchParams.set("end", queryEnd);
+    url.searchParams.set("metrics", keys);
+    fetch(url, { signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error("History unavailable");
+      const data = await response.json();
+      if (controller.signal.aborted || stopped) return;
+      if (!Array.isArray(data.samples) || data.samples.length > capacity || !Number.isFinite(data.resolution_ms) || data.resolution_ms < 1000) throw new Error("Invalid history");
+      const points = data.samples.map((sample) => chartSample(sample, data.resolution_ms));
+      if (points.some((point, i) => i && point.time <= points[i - 1].time)) throw new Error("Invalid history order");
+      // Keep every live reading from the request's start, even if the response
+      // has not saved it yet. Prefer history on overlap: it has authoritative
+      // gap markers for periods when the browser was disconnected.
+      const seen = new Set(points.map((point) => point.time));
+      for (let i = 0; i < count; i++) {
+        const point = at(i);
+        if (point.time >= liveAfter && !seen.has(point.time)) {
+          points.push(point);
+          seen.add(point.time);
+        }
+      }
+      if (!seen.has(latest.time)) points.push(latest);
+      points.sort((a, b) => a.time - b.time);
+      head = 0;
+      count = Math.min(capacity, points.length);
+      for (let i = 0; i < count; i++) history[i] = points[points.length - count + i];
+      loaded = { ...coverage, resolution: data.resolution_ms };
+      historyLoadError = "";
+      updateNotice();
+      requestDraw();
+    }).catch(() => {
+      if (controller.signal.aborted || stopped) return;
+      historyLoadError = "Metric history could not be loaded; retrying shortly.";
+      historyRetryAt = Date.now() + 5000;
+      updateNotice();
+    }).finally(() => {
+      if (historyRequest === controller) pending = null;
+    });
   }
 
   function lowerBound(time, low = 0) {
@@ -168,12 +257,12 @@
   function visibleWindow() {
     if (!following) return viewport;
     const end = Math.max(Date.now(), latest.time);
-    const start = range === Infinity ? at(0).time : end - range;
+    const start = range === Infinity ? oldestTime() : end - range;
     return { start, span: Math.max(interval, end - start) };
   }
 
   function historyBounds(span, end = Math.max(Date.now(), latest.time)) {
-    return { start: Math.min(at(0).time, end - span), end };
+    return { start: Math.min(oldestTime(), end - span), end };
   }
 
   function setFollowing(enabled) {
@@ -190,7 +279,7 @@
   }
 
   function updateNavigation(window) {
-    const oldest = at(0).time;
+    const oldest = oldestTime();
     const newest = Math.max(Date.now(), latest.time);
     const duration = Math.max(1, newest - oldest);
     const maximum = Math.max(0, newest - oldest - window.span);
@@ -254,6 +343,7 @@
     const left = 86, right = width - 20, top = 20, bottom = height - 34;
     const { start, span } = visibleWindow();
     const end = start + span;
+    loadHistory(start, span);
     const low = lowerBound(start);
     let high = lowerBound(end, low);
     if (high < count && at(high).time === end) high++;
@@ -261,8 +351,8 @@
     const x = (time) => left + (time - start) / span * (right - left);
     const maxima = keys.map((key) => {
       let maximum = 0;
-      // Include the preceding sample used to draw the segment at the left edge.
-      for (let i = first; i < high; i++) maximum = Math.max(maximum, at(i)[key]);
+      // Use all loaded samples so panning does not change the value scale.
+      for (let i = 0; i < count; i++) maximum = Math.max(maximum, at(i)[key]);
       return maximum;
     });
     const limits = axis(keys[0], Math.max(...maxima));
@@ -318,7 +408,7 @@
           continue;
         }
         const pixel = Math.floor(x(point.time));
-        if (missing || (i > 0 && point.time - at(i - 1).time > interval * 3)) {
+        if (missing || point.gap_before || (i > 0 && point.time - at(i - 1).time > Math.max(point.interval_ms, at(i - 1).interval_ms) * 3)) {
           flush();
           bucket = null;
           gaps.add(point);
@@ -370,6 +460,10 @@
     }
     const time = view.start + (pointer.x - view.left) / (view.right - view.left) * view.span;
     let index = Math.min(view.high - 1, lowerBound(time, view.low));
+    if (index > 0 && at(index).gap_before && time > at(index - 1).time && time < at(index).time) {
+      tooltip.hidden = crosshair.hidden = true;
+      return;
+    }
     if (index > view.low && time - at(index - 1).time < at(index).time - time) index--;
     const sample = at(index);
     const column = view.x(sample.time);
@@ -402,7 +496,14 @@
     const url = new URL("ws", window.location.href);
     url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(url);
-    socket.addEventListener("open", () => { status("Connected", true); });
+    socket.addEventListener("open", () => {
+      // Backfill periods when this browser was offline but the server kept
+      // collecting, rather than treating a network disconnect as an outage.
+      loaded = null;
+      historyRequest?.abort();
+      pending = null;
+      status("Connected", true);
+    });
     socket.addEventListener("message", (event) => {
       try { receive(JSON.parse(event.data)); }
       catch { status("Invalid snapshot"); }
@@ -436,7 +537,7 @@
       range = button.dataset.range === "all" ? Infinity : Number(button.dataset.range);
       if (!following) {
         const end = viewport.start + viewport.span;
-        const span = range === Infinity ? Math.max(interval, end - at(0).time) : range;
+        const span = range === Infinity ? Math.max(interval, end - oldestTime()) : range;
         viewport = { start: end - span, span };
       }
       for (const other of ranges) other.setAttribute("aria-pressed", String(other === button));
@@ -494,7 +595,7 @@
   scrubber.addEventListener("pointerdown", (event) => {
     if (!view || event.button !== 0) return;
     const window = visibleWindow();
-    const oldest = at(0).time;
+    const oldest = oldestTime();
     const duration = Math.max(Date.now(), latest.time) - oldest;
     if (duration <= window.span) return;
     const bounds = scrubber.getBoundingClientRect();
@@ -532,6 +633,8 @@
   window.addEventListener("pagehide", () => {
     stopped = true;
     clearTimeout(retry);
+    historyRequest?.abort();
+    pending = null;
     socket?.close();
   });
   window.addEventListener("pageshow", (event) => {

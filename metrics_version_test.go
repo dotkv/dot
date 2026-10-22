@@ -142,7 +142,7 @@ func TestMetricsHTTPVersion(t *testing.T) {
 	// Serving the version needs neither an open database nor a WebSocket client.
 	var db DB
 	w := httptest.NewRecorder()
-	db.MetricsHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	db.MetricsHandler(WithMetricsHistory(0)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}

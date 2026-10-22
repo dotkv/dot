@@ -60,6 +60,8 @@ type DB struct {
 	metricsCancel    context.CancelFunc
 	metricsMu        sync.Mutex // Guards operation collector registration.
 	operationMetrics atomic.Pointer[operationRecorder]
+	metricsHistoryMu sync.Mutex // Guards history startup and latency registration.
+	metricsHistory   *metricsHistory
 }
 
 // acquireLock takes an exclusive, non-blocking flock on path/LOCK. It fails
@@ -630,6 +632,12 @@ func (db *DB) Destroy() error {
 func (db *DB) close(removeFiles bool) error {
 	if db.metricsCancel != nil {
 		db.metricsCancel()
+	}
+	db.metricsHistoryMu.Lock()
+	history := db.metricsHistory
+	db.metricsHistoryMu.Unlock()
+	if history != nil {
+		<-history.done
 	}
 	db.stopOperationMetrics()
 	db.backgroundCancel()
