@@ -47,6 +47,9 @@
 node --test metrics_ui/app.test.cjs metrics_ui/app_test.js
 (cd benchmarks &amp;&amp; go test ./...)</code></pre>
 
+<p>The test workflow runs these checks on every pull request, including new commits
+to an open pull request, and on pushes to <code>master</code>.</p>
+
 <h2 id="benchmarks">Benchmarks</h2>
 
 <p>Run the library benchmarks with <code>go test -run '^$' -bench . -benchmem</code>.
@@ -60,8 +63,9 @@ is a separate module; its README describes workloads, commands, and results.</p>
 <pre><code class="language-sh">git tag v0.1.0
 git push origin v0.1.0</code></pre>
 
-<p>The release workflow runs tests and creates a GitHub Release with generated notes.
-Tags such as <code>v0.1.0-rc.1</code> are marked as prereleases.</p>
+<p>Create GitHub Releases manually from the repository's Releases page, selecting
+an existing tag or creating a new semantic version tag. For tags such as
+<code>v0.1.0-rc.1</code>, mark the release as a prerelease.</p>
 
 <h2 id="preview-the-docs">Preview the docs</h2>
 
