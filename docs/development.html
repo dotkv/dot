@@ -56,6 +56,13 @@ to an open pull request, and on pushes to <code>master</code>.</p>
 The <a href="https://github.com/dotkv/dot/tree/master/benchmarks">comparison suite</a>
 is a separate module; its README describes workloads, commands, and results.</p>
 
+<p>Persistent metrics history is opt-in and defaults to zero (disabled). The
+comparison suite creates no metrics handler, so it performs no dashboard
+collection. For application benchmarks, keep viewers disconnected and history
+disabled to avoid measuring dashboard overhead. The library's
+<code>BenchmarkOperationMetrics</code> compares recording disabled, an idle default
+handler, counts only, and latency timing.</p>
+
 <h2 id="releases">Releases</h2>
 
 <p>Push a semantic version tag to publish a Go module version:</p>

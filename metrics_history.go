@@ -21,14 +21,13 @@ import (
 )
 
 const (
-	metricsHistoryName             = "METRICS"
-	metricsHistoryMagic            = "DOTMETRX"
-	metricsHistoryFormatVersion    = 1
-	defaultMetricsHistoryRetention = 24 * time.Hour
-	metricsHistoryTempName         = "METRICS.tmp"
-	metricsHistoryHeaderSize       = 64
-	metricsHistoryRecordSize       = 256
-	metricsHistoryBuckets          = 500 // At most 17,000 samples for all sixteen series.
+	metricsHistoryName          = "METRICS"
+	metricsHistoryMagic         = "DOTMETRX"
+	metricsHistoryFormatVersion = 1
+	metricsHistoryTempName      = "METRICS.tmp"
+	metricsHistoryHeaderSize    = 64
+	metricsHistoryRecordSize    = 256
+	metricsHistoryBuckets       = 500 // At most 17,000 samples for all sixteen series.
 )
 
 // Each wall-clock second owns one slot. Timestamp and checksum validation let

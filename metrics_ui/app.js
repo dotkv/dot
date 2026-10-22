@@ -78,7 +78,6 @@
   let serverStart = 0;
   let serverRetention = 0;
   let historyError = "";
-  let historyLoadError = "";
   let diskStale = false;
   let loaded = null;
   let pending = null;
@@ -87,7 +86,7 @@
 
   const oldestTime = () => serverStart ? Math.max(serverStart, serverRetention ? Date.now() - serverRetention : serverStart) : at(0).time;
   function updateNotice() {
-    notice([diskStale ? "Disk usage is unavailable; showing its previous reading." : "", historyError || historyLoadError].filter(Boolean).join(" "));
+    notice([diskStale ? "Disk usage is unavailable; showing its previous reading." : "", historyError].filter(Boolean).join(" "));
   }
 
   function byteUnit(value) {
@@ -231,14 +230,10 @@
       count = Math.min(capacity, points.length);
       for (let i = 0; i < count; i++) history[i] = points[points.length - count + i];
       loaded = { ...coverage, resolution: data.resolution_ms };
-      historyLoadError = "";
-      updateNotice();
       requestDraw();
     }).catch(() => {
       if (controller.signal.aborted || stopped) return;
-      historyLoadError = "Metric history could not be loaded; retrying shortly.";
       historyRetryAt = Date.now() + 5000;
-      updateNotice();
     }).finally(() => {
       if (historyRequest === controller) pending = null;
     });

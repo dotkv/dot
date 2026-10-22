@@ -78,7 +78,8 @@ writes that use that default. Writes use the OS page cache by default;
 `WithSync(true)` syncs the log before returning.
 
 See [example/](example/) for a runnable workload and metrics dashboard.
-`db.MetricsHandler()` records one day of metrics by default, including without
-viewers, and survives restarts (about 21 MiB per database). Set a different
-retention with `dot.WithMetricsHistory(7*24*time.Hour)`, or disable persistence
-with `dot.WithMetricsHistory(0)`.
+`db.MetricsHandler()` collects only while viewers are connected and keeps live
+history in the browser until reload. Persistent history defaults to zero
+(disabled). Opt in with `db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))`
+to retain seven days, including without viewers and across database restarts
+(about 21.1 MiB per retained day).

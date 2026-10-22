@@ -56,15 +56,17 @@ and HTTP server shutdown belong to your application.</p>
 
 <h2 id="configure-collection">Configure collection</h2>
 
-<p>The dashboard records one day of persistent history by default. Collection
-starts when the handler is constructed and continues until <code>db.Close()</code>,
-including without viewers. Set a different duration, or use zero to disable
-persistence and collect only while viewers are connected:</p>
+<p>Persistent history defaults to zero (disabled). The dashboard collects only
+while viewers are connected, and each browser keeps live history until reload.
+Opt in with a positive retention duration to collect without viewers and retain
+history across restarts:</p>
 
-<pre><code class="language-go">handler := db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))
-liveOnly := db.MetricsHandler(dot.WithMetricsHistory(0))</code></pre>
+<pre><code class="language-go">liveOnly := db.MetricsHandler() // Same as dot.WithMetricsHistory(0).
+handler := db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))</code></pre>
 
-<p>Positive durations round up to whole seconds; negative durations panic.
+<p>When enabled, collection starts when the handler is constructed and continues
+until <code>db.Close()</code>. Positive durations round up to whole seconds;
+negative durations panic.
 History-enabled handlers sharing the same database must request the same
 retention. Changing retention when reopening the database resizes the history
 file and preserves existing samples that fit the new duration.</p>
@@ -78,10 +80,11 @@ file and preserves existing samples that fit the new duration.</p>
 
 <p>Disabling latency keeps throughput counts. Timing remains active if another
 connected handler needs it. Persistent history records every second regardless
-of the live interval. The default live stream uses these same snapshots, so page
-refreshes do not reset collection. Once a history handler requests latency, timing
-continues until <code>db.Close()</code>. With history disabled, collection stops when viewers
-disconnect. <code>db.Close()</code> flushes history and closes the streams.</p>
+of the live interval. When history is enabled, the one-second live stream uses
+these same snapshots, so page refreshes do not reset collection. Once a history
+handler requests latency, timing continues until <code>db.Close()</code>. With history
+disabled, collection stops when viewers disconnect. <code>db.Close()</code> flushes
+history and closes the streams.</p>
 
 <h2 id="storage-metrics">Storage metrics</h2>
 
@@ -126,10 +129,10 @@ automatically resumes following new samples.</p>
 
 <p>Persistent history survives page refreshes and application restarts. The
 <code>METRICS</code> file stores one snapshot per second in a fixed-size ring,
-retaining the configured duration and using approximately 21.1 MiB per day
-(21.1 MiB for the default one day). It is created as a
-sparse file, allocating storage as samples arrive. History is excluded from the
-on-disk database size shown in the dashboard. No additional in-memory copy of the
+retaining the configured duration and using approximately 21.1 MiB per retained
+day. Enabling history creates a sparse file, allocating storage as samples arrive.
+History is excluded from the on-disk database size shown in the dashboard.
+No additional in-memory copy of the
 retained history is kept.</p>
 
 <p>The binary history header uses the eight-byte signature <code>DOTMETRX</code>,

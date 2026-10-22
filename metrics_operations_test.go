@@ -12,8 +12,8 @@ import (
 
 func TestOperationMetricsLifecycle(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(2))
-	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
-	counts := db.MetricsHandler(WithMetricsHistory(0), WithMetricsLatency(false)).(*metricsHandler)
+	h := db.MetricsHandler().(*metricsHandler)
+	counts := db.MetricsHandler(WithMetricsLatency(false)).(*metricsHandler)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	if db.operationMetrics.Load() != nil {
 		t.Fatal("constructing or serving dashboard assets enabled operation metrics")
@@ -328,12 +328,14 @@ func TestOperationMetricsConcurrentViewers(t *testing.T) {
 }
 
 func BenchmarkOperationMetrics(b *testing.B) {
-	for _, mode := range []string{"disabled", "counts", "latency"} {
+	for _, mode := range []string{"disabled", "idle", "counts", "latency"} {
 		for _, hit := range []bool{true, false} {
 			b.Run(fmt.Sprintf("%s/hit=%t", mode, hit), func(b *testing.B) {
 				f := newPrimitiveFixture(b)
 				f.resetValue(b, true, uint64(42))
-				if mode != "disabled" {
+				if mode == "idle" {
+					f.db.MetricsHandler() // Construct the default handler without viewers.
+				} else if mode != "disabled" {
 					m := f.db.acquireOperationMetrics(mode == "latency")
 					defer f.db.releaseOperationMetrics(m, mode == "latency")
 				}

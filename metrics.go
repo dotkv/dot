@@ -35,9 +35,10 @@ func WithMetricsLatency(enabled bool) MetricsOption {
 }
 
 // WithMetricsHistory sets the duration of persistent, one-second snapshots.
-// It defaults to 24 hours. Zero disables history; negative durations panic, and
-// positive durations round up to whole seconds. Collection starts when the
-// handler is constructed and continues until DB.Close, including without viewers.
+// Zero (the default) disables history. Negative durations panic; positive
+// durations round up to whole seconds. Collection starts when the
+// handler is constructed with positive retention and continues until DB.Close,
+// including without viewers.
 // History-enabled handlers sharing a DB must request the same retention. Changing
 // retention after reopening resizes the METRICS ring, preserving samples that fit.
 // Storage is bounded to about 21.1 MiB per retained day.
@@ -90,9 +91,10 @@ func renderMetricsIndex(version string) ([]byte, error) {
 // MetricsHandler serves an embedded dashboard at / and current metrics over a
 // WebSocket at /ws. Mount it on a standard http.ServeMux, using http.StripPrefix
 // with the prefix excluding its trailing slash, so the handler receives paths
-// beginning with /. By default it records 24 hours of persistent history and
-// collects without viewers. WithMetricsHistory(0) keeps history in the browser
-// and collects only while connected. /history returns bounded historical views.
+// beginning with /. By default persistent history is disabled: history stays in
+// the browser and metrics collect only while viewers are connected. Opt in with
+// WithMetricsHistory using positive retention to collect without viewers and
+// serve bounded historical views at /history.
 // Operation rates, means, and approximate p99 latencies cover a trailing ten
 // seconds at one-second resolution (a shorter window during initial warm-up).
 // All calls count, including misses, errors, and no-ops. Timings include lock
@@ -115,7 +117,7 @@ func renderMetricsIndex(version string) ([]byte, error) {
 // enabled. Origin checks use coder/websocket defaults;
 // authentication and HTTP server lifecycle belong to the calling application.
 func (db *DB) MetricsHandler(opts ...MetricsOption) http.Handler {
-	o := metricsOptions{interval: time.Second, latency: true, history: defaultMetricsHistoryRetention}
+	o := metricsOptions{interval: time.Second, latency: true}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&o)

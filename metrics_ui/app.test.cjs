@@ -511,12 +511,13 @@ test("week history keeps outage breaks after downsampling and refetches selected
   assert.ok(Number(ui.requests.at(-1).url.searchParams.get("start")) >= now - 75_000, "Zooming in loads original readings");
 });
 
-test("failed history loads retain live data and report an error", async () => {
+test("failed history loads retain live data without displaying a notice", async () => {
   const ui = dashboard();
   ui.receive({ history_start: now - 86_400_000 }); ui.flush();
   ui.requests[0].reject(new Error("offline"));
   await new Promise(setImmediate);
-  assert.match(ui.elements.notice.textContent, /history could not be loaded/);
+  assert.equal(ui.elements.notice.textContent, "");
+  assert.equal(ui.elements.notice.hidden, true);
   ui.receive({ time: now + 1000, history_start: now - 86_400_000 }); ui.flush();
   assert.equal(ui.requests.length, 1, "Failed requests must not retry every frame");
   assert.match(ui.elements.chart.attributes["aria-label"], /Following latest samples/);

@@ -57,10 +57,40 @@ func TestMetricsHistoryEncoding(t *testing.T) {
 }
 
 func TestMetricsHistoryDefaultAndDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []MetricsOption
+	}{
+		{name: "default"},
+		{name: "explicit zero", opts: []MetricsOption{WithMetricsHistory(0)}},
+		{name: "override", opts: []MetricsOption{WithMetricsHistory(time.Hour), WithMetricsHistory(0)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newInternalDB(t, WithShardCount(1))
+			h := db.MetricsHandler(tc.opts...).(*metricsHandler)
+			if h.history != nil || db.metricsHistory != nil || db.operationMetrics.Load() != nil {
+				t.Fatal("disabled history started collection without a viewer")
+			}
+			if !h.latency || h.interval != time.Second {
+				t.Fatal("disabled history changed live collection defaults")
+			}
+			if _, err := os.Stat(filepath.Join(db.path, metricsHistoryName)); !os.IsNotExist(err) {
+				t.Fatalf("disabled history created a file: %v", err)
+			}
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/history", nil))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("disabled history endpoint status: %d", response.Code)
+			}
+		})
+	}
+}
+
+func TestMetricsHistoryOptIn(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(1))
-	h := db.MetricsHandler().(*metricsHandler)
+	h := db.MetricsHandler(WithMetricsHistory(24 * time.Hour)).(*metricsHandler)
 	if h.history == nil || h.history.retention != 24*time.Hour || !h.history.latency.Load() {
-		t.Fatal("default handler did not enable one-day history with latency")
+		t.Fatal("explicit retention did not enable one-day history with latency")
 	}
 	h.history.mu.RLock()
 	info, err := h.history.file.Stat()
@@ -71,16 +101,9 @@ func TestMetricsHistoryDefaultAndDisabled(t *testing.T) {
 		t.Fatalf("history signature=%q err=%v", signature, signatureErr)
 	}
 	if err != nil || info.Size() != metricsHistoryFileSize(24*60*60) {
-		t.Fatalf("default history file: info=%v err=%v", info, err)
+		t.Fatalf("opt-in history file: info=%v err=%v", info, err)
 	}
 	other := newInternalDB(t, WithShardCount(1))
-	live := other.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
-	if live.history != nil || other.operationMetrics.Load() != nil {
-		t.Fatal("disabled history started collection without a viewer")
-	}
-	if _, err := os.Stat(filepath.Join(other.path, metricsHistoryName)); !os.IsNotExist(err) {
-		t.Fatalf("disabled history created a file: %v", err)
-	}
 	short := other.MetricsHandler(WithMetricsHistory(1500*time.Millisecond), WithMetricsLatency(false)).(*metricsHandler)
 	if short.history.retention != 2*time.Second || short.history.slots != 2 || short.history.latency.Load() {
 		t.Fatal("custom retention did not round up, or enabled unwanted latency")
@@ -233,7 +256,7 @@ func TestMetricsHistoryResizeFailurePreservesOriginal(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(filepath.Dir(path), metricsHistoryTempName), 0700); err != nil {
 		t.Fatal(err)
 	}
-	failed := openMetricsHistory(path, time.Now(), defaultMetricsHistoryRetention)
+	failed := openMetricsHistory(path, time.Now(), 24*time.Hour)
 	if failed.err == nil || failed.file != nil {
 		t.Fatal("blocked resize did not report a history failure")
 	}

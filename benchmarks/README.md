@@ -82,11 +82,11 @@ process, including preparation and drain, to 10 minutes by default.
 
 <!-- benchmark-results:start -->
 
-Completed cases: **18**, covering **4 configurations**.
+Completed cases: **72**, covering **12 configurations**.
 
 Configuration: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**. Operation budgets are fixed per configuration and shared across engines and repetitions.
 
-Dot and Pebble use normal automatic compaction.
+Dot and Pebble use normal automatic compaction; budgets estimated from a short Dot probe targeting **15s for Dot**.
 
 Environment: go1.27.2, linux/amd64, 16 logical CPUs, GOMAXPROCS=16.
 
@@ -96,44 +96,136 @@ Pebble: `v2.1.7`. Eight-byte scalar cases use `uint64` in Dot and equivalent lit
 
 Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.
 
-### 20/80 · 8 B uint64 values · 16 workers
+### 80/20 · 8 B uint64 values · 1 worker
 
-Measured operations per engine: **26,629,776**. Ratios are reads/writes.
+Measured operations per engine: **8,217,657**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  18.629 |    11.043 |   48.127 |          1,429,513 |           39.6 |      16.85 |
-| Pebble         |    3 |  13.163 |     7.771 |   64.511 |          2,023,078 |           46.0 |      19.13 |
+| Dot            |    3 |  14.745 |     1.705 |    6.111 |            557,315 |           33.1 |      12.33 |
+| Pebble         |    3 |  16.428 |     1.914 |    9.535 |            500,213 |           38.0 |      18.41 |
 
 ### 80/20 · 8 B uint64 values · 16 workers
 
-Measured operations per engine: **57,676,752**. Ratios are reads/writes.
+Measured operations per engine: **60,267,888**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    2 |  14.938 |     4.018 |   31.999 |          3,861,879 |           40.6 |      17.04 |
-| Pebble         |    2 |  28.186 |     7.651 |  127.999 |          2,046,319 |           45.7 |      18.21 |
+| Dot            |    3 |  18.333 |     4.727 |   38.399 |          3,287,435 |           40.6 |      40.80 |
+| Pebble         |    3 |  30.980 |     8.053 |  133.119 |          1,945,406 |           46.8 |      18.64 |
+
+### 80/20 · 8 B uint64 values · 128 workers
+
+Measured operations per engine: **72,707,328**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  17.512 |    30.435 |  561.151 |          4,151,887 |           85.9 |      20.97 |
+| Pebble         |    3 |  23.385 |    37.874 |  675.839 |          3,109,107 |           97.8 |      18.71 |
+
+### 80/20 · 1,024 B values · 1 worker
+
+Measured operations per engine: **5,069,916**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  20.707 |     3.972 |   10.559 |            244,845 |           35.9 |      41.76 |
+| Pebble         |    3 |  39.491 |     7.653 |   22.655 |            128,381 |           45.2 |      34.49 |
 
 ### 80/20 · 1,024 B values · 16 workers
 
-Measured operations per engine: **12,784,800**. Ratios are reads/writes.
+Measured operations per engine: **13,095,120**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    2 |  17.754 |    21.971 |   75.519 |            720,127 |           44.4 |      54.00 |
-| Pebble         |    2 |  44.702 |    55.626 |  323.583 |            286,056 |           51.4 |      35.03 |
+| Dot            |    3 |  19.462 |    23.544 |   86.527 |            672,840 |           48.9 |      52.12 |
+| Pebble         |    3 |  49.444 |    60.068 |  342.015 |            264,846 |           54.3 |      36.42 |
+
+### 80/20 · 1,024 B values · 128 workers
+
+Measured operations per engine: **29,230,080**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  18.195 |    76.615 |  589.823 |          1,606,508 |           93.1 |      48.82 |
+| Pebble         |    3 |  90.394 |   394.209 | 1761.279 |            323,362 |          105.7 |      37.08 |
+
+### 20/80 · 8 B uint64 values · 1 worker
+
+Measured operations per engine: **4,009,002**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  16.188 |     3.945 |    7.359 |            247,649 |           32.7 |      20.79 |
+| Pebble         |    3 |   4.396 |     1.021 |    6.751 |            912,027 |           37.5 |      18.16 |
+
+### 20/80 · 8 B uint64 values · 16 workers
+
+Measured operations per engine: **29,739,456**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  23.628 |    12.519 |   62.975 |          1,258,670 |           40.4 |      19.66 |
+| Pebble         |    3 |  15.686 |     8.288 |   67.071 |          1,895,944 |           46.7 |      18.20 |
+
+### 20/80 · 8 B uint64 values · 128 workers
+
+Measured operations per engine: **29,046,912**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  18.241 |    79.257 | 1540.095 |          1,592,433 |           84.1 |      24.23 |
+| Pebble         |    3 |  15.656 |    68.504 |  827.391 |          1,855,308 |           92.4 |      18.61 |
+
+### 20/80 · 1,024 B values · 1 worker
+
+Measured operations per engine: **2,367,228**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  22.423 |     9.351 |   12.031 |            105,569 |           34.7 |      53.02 |
+| Pebble         |    3 |  19.319 |     8.035 |   36.095 |            122,536 |           40.2 |      40.82 |
 
 ### 20/80 · 1,024 B values · 16 workers
 
-Measured operations per engine: **3,306,336**. Ratios are reads/writes.
+Measured operations per engine: **3,969,072**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    2 |  14.858 |    71.025 |  135.167 |            222,528 |           41.7 |      43.90 |
-| Pebble         |    2 |  26.620 |   127.870 |  338.943 |            124,208 |           52.6 |      39.86 |
+| Dot            |    3 |  18.414 |    73.257 |  165.887 |            215,546 |           43.2 |      51.86 |
+| Pebble         |    3 |  32.793 |   131.131 |  372.735 |            121,034 |           54.1 |      39.70 |
+
+### 20/80 · 1,024 B values · 128 workers
+
+Measured operations per engine: **13,792,896**. Ratios are reads/writes.
+
+| Implementation | Runs | Seconds | Mean (µs) |  p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
+| -------------- | ---: | ------: | --------: | --------: | -----------------: | -------------: | ---------: |
+| Dot            |    3 |  16.575 |   146.513 |  6389.759 |            832,163 |           90.3 |      40.97 |
+| Pebble         |    3 | 125.219 |  1150.380 | 53739.519 |            110,150 |          113.0 |      37.61 |
 
 
 <!-- benchmark-results:end -->
+
+## Latest comparison run
+
+On 2026-10-22, the generated tables above were refreshed from `e2f04c9` with local
+changes making metrics history opt-in. The full workload/value-size matrix ran
+at all three supported worker counts, with three repetitions:
+
+```sh
+./dot-bench -workers 1,16,128 -repeat 3 -json > results.jsonl
+```
+
+This gives 72 measured cases across 12 configurations. Each configuration uses a
+fresh Dot calibration targeting 15 seconds, with the resulting operation budget
+shared across engines and repetitions. Storage was Btrfs (`compress=zstd:3`) on
+an encrypted Crucial `CT1000P3PSSD8` NVMe device, with 27 GiB of RAM and the
+`performance` CPU governor.
+
+Both engines ran without a metrics handler. These measurements do not isolate a
+performance effect from the history default change. The compaction comparisons
+below are separate earlier experiments with their own operation budgets.
 
 ## Workload semantics
 
@@ -169,6 +261,14 @@ current shard; the drain does not reclaim all outstanding garbage.
 Replacement writes use a 64 KiB buffer, flushed before syncing and publishing the
 replacement. Single-segment compaction skips syncing the original head before
 replacement; multi-segment compaction still syncs it before removing older history.
+
+The adapter creates no metrics handler, so Dot's dashboard collection and
+persistent metrics history are inactive. `MetricsHandler()` defaults to zero
+history retention (disabled); positive `WithMetricsHistory` retention opts in.
+An idle default handler also leaves operation recording off until a viewer
+connects. Keep viewers disconnected and history disabled in application
+benchmarks to avoid including dashboard overhead. All recorded comparisons use
+no metrics handler. The harness records latency independently for both engines.
 
 **Pebble** uses normal automatic compaction and default L0 limits, with WAL
 enabled, compression disabled, and `pebble.NoSync` mutations. Other defaults,
@@ -212,8 +312,8 @@ while syncing files, so changing units does not remove that latency tradeoff.
 
 On 2026-10-22, baseline commit `5b230bf` was compared with two changes: skipping
 the preliminary head sync when only one segment exists, and buffering replacement
-writes in 64 KiB chunks. The generated results above use both changes in a
-modified working tree. The obsolete-byte ratio remains **0.33**, the minimum
+writes in 64 KiB chunks. The comparison below used both changes in a modified
+working tree. The obsolete-byte ratio remains **0.33**, the minimum
 remains **1 MiB per shard**, and cleanup retains the same live records and file
 format. Replacement-file sync, atomic rename, and directory sync remain in place.
 
