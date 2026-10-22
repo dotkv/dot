@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -22,6 +23,15 @@ const (
 
 // ErrNotFound is returned directly by Get and Update when the key does not exist.
 var ErrNotFound = errors.New("key not found")
+
+// ErrDatabaseLocked is returned by Open when another process holds the
+// database lock.
+var ErrDatabaseLocked = errors.New("database is locked by another process")
+
+// lockName is the file in the database directory guarding single-process
+// access. Open holds an exclusive flock on it for the database's lifetime;
+// the kernel releases the lock if the process dies, so it can never go stale.
+const lockName = "LOCK"
 
 // Key lists the types accepted for keys. The key's type does not affect its
 // identity: "a" and []byte("a") address the same record, unlike values, where
@@ -38,6 +48,28 @@ type DB struct {
 	backgroundCancel context.CancelFunc
 	backgroundWG     sync.WaitGroup
 	compactionQueue  chan *Shard
+	lockFile         *os.File
+}
+
+// acquireLock takes an exclusive, non-blocking flock on path/LOCK. It fails
+// with ErrDatabaseLocked when another process — or another Open in this
+// process — already holds it.
+func acquireLock(path string) (*os.File, error) {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return nil, fmt.Errorf("create database directory: %w", err)
+	}
+	f, err := os.OpenFile(filepath.Join(path, lockName), os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%w (%s)", ErrDatabaseLocked, path)
+		}
+		return nil, fmt.Errorf("lock database: %w", err)
+	}
+	return f, nil
 }
 
 // Options configures database and key operations.
@@ -93,11 +125,18 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if ratio := options.compaction.ratio; math.IsNaN(ratio) || ratio < 0 || ratio >= 1 {
 		return nil, fmt.Errorf("compaction ratio must be finite and in [0, 1)")
 	}
+	// Take the lock before touching any shard so two processes can never race
+	// recovery or interleave writes to the same logs.
+	lock, err := acquireLock(path)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &DB{path: path,
 		expiration:       options.expiration,
 		backgroundCancel: cancel,
 		compactionQueue:  make(chan *Shard, shardCount),
+		lockFile:         lock,
 	}
 	for i := range db.shards {
 		db.shards[i].compactionThreshold = &options.compaction
@@ -557,6 +596,12 @@ func (db *DB) close(removeFiles bool) error {
 	}
 	if removeFiles {
 		err = errors.Join(err, os.RemoveAll(db.path))
+	}
+	// Release the lock after removal so no other process can open the path
+	// between our close and the directory's deletion.
+	if db.lockFile != nil {
+		err = errors.Join(err, db.lockFile.Close())
+		db.lockFile = nil
 	}
 	return err
 }

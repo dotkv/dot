@@ -42,11 +42,18 @@ func TestDBShards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dirs) != shardCount {
-		t.Fatalf("got %d shard directories, want %d", len(dirs), shardCount)
+	// The LOCK file guards single-process access; only directories are shards.
+	var shardDirs []os.DirEntry
+	for _, dir := range dirs {
+		if dir.IsDir() {
+			shardDirs = append(shardDirs, dir)
+		}
 	}
-	for i, dir := range dirs {
-		if !dir.IsDir() || dir.Name() != fmt.Sprintf("%02d", i) {
+	if len(shardDirs) != shardCount {
+		t.Fatalf("got %d shard directories, want %d", len(shardDirs), shardCount)
+	}
+	for i, dir := range shardDirs {
+		if dir.Name() != fmt.Sprintf("%02d", i) {
 			t.Fatalf("unexpected shard directory %q", dir.Name())
 		}
 		s := &db.shards[i]
@@ -236,7 +243,10 @@ func openFilesUnder(t *testing.T, path string) int {
 	count := 0
 	for _, fd := range fds {
 		name, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
-		if err == nil && strings.HasPrefix(name, path+string(os.PathSeparator)) {
+		// The LOCK file guards single-process access; only log files count
+		// toward the descriptor budget.
+		if err == nil && strings.HasPrefix(name, path+string(os.PathSeparator)) &&
+			name != filepath.Join(path, lockName) {
 			count++
 		}
 	}
