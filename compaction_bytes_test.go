@@ -89,12 +89,12 @@ func TestByteAccountingMutationsAndRecovery(t *testing.T) {
 	if s.log.recordBytes != before {
 		t.Fatal("unchanged Set changed byte accounting")
 	}
-	check(db.Update(keys[0], func(value []byte, exists bool) (error, []byte) { return nil, append(value, make([]byte, 1024)...) }))
-	check(db.Update(keys[0], func(value []byte, exists bool) (error, []byte) { return nil, value[:3] }))
+	check(db.Update(keys[0], func(value []byte, exists bool) ([]byte, error) { return append(value, make([]byte, 1024)...), nil}))
+	check(db.Update(keys[0], func(value []byte, exists bool) ([]byte, error) { return value[:3], nil}))
 	check(db.Set(keys[0], uint64(7)))
-	check(db.Update(keys[0], func(value uint64, exists bool) (error, uint64) { return nil, value + 1 }))
+	check(db.Update(keys[0], func(value uint64, exists bool) (uint64, error) { return value + 1, nil}))
 	check(db.Set(keys[0], true))
-	check(db.Update(keys[0], func(value bool, exists bool) (error, bool) { return nil, !value }))
+	check(db.Update(keys[0], func(value bool, exists bool) (bool, error) { return !value, nil}))
 	check(db.Set(keys[0], []byte(nil)))
 	check(db.Delete(keys[0]))
 	before = s.log.recordBytes

@@ -169,7 +169,7 @@ func TestDBCompaction(t *testing.T) {
 	if err := db.Set(keys[2], []byte("future"), WithExpiration(future)); err != nil || s.log.size != before {
 		t.Fatalf("unchanged set appended after compaction: %v", err)
 	}
-	if err := db.Update(keys[3], func(value uint64, exists bool) (error, uint64) { return nil, value + 1 }); err != nil {
+	if err := db.Update(keys[3], func(value uint64, exists bool) (uint64, error) { return value + 1, nil}); err != nil {
 		t.Fatal(err)
 	}
 	checkSegmentAccounting(t, s)
@@ -199,7 +199,7 @@ func TestCompactionConcurrentUpdates(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			for i := range updates {
-				if err := db.Update(key, func(value uint64, exists bool) (error, uint64) { return nil, value + 1 }); err != nil {
+				if err := db.Update(key, func(value uint64, exists bool) (uint64, error) { return value + 1, nil}); err != nil {
 					errors <- err
 					return
 				}

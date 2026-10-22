@@ -22,21 +22,21 @@ func TestSyncOpenDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Update inserts a missing key.
-	if err := db.Update([]byte("u"), func(v uint64, exists bool) (error, uint64) {
+	if err := db.Update([]byte("u"), func(v uint64, exists bool) (uint64, error) {
 		if exists || v != 0 {
 			t.Fatalf("u: v=%d exists=%v", v, exists)
 		}
-		return nil, v + 1
+		return v + 1, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Set([]byte("u"), uint64(1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("u"), func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }); err != nil {
+	if err := db.Update([]byte("u"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("w"), func(v uint64, exists bool) (error, uint64) { return nil, 7 }); err != nil {
+	if err := db.Update([]byte("w"), func(v uint64, exists bool) (uint64, error) { return 7, nil}); err != nil {
 		t.Fatal(err)
 	}
 	if v, err := db.Get[uint64]([]byte("u")); err != nil || v != 2 {
@@ -70,10 +70,10 @@ func TestSyncPerOperation(t *testing.T) {
 	if err := db.Set([]byte("k"), uint64(1), WithSync(true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("k"), func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }, WithSync(true)); err != nil {
+	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}, WithSync(true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("k"), func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }, WithSync(true)); err != nil {
+	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}, WithSync(true)); err != nil {
 		t.Fatal(err)
 	}
 	if v, err := db.Get[uint64]([]byte("k")); err != nil || v != 3 {

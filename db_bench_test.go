@@ -206,7 +206,7 @@ func BenchmarkUpdateUint64(b *testing.B) {
 		n := min(benchmarkKeyCount, b.N-done)
 		b.StartTimer()
 		for i := range n {
-			if err := f.db.Update(f.keys[i][:], func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }); err != nil {
+			if err := f.db.Update(f.keys[i][:], func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -220,7 +220,7 @@ func BenchmarkUpdateUint64Unchanged(b *testing.B) {
 	f.resetValue(b, true, uint64(42))
 	b.StartTimer()
 	for i := 0; b.Loop(); i++ {
-		if err := f.db.Update(f.keys[i%benchmarkKeyCount][:], func(v uint64, exists bool) (error, uint64) { return nil, v }); err != nil {
+		if err := f.db.Update(f.keys[i%benchmarkKeyCount][:], func(v uint64, exists bool) (uint64, error) { return v, nil}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -244,7 +244,7 @@ func BenchmarkUpdateUint64Parallel(b *testing.B) {
 					if hotKey {
 						key = 0
 					}
-					if err := f.db.Update(f.keys[key][:], func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }); err != nil {
+					if err := f.db.Update(f.keys[key][:], func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
 						b.Error(err)
 						return
 					}

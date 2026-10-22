@@ -359,7 +359,7 @@ func (db *DB) Get[T Value, K Key](key K) (T, error) {
 // an insert uses the database default. An unchanged value with an unchanged
 // expiration does not append a record. A write error leaves the index
 // unchanged, but cannot undo any external effects of the callback.
-func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (error, T), opts ...Option) error {
+func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error), opts ...Option) error {
 	expiration, syncWrites, expirationSet := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
@@ -417,7 +417,7 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (error, T)
 	if exists && !expirationSet {
 		expiration = prevExp
 	}
-	fnErr, newValue := fn(value, exists)
+	newValue, fnErr := fn(value, exists)
 	if fnErr != nil {
 		return fnErr
 	}

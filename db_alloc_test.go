@@ -256,10 +256,10 @@ func TestDBUpdateUint64Allocations(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		fn   func(uint64, bool) (error, uint64)
+		fn   func(uint64, bool) (uint64, error)
 	}{
-		{"increment", func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }},
-		{"unchanged", func(v uint64, exists bool) (error, uint64) { return nil, v }},
+		{"increment", func(v uint64, exists bool) (uint64, error) { return v + 1, nil}},
+		{"unchanged", func(v uint64, exists bool) (uint64, error) { return v, nil}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			allocations := testing.AllocsPerRun(100, func() {

@@ -145,11 +145,11 @@ the callback, and stores the callback's result, inserting when the key is
 missing:
 
 ```go
-err := db.Update("counter", func(cur uint64, exists bool) (error, uint64) {
+err := db.Update("counter", func(cur uint64, exists bool) (uint64, error) {
 	if !exists {
-		return nil, 1
+		return 1, nil
 	}
-	return nil, cur + 1
+	return cur + 1, nil
 })
 ```
 
