@@ -2,6 +2,14 @@
 
 A small log-backed key-value embedded store in Go.
 
+## Single-process access
+
+`Open` takes an exclusive file lock on `<path>/LOCK` and holds it until
+`Close`. A second `Open` of the same path — from any process, or again in the
+same process — fails with an error wrapping `ErrDatabaseLocked`. The kernel
+releases the lock if the process dies, so it can never go stale. File locking
+is not reliable on NFS; use local storage.
+
 ## Typed values
 
 `Set`, `Get`, `Update`, and `Upsert` support `[]byte`, `string`, `int64`,
