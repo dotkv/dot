@@ -4,7 +4,6 @@
   const byID = (id) => document.getElementById(id);
   const chart = byID("chart");
   const context = chart.getContext("2d");
-  const follow = byID("follow");
   const scrubber = byID("scrubber");
   const metricButtons = [...document.querySelectorAll("[data-metric]")];
   const ranges = [...document.querySelectorAll("[data-range]")];
@@ -153,7 +152,6 @@
     if (!sample.ready) latest.disk_bytes = latest.obsolete_bytes = latest.entry_count = latest.index_mapped_bytes = null;
     notice(sample.disk_stale ? "Disk usage is unavailable; showing its previous reading." : "");
     byID("empty").hidden = true;
-    follow.disabled = false;
     requestDraw();
   }
 
@@ -174,22 +172,20 @@
     return { start, span: Math.max(interval, end - start) };
   }
 
-  function historyBounds(span) {
-    const end = Math.max(Date.now(), latest.time);
+  function historyBounds(span, end = Math.max(Date.now(), latest.time)) {
     return { start: Math.min(at(0).time, end - span), end };
   }
 
   function setFollowing(enabled) {
     if (!enabled && following) viewport = view ? { start: view.start, span: view.span } : visibleWindow();
     following = enabled;
-    follow.setAttribute("aria-pressed", String(enabled));
-    follow.textContent = enabled ? "Following" : "Follow latest";
     requestDraw();
   }
 
-  function navigate(start, span = visibleWindow().span) {
-    const bounds = historyBounds(span);
-    setFollowing(false);
+  function navigate(start, span, end) {
+    // Use the gesture's live edge so incoming samples cannot move its target.
+    const bounds = historyBounds(span, end);
+    setFollowing(start >= bounds.end - span);
     viewport = { start: Math.max(bounds.start, Math.min(bounds.end - span, start)), span };
   }
 
@@ -447,7 +443,6 @@
       requestDraw();
     });
   }
-  follow.addEventListener("click", () => { if (latest) setFollowing(!following); });
   chart.addEventListener("wheel", (event) => {
     if (!view || event.ctrlKey || event.metaKey) return;
     const window = visibleWindow();
@@ -457,7 +452,7 @@
     if (!delta) return;
     const pixels = delta * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? view.right - view.left : 1);
     event.preventDefault();
-    navigate(window.start + pixels / (view.right - view.left) * window.span);
+    navigate(window.start + pixels / (view.right - view.left) * window.span, window.span, bounds.end);
   }, { passive: false });
   chart.addEventListener("pointerdown", (event) => {
     if (!view || event.button !== 0) return;
@@ -468,7 +463,7 @@
     const history = historyBounds(window.span);
     if (history.end - history.start <= window.span) return;
     setFollowing(false);
-    pan = { id: event.pointerId, x: event.clientX, ...window };
+    pan = { id: event.pointerId, x: event.clientX, end: history.end, ...window };
     pointer = null;
     showHover();
     chart.classList.toggle("panning", true);
@@ -476,7 +471,7 @@
   });
   chart.addEventListener("pointermove", (event) => {
     if (pan && pan.id === event.pointerId) {
-      navigate(pan.start - (event.clientX - pan.x) / (view.right - view.left) * pan.span, pan.span);
+      navigate(pan.start - (event.clientX - pan.x) / (view.right - view.left) * pan.span, pan.span, pan.end);
       return;
     }
     const bounds = chart.getBoundingClientRect();
@@ -494,7 +489,7 @@
   }
   function scrubTo(event) {
     const fraction = Math.max(0, Math.min(1, (event.clientX - scrub.left) / scrub.width));
-    navigate(scrub.oldest + fraction * scrub.duration - scrub.offset, scrub.span);
+    navigate(scrub.oldest + fraction * scrub.duration - scrub.offset, scrub.span, scrub.oldest + scrub.duration);
   }
   scrubber.addEventListener("pointerdown", (event) => {
     if (!view || event.button !== 0) return;
@@ -530,7 +525,7 @@
     };
     if (!(event.key in starts)) return;
     event.preventDefault();
-    navigate(starts[event.key]);
+    navigate(starts[event.key], window.span, bounds.end);
   });
   new ResizeObserver(requestDraw).observe(chart);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", requestDraw);

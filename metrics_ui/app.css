@@ -68,10 +68,6 @@ button { font: inherit; font-size: 12px; cursor: pointer; }
 .button-group button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .metric-options { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 button:focus-visible, .scrubber:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.history-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.follow { min-width: 94px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: transparent; }
-.follow[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
-.follow:disabled { cursor: default; opacity: 0.5; }
 .disk { --series-color: var(--accent); }
 .obsolete { --series-color: var(--obsolete); }
 .entries, .delete { --series-color: var(--entries); }
