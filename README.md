@@ -4,19 +4,24 @@ A small log-backed key-value embedded store in Go.
 
 ## Typed values
 
-`Set`, `Get`, and `Update` support `[]byte`, `int64`, `uint64`, `float64`, and
-`bool`. Each record stores its value type. `Set` may replace an existing key
-with a different type; `Get[T]` and `Update[T]` require the stored type and return
-an error wrapping `ErrTypeMismatch` otherwise. Use `errors.Is` to check it.
-There are no implicit numeric conversions, and `Get[[]byte]` only reads byte
-values. Missing or expired keys return `ErrNotFound` before checking the type.
-A mismatched update leaves the value unchanged without invoking its callback.
+`Set`, `Get`, `Update`, and `Upsert` support `[]byte`, `string`, `int64`,
+`uint64`, `float64`, and `bool`. Each record stores its value type. `Set` may
+replace an existing key with a different type; `Get[T]`, `Update[T]`, and
+`Upsert[T]` require the stored type and return an error wrapping
+`ErrTypeMismatch` otherwise. Use `errors.Is` to check it. There are no
+implicit conversions: `string` and `[]byte` are distinct types, as are the
+numeric types. Missing or expired keys return `ErrNotFound` before checking
+the type. A mismatched update leaves the value unchanged without invoking
+its callback.
 
 ```go
-err := db.Set([]byte("counter"), uint64(42))
-value, err := db.Get[uint64]([]byte("counter"))
-_, err = db.Get[int64]([]byte("counter")) // errors.Is(err, dot.ErrTypeMismatch)
+err := db.Set("counter", uint64(42))
+value, err := db.Get[uint64]("counter")
+_, err = db.Get[int64]("counter") // errors.Is(err, dot.ErrTypeMismatch)
 ```
+
+Keys accept `[]byte` or `string`. Unlike values, the key's Go type does not
+affect identity: `"a"` and `[]byte("a")` address the same record.
 
 The 21-byte record header is `[crc32 4][type 1][keylen 4][vallen 4][expiration 8]`,
 followed by the key and value. Header integers are big-endian. The checksum
@@ -31,6 +36,7 @@ covers the type, lengths, expiration, key, and value. Type tags are fixed:
 | `0x05` | `float64` | 8 little-endian bytes containing its IEEE 754 bits |
 | `0x06` | `bool(false)` | Empty |
 | `0x07` | `bool(true)` | Empty |
+| `0x08` | `string` | Any length, including empty |
 
 Both boolean tags have the logical type `bool`. Empty bytes, false, true, and
 deletes remain distinct records. Invalid tags or payload lengths return an error
@@ -121,6 +127,40 @@ call methods on the same database from it. Byte slices passed to the callback
 are owned by the caller and may be mutated or retained; returned bytes are copied
 into the log. A panic leaves the stored value unchanged and releases the lock.
 A failed write cannot undo external effects performed by the callback.
+
+## Upsert
+
+`Upsert` combines lookup and write for read-modify-write cycles that must also
+handle missing keys, such as counters:
+
+```go
+err := db.Upsert("counter", func(cur uint64, exists bool) uint64 {
+	if !exists {
+		return 1
+	}
+	return cur + 1
+})
+```
+
+The callback receives the current value and `true`, or the zero value and
+`false` for a missing or expired key. A type mismatch fails without calling
+the callback. Options apply when inserting; an existing key keeps its
+expiration, like `Update`. Unchanged encodings skip the log append.
+
+## Scan
+
+`Scan` iterates over every live key/value pair with a range-over-func iterator:
+
+```go
+for k, v := range db.Scan() {
+	fmt.Printf("%s=%s\n", k, v)
+}
+```
+
+Pairs are yielded in shard order; order is otherwise unspecified, and the scan
+is not a point-in-time snapshot. Each shard's read lock is held while that
+shard is scanned. Expired entries are skipped. The yielded slices are reused
+across iterations; copy them to retain.
 
 ## Benchmarks
 

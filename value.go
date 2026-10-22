@@ -7,12 +7,14 @@ import (
 	"math"
 )
 
-// Value lists the types supported by Get, Set, and Update. Records retain their
-// type: Get and Update require the stored type, while Set may replace it.
-// Integers use eight little-endian bytes; float64 uses its IEEE 754 bits in the
-// same byte order. Boolean values are encoded entirely in the record's type tag.
+// Value lists the types supported by Get, Set, Update, and Upsert. Records
+// retain their type: Get and Update require the stored type, while Set may
+// replace it. Integers use eight little-endian bytes; float64 uses its IEEE
+// 754 bits in the same byte order. Boolean values are encoded entirely in
+// the record's type tag. Strings are stored as their bytes under a distinct
+// tag: a string value is not readable as []byte and vice versa.
 type Value interface {
-	[]byte | int64 | uint64 | float64 | bool
+	[]byte | string | int64 | uint64 | float64 | bool
 }
 
 // ErrInvalidValue indicates a malformed record type or value encoding.
@@ -33,12 +35,15 @@ const (
 	typeFloat64   recordType = 0x05
 	typeBoolFalse recordType = 0x06
 	typeBoolTrue  recordType = 0x07
+	typeString    recordType = 0x08
 )
 
 func (ty recordType) String() string {
 	switch ty {
 	case typeBytes:
 		return "[]byte"
+	case typeString:
+		return "string"
 	case typeInt64:
 		return "int64"
 	case typeUint64:
@@ -58,7 +63,7 @@ func (ty recordType) String() string {
 // Recovery and both normal read paths use the same disk-format rules.
 func (ty recordType) validate(size uint64, expiration int64) error {
 	switch ty {
-	case typeBytes:
+	case typeBytes, typeString:
 		return nil
 	case typeInt64, typeUint64, typeFloat64:
 		if size != 8 {
@@ -83,6 +88,8 @@ func checkType[T Value](stored recordType) error {
 	switch any(value).(type) {
 	case []byte:
 		requested = typeBytes
+	case string:
+		requested = typeString
 	case int64:
 		requested = typeInt64
 	case uint64:
@@ -109,11 +116,14 @@ type scalarValue struct {
 }
 
 // encodeValue borrows buf for numeric scalars and passes byte slices through
-// unchanged. Booleans have no payload; their value is carried by the tag.
+// unchanged. Strings are converted once; the record writer copies the result.
+// Booleans have no payload; their value is carried by the tag.
 func encodeValue[T Value](value T, buf *[8]byte) (recordType, []byte, error) {
 	switch v := any(value).(type) {
 	case []byte:
 		return typeBytes, v, nil
+	case string:
+		return typeString, []byte(v), nil
 	case int64:
 		binary.LittleEndian.PutUint64(buf[:], uint64(v))
 		return typeInt64, buf[:], nil
