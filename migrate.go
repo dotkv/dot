@@ -10,10 +10,6 @@ import (
 	"strconv"
 )
 
-// ErrMigrationRequired means Open cannot use the requested or stored layout
-// without a data migration. Automatic data migrations are not supported.
-var ErrMigrationRequired = errors.New("database migration required")
-
 const (
 	// Version 1 pins the record encoding, 16-byte alignment, and XXH64 shard
 	// routing. Layout fields below must also match before logs can be opened.
@@ -53,7 +49,7 @@ func (db *DB) migrate(options Options) (int, error) {
 			if entry.Name() == lockName || (entry.Name() == metaTempName && entry.Type().IsRegular()) {
 				continue
 			}
-			return 0, fmt.Errorf("%w: META is missing from a nonempty database directory; cannot determine its layout", ErrMigrationRequired)
+			return 0, errors.New("META is missing from a nonempty database directory; cannot determine its layout")
 		}
 		if err := db.migrateWriteMeta(currentMeta(options.shardCount)); err != nil {
 			return 0, err
@@ -81,17 +77,17 @@ func (db *DB) migrate(options Options) (int, error) {
 		return 0, fmt.Errorf("invalid meta file: trailing data")
 	}
 	if meta.Version != metaVersion {
-		return 0, fmt.Errorf("%w: unsupported meta version %d (want %d)", ErrMigrationRequired, meta.Version, metaVersion)
+		return 0, fmt.Errorf("unsupported meta version %d (want %d)", meta.Version, metaVersion)
 	}
 	if !validShardCount(meta.ShardCount) {
 		return 0, fmt.Errorf("invalid meta shard count %d: must be a power of two between 1 and %d", meta.ShardCount, maxShardCount)
 	}
 	if meta.SegmentIDBits != segmentIDBits || meta.SegmentSizeBits != segmentSizeBits || meta.RecordAlignmentBits != logAlignmentBits {
-		return 0, fmt.Errorf("%w: unsupported segment layout (ID bits %d, size bits %d, alignment bits %d)",
-			ErrMigrationRequired, meta.SegmentIDBits, meta.SegmentSizeBits, meta.RecordAlignmentBits)
+		return 0, fmt.Errorf("unsupported segment layout (ID bits %d, size bits %d, alignment bits %d)",
+			meta.SegmentIDBits, meta.SegmentSizeBits, meta.RecordAlignmentBits)
 	}
 	if options.shardCountSet && options.shardCount != meta.ShardCount {
-		return 0, fmt.Errorf("%w: changing shard count from %d to %d requires rewriting database data", ErrMigrationRequired, meta.ShardCount, options.shardCount)
+		return 0, fmt.Errorf("changing shard count from %d to %d requires rewriting database data", meta.ShardCount, options.shardCount)
 	}
 	// Do not silently ignore shard directories outside the declared layout.
 	entries, err := os.ReadDir(db.path)

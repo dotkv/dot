@@ -3,17 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A small, log-backed key-value store embedded in your Go application.">
+  <meta name="description" content="A small, on-disk key-value store embedded in your Go application.">
   <meta name="color-scheme" content="light dark">
   <title>Getting started · Dot</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="dot128.png" type="image/png" sizes="128x128">
+  <link rel="icon" href="dot512.png" type="image/png" sizes="512x512">
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="index.html"><span class="brand-dot" aria-hidden="true"></span>Dot <span class="brand-label">Documentation</span></a>
+    <a class="brand" href="index.html"><img class="brand-dot" src="dot128.png" width="15" height="15" alt="">Dot <span class="brand-label">Documentation</span></a>
     <div class="header-actions">
       <a href="https://github.com/dotkv/dot">GitHub <span aria-hidden="true">↗</span></a>
       <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>Menu</button>
@@ -29,40 +30,24 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html">Development</a>
       </nav>
-      <p class="sidebar-note">A small, log-backed<br>key-value store for Go.</p>
+      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
         <p class="eyebrow">Dot / Documentation</p>
         <h1>Getting started</h1>
-        <p class="lead">A small, log-backed key-value store embedded in your Go application.</p>
+        <p class="lead">A small, on-disk key-value store embedded in your Go application.</p>
       </div>
       <article aria-label="Getting started">
-<p>Dot stores typed values in sharded, append-only logs and rebuilds its in-memory
-index when opened. It includes atomic updates, expiration, background compaction,
-and an embedded metrics dashboard.</p>
-
-<h2 id="run-the-demo">Run the demo</h2>
-
-<p>Use the Go toolchain required by <code>go.mod</code> (currently Go 1.27.2). Dot uses Unix
-file locking and anonymous mmap; the benchmark suite targets Linux.
-From a checkout, start the bundled workload and dashboard:</p>
-
-<pre><code class="language-sh">git clone https://github.com/dotkv/dot.git
-cd dot
-go run -buildvcs=true ./fiddle</code></pre>
-
-<p>Open <a href="http://localhost:8080/dot/metrics/">localhost:8080/dot/metrics/</a>.
-The demo creates a temporary database under <code>/tmp</code> and continuously exercises
-sets, gets, updates, and deletes. Press Ctrl+C to stop.</p>
+<p>Dot adds persistent typed values, atomic updates, and expiration to your Go
+application, with background cleanup and an optional metrics dashboard.</p>
 
 <h2 id="open-a-database">Open a database</h2>
 
-<p>Add Dot to your application:</p>
+<p>Add Dot using the Go toolchain required by
+<a href="https://github.com/dotkv/dot/blob/master/go.mod">go.mod</a>:</p>
 
 <pre><code class="language-sh">go get github.com/dotkv/dot</code></pre>
-
-<p>This complete program writes a string and reads it back:</p>
 
 <pre><code class="language-go">package main
 
@@ -90,51 +75,34 @@ func main() {
 	fmt.Println(greeting) // hello
 }</code></pre>
 
-<p>To use a local checkout from another Go module, point a local replacement at it
-(adjust <code>../dot</code> to the checkout&#x27;s path), then add the program and tidy:</p>
-
-<pre><code class="language-sh">go mod edit -require=github.com/dotkv/dot@v0.0.0 -replace=github.com/dotkv/dot=../dot
-go mod tidy</code></pre>
-
-<p><code>Open</code> creates a missing directory or recovers an existing database. One process
-can open a database path at a time; goroutines share the same <code>*dot.DB</code>.
-<code>Close</code> releases resources and keeps the files. <code>Destroy</code> closes the database
-and removes its directory.</p>
+<p><code>Open</code> creates a missing directory or reopens an existing database.
+Share one <code>*dot.DB</code> across goroutines; a database path can only be opened
+once at a time. <code>Close</code> releases resources and keeps the data.
+<code>Destroy</code> closes the database and removes its directory.</p>
 
 <h2 id="configure-writes">Configure writes</h2>
 
-<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;,
-    dot.WithShardCount(16),
-    dot.WithSync(true),
-    dot.WithCompactionThreshold(0.4, 1&lt;&lt;20),
-)</code></pre>
+<p>Options passed to <code>Open</code> set defaults. Write options can also be set
+on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> calls:</p>
 
-<div class="table-scroll" role="region" aria-label="Reference table" tabindex="0">
+<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithSync(true))</code></pre>
+
+<div class="table-scroll" role="region" aria-label="Database options" tabindex="0">
 <table>
-<thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Behavior</th></tr></thead>
+<thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Use</th></tr></thead>
 <tbody>
-
-<tr><td><code>WithShardCount(count)</code></td><td>64</td><td>A power of two from 1 to 1024. Sets the layout of a new database; an existing database keeps its stored count.</td></tr>
-
-<tr><td><code>WithSync(enabled)</code></td><td>false</td><td>Syncs changed writes before returning. Can also be set per mutation.</td></tr>
-
-<tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>An absolute expiration time. Can be set on Open, Set, or Update; a zero time clears it.</td></tr>
-
-<tr><td><code>WithCompactionThreshold(ratio, bytes)</code></td><td>0.33, 1 MiB</td><td>Queues maintenance above the obsolete-byte ratio and minimum bytes per shard.</td></tr>
-
+<tr><td><code>WithSync(enabled)</code></td><td>false</td><td>Sync changed writes before returning.</td></tr>
+<tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>Set a fixed deadline for Set and Update; a zero time clears it.</td></tr>
+<tr><td><code>WithShardCount(count)</code></td><td>64</td><td>Choose a new database's shard count: a power of two from 1 to 1024.</td></tr>
+<tr><td><code>WithCompactionThreshold(ratio, bytes)</code></td><td>0.33, 1 MiB</td><td>Adjust background cleanup thresholds per shard.</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>By default, successful writes rely on the OS page cache and are not individually
-synced. Use <code>WithSync(true)</code> when a mutation must sync its log before returning.
-See <a href="storage.html">storage and recovery</a> for the durability and maintenance details.</p>
-
-<h2 id="next-steps">Next steps</h2>
-
-<p>Read <a href="usage.html">usage</a> for typed values, atomic updates, expiration, and scans.
-Mount the <a href="metrics.html">metrics dashboard</a> to inspect a running database, or
-see <a href="development.html">development</a> for tests, benchmarks, and documentation setup.</p>
+<p>Start with the defaults, then choose <code>WithSync(true)</code> if each write must
+reach storage before returning. See <a href="storage.html">storage and recovery</a>
+for durability and cleanup, <a href="usage.html">usage</a> for values and atomic
+updates, and <a href="metrics.html">metrics</a> for the embedded dashboard.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="usage.html" rel="next"><span>Next</span>Usage <span aria-hidden="true">→</span></a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/index.html">Edit this page <span aria-hidden="true">↗</span></a></footer>
@@ -142,10 +110,8 @@ see <a href="development.html">development</a> for tests, benchmarks, and docume
     <aside class="toc">
       <p class="nav-label">On this page</p>
       <nav aria-label="On this page">
-        <a href="#run-the-demo">Run the demo</a>
         <a href="#open-a-database">Open a database</a>
         <a href="#configure-writes">Configure writes</a>
-        <a href="#next-steps">Next steps</a>
       </nav>
     </aside>
   </div>

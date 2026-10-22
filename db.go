@@ -24,7 +24,9 @@ const (
 	maxShardCount         = 1 << 10
 )
 
-// ErrNotFound is returned directly by Get and Update when the key does not exist.
+// ErrNotFound is returned directly by Get for a missing or expired key.
+// Compare it with ==. Update treats these keys as absent; its callback may
+// return ErrNotFound to reject an insert, and that error is returned unchanged.
 var ErrNotFound = errors.New("key not found")
 
 // ErrDatabaseLocked is returned by Open when another process holds the
@@ -97,9 +99,8 @@ type Option func(*Options)
 // WithShardCount sets the number of key shards when Open creates a database.
 // count must be a power of two between 1 and 1024; the default is 64.
 // Existing databases use their stored count when this option is omitted.
-// An explicit count must match the stored count: changing it requires rewriting
-// the database and returns ErrMigrationRequired. This option has no effect on
-// key operations.
+// An explicit count must match the stored count or Open fails; changing it
+// requires rewriting the database. This option has no effect on key operations.
 func WithShardCount(count int) Option {
 	return func(o *Options) {
 		o.shardCount = count
@@ -120,11 +121,11 @@ func WithCompactionThreshold(ratio float64, minObsoleteBytes uint64) Option {
 	}
 }
 
-// WithExpiration sets the time at which a key expires. When passed to Open, it
-// sets the default expiration for Set calls on that database; when passed to
-// Set or Update, it overrides the database default. On Update it sets the
-// expiration of the written record whether the key already exists or not. A
-// zero time.Time clears expiration.
+// WithExpiration sets a fixed deadline at which a key becomes unreadable.
+// For a TTL, compute time.Now().Add(ttl) on each write. When passed to Open,
+// the same deadline applies to every Set and to Update inserts unless overridden.
+// Update preserves an existing key's deadline unless this option is passed.
+// A zero time.Time clears expiration.
 func WithExpiration(t time.Time) Option {
 	var ns int64
 	if !t.IsZero() {
@@ -141,7 +142,7 @@ func WithExpiration(t time.Time) Option {
 
 // WithSync makes writes durable before returning: the shard log is fsynced
 // after the record is appended. When passed to Open it applies to every Set,
-// Delete, Update, and Set on the database; when passed to one of those
+// Delete, and Update on the database; when passed to one of those
 // calls it applies to that call only, overriding the database default.
 // WithSync(false) disables a database default for a single call. Syncing
 // costs a storage flush per write and is much slower than the default, which
@@ -208,7 +209,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	}
 	count, err := db.migrate(options)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("migrate: %w", err), db.Close())
+		return nil, errors.Join(fmt.Errorf("migration failed: %w", err), db.Close())
 	}
 	db.shardCountBits = uint(bits.TrailingZeros(uint(count)))
 	db.shards = make([]Shard, count)
@@ -337,8 +338,8 @@ func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	return nil
 }
 
-// Get returns the value decoded as T. A missing key returns the zero value of T
-// and ErrNotFound directly, without wrapping the sentinel. A different stored
+// Get returns the value decoded as T. A missing or expired key returns the zero
+// value of T and ErrNotFound directly; compare with ==. A different stored
 // type returns an error wrapping ErrTypeMismatch, with no implicit conversion.
 // Byte slices are owned by the caller. Scalar encodings are described by Value.
 func (db *DB) Get[T Value, K Key](key K) (T, error) {

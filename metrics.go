@@ -43,7 +43,7 @@ func WithMetricsInterval(interval time.Duration) MetricsOption {
 	return func(o *metricsOptions) { o.interval = interval }
 }
 
-//go:embed metrics_ui/index.html metrics_ui/app.css metrics_ui/app.js
+//go:embed metrics_ui/index.html metrics_ui/app.css metrics_ui/app.js metrics_ui/*.png
 var metricsAssets embed.FS
 
 // The dashboard and its build metadata are immutable for the binary's lifetime.
@@ -159,6 +159,8 @@ func (h *metricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name, contentType = "app.css", "text/css; charset=utf-8"
 	case "/app.js":
 		name, contentType = "app.js", "text/javascript; charset=utf-8"
+	case "/dot128.png", "/dot512.png":
+		name, contentType = r.URL.Path[1:], "image/png"
 	default:
 		http.NotFound(w, r)
 		return

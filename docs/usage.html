@@ -6,14 +6,15 @@
   <meta name="description" content="Read, write, update, and expire typed values.">
   <meta name="color-scheme" content="light dark">
   <title>Usage · Dot</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="dot128.png" type="image/png" sizes="128x128">
+  <link rel="icon" href="dot512.png" type="image/png" sizes="512x512">
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="index.html"><span class="brand-dot" aria-hidden="true"></span>Dot <span class="brand-label">Documentation</span></a>
+    <a class="brand" href="index.html"><img class="brand-dot" src="dot128.png" width="15" height="15" alt="">Dot <span class="brand-label">Documentation</span></a>
     <div class="header-actions">
       <a href="https://github.com/dotkv/dot">GitHub <span aria-hidden="true">↗</span></a>
       <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>Menu</button>
@@ -29,7 +30,7 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html">Development</a>
       </nav>
-      <p class="sidebar-note">A small, log-backed<br>key-value store for Go.</p>
+      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
@@ -40,34 +41,31 @@
       <article aria-label="Usage">
 <h2 id="typed-values">Typed values</h2>
 
-<p><code>Set</code>, <code>Get</code>, and <code>Update</code> support <code>[]byte</code>, <code>string</code>, <code>int64</code>,
-<code>uint64</code>, <code>float64</code>, and <code>bool</code>. Each record stores its value type. <code>Set</code> may
-replace an existing key with a different type; <code>Get[T]</code> and <code>Update[T]</code>
-require the stored type and return an error wrapping
-<code>ErrTypeMismatch</code> otherwise. Use <code>errors.Is</code> to check it. There are no
-implicit conversions: <code>string</code> and <code>[]byte</code> are distinct types, as are the
-numeric types. <code>Get</code> returns <code>ErrNotFound</code> for missing or expired keys before
-checking the type; <code>Update</code> treats those keys as absent. A mismatched update
-leaves the value unchanged without invoking its callback.</p>
+<p>Keys accept <code>string</code> or <code>[]byte</code>; <code>"a"</code> and
+<code>[]byte("a")</code> address the same key. Values support <code>[]byte</code>,
+<code>string</code>, <code>int64</code>, <code>uint64</code>, <code>float64</code>, and
+<code>bool</code>.</p>
 
-<pre><code class="language-go">err := db.Set(&quot;counter&quot;, uint64(42))
-value, err := db.Get[uint64](&quot;counter&quot;)
-_, err = db.Get[int64](&quot;counter&quot;) // errors.Is(err, dot.ErrTypeMismatch)</code></pre>
+<pre><code class="language-go">if err := db.Set(&quot;counter&quot;, uint64(42)); err != nil {
+    return err
+}
+value, err := db.Get[uint64](&quot;counter&quot;)</code></pre>
 
-<p>Keys accept <code>[]byte</code> or <code>string</code>. Unlike values, the key&#x27;s Go type does not
-affect identity: <code>&quot;a&quot;</code> and <code>[]byte(&quot;a&quot;)</code> address the same record.</p>
+<p><code>Get[T]</code> and <code>Update[T]</code> require the stored type; there are no
+implicit conversions. A mismatch returns an error wrapping <code>ErrTypeMismatch</code>;
+check it with <code>errors.Is(err, dot.ErrTypeMismatch)</code>. <code>Set</code> can
+replace a value with a different type. Byte slices returned by <code>Get</code>
+belong to the caller and may be changed or retained.</p>
 
 <h2 id="delete-and-handle-errors">Delete and handle errors</h2>
 
-<p>Deleting a missing key succeeds. Use <code>errors.Is</code> to distinguish a miss from
-a type mismatch or an I/O error:</p>
+<p><code>Get</code> returns <code>ErrNotFound</code> directly for a missing or expired key,
+so compare with <code>==</code>. Other errors may wrap a cause; use
+<code>errors.Is</code> when checking those.</p>
 
-<pre><code class="language-go">if err := db.Delete(&quot;greeting&quot;); err != nil {
-    return err
-}
-value, err := db.Get[string](&quot;greeting&quot;)
+<pre><code class="language-go">value, err := db.Get[string](&quot;greeting&quot;)
 switch {
-case errors.Is(err, dot.ErrNotFound):
+case err == dot.ErrNotFound:
     fmt.Println(&quot;missing or expired&quot;)
 case err != nil:
     return err
@@ -75,97 +73,81 @@ default:
     fmt.Println(value)
 }</code></pre>
 
-<div class="table-scroll" role="region" aria-label="Reference table" tabindex="0">
+<p><code>db.Delete("greeting")</code> removes a key. Deleting a missing or expired key succeeds.</p>
+
+<div class="table-scroll" role="region" aria-label="Common errors" tabindex="0">
 <table>
 <thead><tr><th scope="col">Error</th><th scope="col">Meaning</th></tr></thead>
 <tbody>
-
-<tr><td><code>ErrNotFound</code></td><td>A requested key is missing or expired.</td></tr>
-
-<tr><td><code>ErrTypeMismatch</code></td><td>Get or Update requested a different type from the stored value.</td></tr>
-
-<tr><td><code>ErrDatabaseLocked</code></td><td>Another Open holds the lock for this database path.</td></tr>
-
-<tr><td><code>ErrMigrationRequired</code></td><td>The on-disk layout is incompatible with the requested layout or this implementation.</td></tr>
-
-<tr><td><code>ErrInvalidValue</code></td><td>A record type or value encoding is invalid.</td></tr>
-
-<tr><td><code>os.ErrClosed</code></td><td>An operation was attempted after the database closed.</td></tr>
-
+<tr><td><code>ErrNotFound</code></td><td>The key is missing or expired.</td></tr>
+<tr><td><code>ErrTypeMismatch</code></td><td>The requested type differs from the stored value.</td></tr>
+<tr><td><code>ErrDatabaseLocked</code></td><td>Another Open holds this database path.</td></tr>
+<tr><td><code>ErrInvalidValue</code></td><td>A stored record has invalid data.</td></tr>
+<tr><td><code>os.ErrClosed</code></td><td>The database has been closed.</td></tr>
 </tbody>
 </table>
 </div>
 
 <h2 id="expiration-and-sync">Expiration and sync</h2>
 
-<p>Expiration is an absolute <code>time.Time</code>, not a relative TTL. Compute a deadline
-when writing the key:</p>
+<p><code>WithExpiration</code> takes a fixed <code>time.Time</code>: the key becomes unreadable
+at that time, even before cleanup removes its data. For a fresh 15-minute lifetime,
+compute the deadline on each write:</p>
 
 <pre><code class="language-go">err := db.Set(&quot;session&quot;, &quot;active&quot;,
     dot.WithExpiration(time.Now().Add(15*time.Minute)),
     dot.WithSync(true),
 )</code></pre>
 
-<p>Expired keys read as missing before background cleanup reclaims their space.
-An expiration passed to <code>Open</code> is a shared absolute deadline, not a new duration
-for every write. <code>Set</code> uses the database default unless overridden. <code>Update</code>
-keeps an existing key&#x27;s expiration unless explicitly overridden; an insert uses
-the database default. Clear an expiration with <code>dot.WithExpiration(time.Time{})</code>.</p>
+<p>A deadline passed to <code>Open</code> is shared by all writes that use that default;
+it is not recalculated for each key. <code>Set</code> uses the default unless overridden.
+<code>Update</code> preserves an existing key's deadline; an insert uses the default.
+Pass <code>WithExpiration</code> to override either, or
+<code>dot.WithExpiration(time.Time{})</code> to clear expiration.</p>
 
-<p>Per-call <code>WithSync</code> overrides the database setting, including
-<code>WithSync(false)</code> on a database opened with synchronous writes.</p>
+<p>Writes use the OS page cache by default. <code>WithSync(true)</code> syncs changed
+writes before returning. A per-call <code>WithSync(false)</code> overrides a database
+opened with synchronous writes.</p>
 
 <h2 id="atomic-updates">Atomic updates</h2>
 
-<p><code>Update</code> atomically reads the current value, calls the callback, and stores
-the callback&#x27;s result, inserting when the key is missing:</p>
+<p><code>Update</code> reads, transforms, and writes one key atomically:</p>
 
-<pre><code class="language-go">err := db.Update(&quot;counter&quot;, func(cur uint64, _ bool) (uint64, error) {
-	return cur + 1, nil
+<pre><code class="language-go">err := db.Update(&quot;counter&quot;, func(current uint64, exists bool) (uint64, error) {
+    return current + 1, nil
 })</code></pre>
 
-<p>The callback receives the current value and <code>true</code>, or the zero value and
-<code>false</code> for a missing or expired key. Returning a non-nil error aborts the
-write and propagates the error; the returned value is ignored. To update only
-existing keys, return <code>ErrNotFound</code> (or any error) when <code>exists</code> is false:</p>
+<p>A missing or expired key passes the type's zero value with <code>exists == false</code>:
+<code>0</code> for numbers, <code>""</code> for strings, <code>false</code> for booleans, or
+<code>nil</code> for byte slices. Returning an error aborts the write and returns that
+error unchanged. To update only existing keys:</p>
 
-<pre><code class="language-go">err = db.Update([]byte(&quot;message&quot;), func(cur []byte, exists bool) ([]byte, error) {
-	if !exists {
-		return nil, dot.ErrNotFound
-	}
-	return append(cur, &#x27;!&#x27;), nil
+<pre><code class="language-go">err = db.Update(&quot;message&quot;, func(current string, exists bool) (string, error) {
+    if !exists {
+        return &quot;&quot;, dot.ErrNotFound
+    }
+    return current + &quot;!&quot;, nil
 })</code></pre>
 
-<p><code>Update</code> supports the same value types as <code>Get</code> and <code>Set</code>. A type mismatch or
-malformed encoding fails before the callback runs. <code>WithExpiration</code> sets the
-expiration of the written record; otherwise an existing key keeps its
-expiration and an insert uses the database default. Unchanged encodings with
-an unchanged expiration skip the log append. Returning nil bytes with a nil
-error stores an empty value.</p>
-
-<p>The callback runs once under an exclusive shard lock. Keep it short and do not
-call methods on the same database from it. Byte slices passed to the callback
-are owned by the caller and may be mutated or retained; returned bytes are copied
-into the log. A panic leaves the stored value unchanged and releases the lock.
-A failed write cannot undo external effects performed by the callback.</p>
+<p>The callback runs once while writes to its shard are locked. Keep it short and
+do not call methods on the same database from it. A type mismatch fails before
+the callback runs. Byte slices passed to the callback belong to the caller;
+returned bytes are copied. Returning nil bytes with no error stores an empty value.</p>
 
 <h2 id="scan">Scan</h2>
 
-<p><code>Scan</code> iterates over every live key/value pair with a range-over-func iterator:</p>
-
-<pre><code class="language-go">for k, v := range db.Scan() {
-	fmt.Printf(&quot;%s=%x\n&quot;, k, v)
+<pre><code class="language-go">for key, value := range db.Scan() {
+    fmt.Printf(&quot;%s=%x\n&quot;, key, value)
 }</code></pre>
 
-<p>Pairs are yielded in shard order; order is otherwise unspecified, and the scan
-is not a point-in-time snapshot. Each shard&#x27;s read lock is held while that
-shard is scanned. Expired entries are skipped. The yielded slices are reused
-across iterations; copy them to retain.</p>
+<p><code>Scan</code> skips expired keys and yields raw encoded values, rather than the
+typed values returned by <code>Get[T]</code>. Strings and byte slices contain their
+original bytes; numbers use eight little-endian bytes, and booleans have empty
+payloads. Prefer typed reads when you need the logical value.</p>
 
-<p><code>Scan</code> returns raw encoded value payloads. It does not perform the typed decoding
-of <code>Get[T]</code>: numbers are eight little-endian bytes and boolean payloads are empty.
-Use typed reads when the logical value is needed. See the
-<a href="storage.html#record-format">record format</a> for the encodings.</p>
+<p>A scan is unordered and is not a snapshot. It holds each shard's read lock
+while visiting it, so do not write to the same database inside the loop.
+Yielded slices are reused; copy them to retain them.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="index.html" rel="prev"><span>Previous</span>Getting started</a><a href="storage.html" rel="next"><span>Next</span>Storage &amp; recovery <span aria-hidden="true">→</span></a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/usage.html">Edit this page <span aria-hidden="true">↗</span></a></footer>

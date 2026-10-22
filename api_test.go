@@ -32,7 +32,7 @@ func TestStringValues(t *testing.T) {
 	if _, err := db.Get[string]([]byte("byteskey")); !errors.Is(err, ErrTypeMismatch) {
 		t.Fatalf("Get[string] on []byte: error=%v, want ErrTypeMismatch", err)
 	}
-	if err := db.Update(key, func(cur string, exists bool) (string, error) { return cur + " world", nil}); err != nil {
+	if err := db.Update(key, func(cur string, exists bool) (string, error) { return cur + " world", nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := db.Get[string](key); err != nil || got != " world" {
@@ -49,7 +49,7 @@ func TestStringKeys(t *testing.T) {
 	if got, err := db.Get[uint64]([]byte("skey")); err != nil || got != 42 {
 		t.Fatalf("Get with []byte key: got %d error=%v", got, err)
 	}
-	if err := db.Update("skey", func(cur uint64, exists bool) (uint64, error) { return cur + 1, nil}); err != nil {
+	if err := db.Update("skey", func(cur uint64, exists bool) (uint64, error) { return cur + 1, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Update("skey", func(cur uint64, exists bool) (uint64, error) {
@@ -66,7 +66,7 @@ func TestStringKeys(t *testing.T) {
 	if err := db.Delete("skey"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Get[uint64]([]byte("skey")); !errors.Is(err, ErrNotFound) {
+	if _, err := db.Get[uint64]([]byte("skey")); err != ErrNotFound {
 		t.Fatalf("after Delete: error=%v, want ErrNotFound", err)
 	}
 }
@@ -116,7 +116,7 @@ func TestUpdate(t *testing.T) {
 	// Unchanged encoding appends no record.
 	s, _ := db.shard(key)
 	before := s.log.size
-	if err := db.Update(key, func(cur uint64, exists bool) (uint64, error) { return cur, nil}); err != nil {
+	if err := db.Update(key, func(cur uint64, exists bool) (uint64, error) { return cur, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if s.log.size != before {
@@ -158,7 +158,7 @@ func TestUpdate(t *testing.T) {
 	if err := db.Set([]byte("ttl"), "v", WithExpiration(future)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (string, error) { return "v2", nil}); err != nil {
+	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (string, error) { return "v2", nil }); err != nil {
 		t.Fatal(err)
 	}
 	s2, hash := db.shard([]byte("ttl"))
@@ -169,7 +169,7 @@ func TestUpdate(t *testing.T) {
 
 	// WithExpiration on Update sets the expiration of an existing key.
 	later := future.Add(time.Hour)
-	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (string, error) { return "v3", nil},
+	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (string, error) { return "v3", nil },
 		WithExpiration(later)); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestUpdate(t *testing.T) {
 
 	// Options apply on insert.
 	ttl := time.Now().Add(2 * time.Hour)
-	if err := db.Update([]byte("ttl-new"), func(cur string, exists bool) (string, error) { return "n", nil},
+	if err := db.Update([]byte("ttl-new"), func(cur string, exists bool) (string, error) { return "n", nil },
 		WithExpiration(ttl)); err != nil {
 		t.Fatal(err)
 	}

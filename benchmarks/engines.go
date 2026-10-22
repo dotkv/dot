@@ -55,7 +55,7 @@ type dotEngine struct{ db *dot.DB }
 func (e *dotEngine) Set(key, value []byte) error { return e.db.Set(key, value) }
 func (e *dotEngine) Get(key []byte) ([]byte, bool, error) {
 	v, err := e.db.Get[[]byte](key)
-	if errors.Is(err, dot.ErrNotFound) {
+	if err == dot.ErrNotFound {
 		return nil, false, nil
 	}
 	return v, err == nil, err
@@ -63,7 +63,7 @@ func (e *dotEngine) Get(key []byte) ([]byte, bool, error) {
 func (e *dotEngine) SetUint64(key []byte, value uint64) error { return e.db.Set(key, value) }
 func (e *dotEngine) GetUint64(key []byte) (uint64, bool, error) {
 	v, err := e.db.Get[uint64](key)
-	if errors.Is(err, dot.ErrNotFound) {
+	if err == dot.ErrNotFound {
 		return 0, false, nil
 	}
 	return v, err == nil, err

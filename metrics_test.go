@@ -130,6 +130,9 @@ func TestMetricsHTTP(t *testing.T) {
 		{"GET", "/nested/dot/", "text/html", http.StatusOK},
 		{"GET", "/nested/dot/app.css", "text/css", http.StatusOK},
 		{"GET", "/nested/dot/app.js", "text/javascript", http.StatusOK},
+		{"GET", "/nested/dot/dot128.png", "image/png", http.StatusOK},
+		{"GET", "/nested/dot/dot512.png", "image/png", http.StatusOK},
+		{"HEAD", "/nested/dot/dot128.png", "image/png", http.StatusOK},
 		{"HEAD", "/nested/dot/", "text/html", http.StatusOK},
 		{"GET", "/nested/dot/missing", "", http.StatusNotFound},
 		{"GET", "/nested/dot/metrics_ui/", "", http.StatusNotFound},
@@ -151,12 +154,12 @@ func TestMetricsHTTP(t *testing.T) {
 func TestMetricsPrefixedDashboard(t *testing.T) {
 	db := newInternalDB(t, WithShardCount(1))
 	mux := http.NewServeMux()
-	// Match fiddle's mount: strip the prefix while preserving the path's slash.
+	// Match the example's mount: strip the prefix while preserving the path's slash.
 	const prefix = "/dot/metrics"
 	mux.Handle(prefix+"/", http.StripPrefix(prefix, db.MetricsHandler()))
 	server := httptest.NewServer(mux)
 	defer server.Close()
-	for _, asset := range []string{"", "app.css", "app.js"} {
+	for _, asset := range []string{"", "app.css", "app.js", "dot128.png", "dot512.png"} {
 		response, err := server.Client().Get(server.URL + prefix + "/" + asset)
 		if err != nil {
 			t.Fatal(err)

@@ -5,14 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Dot · Metrics</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="dot128.png" type="image/png" sizes="128x128">
+  <link rel="icon" href="dot512.png" type="image/png" sizes="512x512">
   <link rel="stylesheet" href="app.css">
   <script src="app.js" defer></script>
 </head>
 <body>
   <main>
     <header class="page-header">
-      <h1 class="brand"><span class="dot" aria-hidden="true"></span>Dot<span class="version">{{.Version}}</span></h1>
+      <h1 class="brand"><img class="dot" src="dot128.png" width="13" height="13" alt="">Dot<span class="version">{{.Version}}</span></h1>
       <div class="connection" role="status" aria-live="polite">
         <span id="status-dot" class="status-dot" aria-hidden="true"></span>
         <span id="status">Connecting…</span>

@@ -39,7 +39,6 @@ if (navigator.clipboard?.writeText) {
     button.className = "copy-button";
     button.textContent = "Copy";
     button.setAttribute("aria-label", "Copy code to clipboard");
-    code.parentElement.classList.add("has-copy");
     code.parentElement.append(button);
     button.addEventListener("click", async () => {
       try {
@@ -61,4 +60,44 @@ if (navigator.clipboard?.writeText) {
       }, 2500);
     });
   });
+}
+
+const sections = Array.from(document.querySelectorAll('.toc a[href^="#"]'), (link) => ({
+  link,
+  heading: document.getElementById(link.hash.slice(1)),
+})).filter(({ heading }) => heading);
+
+if (sections.length) {
+  let currentLink;
+  let scheduled = false;
+
+  function updateSection() {
+    scheduled = false;
+    const readingLine = parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) + 1;
+    let current = sections[0];
+    for (const section of sections) {
+      if (section.heading.getBoundingClientRect().top > readingLine) break;
+      current = section;
+    }
+    if (window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2) {
+      current = sections[sections.length - 1];
+    }
+    if (current.link !== currentLink) {
+      currentLink?.removeAttribute("aria-current");
+      current.link.setAttribute("aria-current", "location");
+      currentLink = current.link;
+    }
+  }
+
+  function scheduleSection() {
+    if (scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(updateSection);
+  }
+
+  window.addEventListener("scroll", scheduleSection, { passive: true });
+  window.addEventListener("resize", scheduleSection);
+  window.addEventListener("hashchange", scheduleSection);
+  window.addEventListener("load", scheduleSection);
+  updateSection();
 }

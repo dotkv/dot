@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
@@ -87,7 +88,7 @@ func TestWithShardCount(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := rejectedOpen(t, db.path, WithShardCount(2)); !errors.Is(err, ErrMigrationRequired) {
+			if err := rejectedOpen(t, db.path, WithShardCount(2)); !strings.Contains(err.Error(), fmt.Sprintf("migration failed: changing shard count from %d to 2", count)) {
 				t.Fatalf("conflicting count: %v", err)
 			}
 		})
@@ -172,12 +173,13 @@ func databaseContents(t *testing.T, path string) map[string]string {
 func TestMigrationRejectsUnsupportedLayouts(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
+		reason string
 		change func(*metaData)
 	}{
-		{"version", func(m *metaData) { m.Version++ }},
-		{"segment-id-bits", func(m *metaData) { m.SegmentIDBits-- }},
-		{"segment-size-bits", func(m *metaData) { m.SegmentSizeBits++ }},
-		{"alignment-bits", func(m *metaData) { m.RecordAlignmentBits-- }},
+		{"version", "unsupported meta version", func(m *metaData) { m.Version++ }},
+		{"segment-id-bits", "unsupported segment layout", func(m *metaData) { m.SegmentIDBits-- }},
+		{"segment-size-bits", "unsupported segment layout", func(m *metaData) { m.SegmentSizeBits++ }},
+		{"alignment-bits", "unsupported segment layout", func(m *metaData) { m.RecordAlignmentBits-- }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newInternalDB(t, WithShardCount(1))
@@ -205,7 +207,7 @@ func TestMigrationRejectsUnsupportedLayouts(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(db.path, metaName), data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := rejectedOpen(t, db.path); !errors.Is(err, ErrMigrationRequired) {
+			if err := rejectedOpen(t, db.path); !strings.Contains(err.Error(), "migration failed: "+tc.reason) {
 				t.Fatalf("unsupported layout: %v", err)
 			}
 		})
@@ -249,7 +251,7 @@ func TestMigrationRejectsMissingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, opts := range [][]Option{nil, {WithShardCount(4)}} {
-		if err := rejectedOpen(t, db.path, opts...); !errors.Is(err, ErrMigrationRequired) {
+		if err := rejectedOpen(t, db.path, opts...); !strings.Contains(err.Error(), "migration failed: META is missing") {
 			t.Fatalf("missing metadata: %v", err)
 		}
 	}

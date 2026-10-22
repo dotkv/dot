@@ -35,7 +35,7 @@ a:focus-visible, button:focus-visible, .table-scroll:focus-visible { outline: 2p
 [hidden] { display: none !important; }
 .site-header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 72px; padding: 16px 36px; border-bottom: 1px solid var(--border); background: var(--header); backdrop-filter: blur(12px); }
 .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-size: 21px; font-weight: 650; text-decoration: none; letter-spacing: -.4px; }
-.brand-dot { width: 13px; height: 13px; background: var(--accent); border-radius: 50%; }
+.brand-dot { width: 15px; height: 15px; }
 .brand-label { margin-left: 10px; padding-left: 20px; border-left: 1px solid var(--border); color: var(--muted); font-size: 14px; font-weight: 400; letter-spacing: 0; }
 .header-actions { display: flex; align-items: center; gap: 20px; font-size: 13px; }
 .header-actions a { color: var(--muted); text-decoration: none; }
@@ -48,8 +48,9 @@ a:focus-visible, button:focus-visible, .table-scroll:focus-visible { outline: 2p
 .sidebar nav a:hover { color: var(--text); background: var(--surface); }
 .sidebar nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); font-weight: 550; }
 .sidebar-note { margin-top: 32px; padding: 24px 12px 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; line-height: 1.6; }
-.toc nav a { padding: 4px 0; color: var(--muted); font-size: 12px; line-height: 1.5; text-decoration: none; }
+.toc nav a { padding: 4px 0 4px 12px; border-left: 2px solid var(--border); color: var(--muted); font-size: 12px; line-height: 1.5; text-decoration: none; }
 .toc nav a:hover { color: var(--accent); }
+.toc nav a[aria-current="location"] { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 main { min-width: 0; padding: 49px 0 28px; }
 main:focus { outline: none; }
 .page-heading { margin-bottom: 36px; padding-bottom: 30px; border-bottom: 1px solid var(--border); }
@@ -63,7 +64,6 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 :not(pre) > code { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); overflow-wrap: anywhere; }
 pre { position: relative; margin: 24px 0; padding: 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow-x: auto; line-height: 1.7; tab-size: 4; }
 pre code { display: block; width: max-content; min-width: 100%; }
-pre.has-copy { padding-top: 46px; }
 .copy-button { position: absolute; top: 9px; right: 10px; padding: 2px 9px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); background: var(--background); font-size: 11px; }
 .copy-button:hover { color: var(--accent); border-color: var(--accent); }
 .table-scroll { max-width: 100%; margin: 24px 0; overflow-x: auto; }

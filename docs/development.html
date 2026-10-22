@@ -6,14 +6,15 @@
   <meta name="description" content="Run checks and benchmarks, and maintain the static documentation.">
   <meta name="color-scheme" content="light dark">
   <title>Development · Dot</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="dot128.png" type="image/png" sizes="128x128">
+  <link rel="icon" href="dot512.png" type="image/png" sizes="512x512">
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="index.html"><span class="brand-dot" aria-hidden="true"></span>Dot <span class="brand-label">Documentation</span></a>
+    <a class="brand" href="index.html"><img class="brand-dot" src="dot128.png" width="15" height="15" alt="">Dot <span class="brand-label">Documentation</span></a>
     <div class="header-actions">
       <a href="https://github.com/dotkv/dot">GitHub <span aria-hidden="true">↗</span></a>
       <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>Menu</button>
@@ -29,7 +30,7 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html" aria-current="page">Development</a>
       </nav>
-      <p class="sidebar-note">A small, log-backed<br>key-value store for Go.</p>
+      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
@@ -43,85 +44,40 @@
 <p>From the repository root:</p>
 
 <pre><code class="language-sh">go test ./...
-node --test metrics_ui/app.test.cjs metrics_ui/app_test.js</code></pre>
-
-<p>The comparison benchmarks live in a separate module and are not included in
-the root <code>go test ./...</code> command.</p>
+node --test metrics_ui/app.test.cjs metrics_ui/app_test.js
+(cd benchmarks &amp;&amp; go test ./...)</code></pre>
 
 <h2 id="benchmarks">Benchmarks</h2>
 
-<p>The <a href="https://github.com/dotkv/dot/tree/master/benchmarks">engine comparison suite</a> compares Dot and Pebble
-using 16-byte keys and 16 workers by default. It covers 80/20 and
-20/80 read/write ratios with 8-byte scalars and 1 KiB values. Dot and Pebble use
-normal automatic compaction. A short Dot probe estimates fixed operation budgets
-targeting about 15 seconds per Dot case. Every engine runs the same operation
-count. The suite reports latency, throughput, RSS, and disk usage, and always
-writes results to its README after a successful run. Dependencies live in a
-separate module.</p>
-
-<p>Root benchmarks include serial, unchanged, and parallel <code>uint64</code> updates.
-Their primitive fixtures stop background maintenance to isolate foreground work
-and keep direct file/index resets deterministic.</p>
-
-<pre><code class="language-sh">go test -run &#x27;^$&#x27; -bench &#x27;^BenchmarkUpdateUint64&#x27; -benchmem</code></pre>
-
-<p>Compare dashboard recording overhead with:</p>
-
-<pre><code class="language-sh">go test -run &#x27;^$&#x27; -bench &#x27;^BenchmarkOperationMetrics$&#x27; -benchmem</code></pre>
-
-<p>Compare growth and shrinking at their respective occupancy thresholds, using
-the same source capacity and random or heavily clustered runs:</p>
-
-<pre><code class="language-sh">go test -run &#x27;^$&#x27; -bench &#x27;^BenchmarkIndexResize$&#x27; -benchmem</code></pre>
+<p>Run the library benchmarks with <code>go test -run '^$' -bench . -benchmem</code>.
+The <a href="https://github.com/dotkv/dot/tree/master/benchmarks">comparison suite</a>
+is a separate module; its README describes workloads, commands, and results.</p>
 
 <h2 id="releases">Releases</h2>
 
-<p>Tag the release commit and push the tag:</p>
+<p>Push a semantic version tag to publish a Go module version:</p>
 
 <pre><code class="language-sh">git tag v0.1.0
 git push origin v0.1.0</code></pre>
 
-<p>Go resolves module versions directly from pushed semantic version tags. The
-<code>.github/workflows/release.yml</code> workflow runs the Go tests, benchmark adapter
-tests, and dashboard tests, then creates a GitHub Release with generated notes.
-Tags such as <code>v0.1.0-rc.1</code> are marked as prereleases. No generated version file,
-linker flags, or additional repository secret is needed.</p>
+<p>The release workflow runs tests and creates a GitHub Release with generated notes.
+Tags such as <code>v0.1.0-rc.1</code> are marked as prereleases.</p>
 
 <h2 id="preview-the-docs">Preview the docs</h2>
 
-<p>The <code>docs/</code> directory contains ordinary HTML, CSS, and JavaScript. Edit these
-files directly; no package installation, bundler, or site generator is needed.
-All page and asset links are relative so the site works under <code>/dot/</code>.
-Serve the repository root to preview the site under a directory prefix locally:</p>
+<p>Edit the HTML, CSS, and JavaScript in <code>docs/</code> directly. No build step is needed.</p>
 
-<pre><code class="language-sh">python -m http.server 8000 --directory .</code></pre>
+<pre><code class="language-sh">python -m http.server 8000 --directory docs</code></pre>
 
-<p>Open <a href="http://localhost:8000/docs/">localhost:8000/docs/</a>.
-Code-copy buttons use the Clipboard API where supported; the documentation and
-navigation also work without JavaScript.</p>
+<p>Open <a href="http://localhost:8000/">localhost:8000</a>.</p>
 
-<h2 id="publish-with-github-pages">Publish with GitHub Pages</h2>
+<h2 id="publish-with-github-pages">Publish the docs</h2>
 
-<p>The project site is <a href="https://dotkv.github.io/dot/">dotkv.github.io/dot/</a>.
-In the repository&#x27;s <a href="https://github.com/dotkv/dot/settings/pages">Pages settings</a>,
-choose <strong>GitHub Actions</strong> as the build and deployment source. For a private
-organization repository, Pages requires an eligible GitHub plan.</p>
-
-<p>The workflow at <code>.github/workflows/pages.yml</code> uploads only <code>docs/</code> and deploys
-it directly. It runs when those files or the workflow change on <code>master</code>, and
-can also be run manually from the Actions tab on <code>master</code>.
-It uses the <code>github-pages</code> environment and the repository&#x27;s <code>GITHUB_TOKEN</code>;
-no custom deployment secret is needed. See GitHub&#x27;s
-<a href="https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages">custom workflow documentation</a>
-for the Pages setup and permissions.</p>
-
-<h2 id="project-or-organization-site">Project or organization site</h2>
-
-<p>This repository publishes a <strong>project site</strong>, at <code>https://dotkv.github.io/dot/</code>.
-The organization root, <code>https://dotkv.github.io/</code>, requires a repository named
-<code>dotkv.github.io</code>. A project repository does not become an organization site
-just because an organization owns it. See GitHub&#x27;s
-<a href="https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#types-of-github-pages-sites">site types</a>.</p>
+<p>The Pages workflow deploys <code>docs/</code> to
+<a href="https://dotkv.github.io/dot/">dotkv.github.io/dot/</a> when documentation
+changes reach <code>master</code>. Select <strong>GitHub Actions</strong> as the
+source in the repository's
+<a href="https://github.com/dotkv/dot/settings/pages">Pages settings</a>.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="metrics.html" rel="prev"><span>Previous</span>Metrics dashboard</a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/development.html">Edit this page <span aria-hidden="true">↗</span></a></footer>
@@ -133,8 +89,7 @@ just because an organization owns it. See GitHub&#x27;s
         <a href="#benchmarks">Benchmarks</a>
         <a href="#releases">Releases</a>
         <a href="#preview-the-docs">Preview the docs</a>
-        <a href="#publish-with-github-pages">Publish with GitHub Pages</a>
-        <a href="#project-or-organization-site">Project or organization site</a>
+        <a href="#publish-with-github-pages">Publish the docs</a>
       </nav>
     </aside>
   </div>
