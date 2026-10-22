@@ -64,7 +64,9 @@ Recovery scans all retained log records; checkpoints and a manifest are not used
 
 Failed writes that made partial progress are truncated back to the last complete
 record, and the repair is synced. If rollback fails, further appends fail until
-the database is reopened. Successful writes are not synced individually.
+the database is reopened. Successful writes are not synced individually; pass
+`WithSync(true)` to `Open` (or to a single `Set`/`Delete`/`Update`/`Upsert`) to
+fsync the log before the call returns.
 
 ## Compaction
 
