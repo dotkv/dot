@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,6 +22,14 @@ const (
 
 // ErrNotFound is returned directly by Get and Update when the key does not exist.
 var ErrNotFound = errors.New("key not found")
+
+// Key lists the types accepted for keys. The key's type does not affect its
+// identity: "a" and []byte("a") address the same record, unlike values, where
+// string and []byte are distinct types. String keys are converted to []byte
+// once per call; []byte keys are used directly without copying.
+type Key interface {
+	[]byte | string
+}
 
 type DB struct {
 	path             string
@@ -175,7 +184,7 @@ func (db *DB) shard(key []byte) (*Shard, uint64) {
 // Set stores val using the encoding described by Value. It does not retain key
 // or val, so callers may reuse their byte slices after Set returns. Set may
 // replace an existing key with a different type.
-func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
+func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	expiration := db.expiration
 	if len(opts) > 0 {
 		options := Options{expiration: expiration}
@@ -191,26 +200,28 @@ func (db *DB) Set[T Value](key []byte, val T, opts ...Option) error {
 	if err != nil {
 		return err
 	}
-	s, hash := db.shard(key)
+	kb := []byte(key)
+	s, hash := db.shard(kb)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareSet(s.log, ty, key, value, hash, expiration)
+	change, err := s.index.prepareSet(s.log, ty, kb, value, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
-	return s.appendSet(ty, key, value, change)
+	return s.appendSet(ty, kb, value, change)
 }
 
 // Get returns the value decoded as T. A missing key returns the zero value of T
 // and ErrNotFound directly, without wrapping the sentinel. A different stored
 // type returns an error wrapping ErrTypeMismatch, with no implicit conversion.
 // Byte slices are owned by the caller. Scalar encodings are described by Value.
-func (db *DB) Get[T Value](key []byte) (T, error) {
+func (db *DB) Get[T Value, K Key](key K) (T, error) {
 	var zero T
-	s, hash := db.shard(key)
+	kb := []byte(key)
+	s, hash := db.shard(kb)
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if s.closed {
@@ -223,15 +234,25 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 	var ty recordType
 	var err error
 	if out, ok := any(&value).(*[]byte); ok {
-		pos, *out, ty, expiration, err = s.index.findPayload(s.log, key, hash, nil)
+		pos, *out, ty, expiration, err = s.index.findPayload(s.log, kb, hash, nil)
 		if err == nil && pos >= 0 && isExpired(expiration) {
 			pos = -1
 		} else if err == nil && pos >= 0 {
 			err = checkType[T](ty)
 		}
+	} else if sout, ok := any(&value).(*string); ok {
+		var raw []byte
+		pos, raw, ty, expiration, err = s.index.findPayload(s.log, kb, hash, nil)
+		if err == nil && pos >= 0 && isExpired(expiration) {
+			pos = -1
+		} else if err == nil && pos >= 0 {
+			if err = checkType[T](ty); err == nil {
+				*sout = string(raw)
+			}
+		}
 	} else {
 		var raw scalarValue
-		pos, raw, expiration, err = s.index.findScalar(s.log, key, hash)
+		pos, raw, expiration, err = s.index.findScalar(s.log, kb, hash)
 		if err == nil && pos >= 0 {
 			if isExpired(expiration) {
 				pos = -1
@@ -258,8 +279,9 @@ func (db *DB) Get[T Value](key []byte) (T, error) {
 // Returned slices are copied before Update returns; nil stores an empty value.
 // An unchanged encoding does not append a record. A write error leaves the index
 // unchanged, but cannot undo any external effects of the callback.
-func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
-	s, hash := db.shard(key)
+func (db *DB) Update[T Value, K Key](key K, fn func(T) T) error {
+	kb := []byte(key)
+	s, hash := db.shard(kb)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
@@ -273,12 +295,13 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 	var previous []byte
 	var raw scalarValue
 	out, byteValue := any(&value).(*[]byte)
-	if byteValue {
+	sout, stringValue := any(&value).(*string)
+	if byteValue || stringValue {
 		// Keep the original in the write scratch space for no-op detection,
 		// and give the callback a separate copy it can mutate or retain.
-		pos, previous, ty, expiration, err = s.index.lookupPayload(s.log, key, hash, s.log.writeBuffer[:], true)
+		pos, previous, ty, expiration, err = s.index.lookupPayload(s.log, kb, hash, s.log.writeBuffer[:], true)
 	} else {
-		pos, raw, expiration, err = s.index.findScalar(s.log, key, hash)
+		pos, raw, expiration, err = s.index.findScalar(s.log, kb, hash)
 	}
 	if err != nil {
 		return fmt.Errorf("index update: %w", err)
@@ -291,6 +314,11 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 			return fmt.Errorf("index update: %w", err)
 		}
 		*out = bytes.Clone(previous)
+	} else if stringValue {
+		if err := checkType[T](ty); err != nil {
+			return fmt.Errorf("index update: %w", err)
+		}
+		*sout = string(previous)
 	} else {
 		value, err = decodeScalar[T](raw)
 		if err != nil {
@@ -302,7 +330,7 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 	if err != nil {
 		return err
 	}
-	if byteValue {
+	if byteValue || stringValue {
 		if bytes.Equal(payload, previous) {
 			return nil
 		}
@@ -310,21 +338,123 @@ func (db *DB) Update[T Value](key []byte, fn func(T) T) error {
 		return nil
 	}
 	previousSize := len(previous)
-	if !byteValue {
+	if !byteValue && !stringValue {
 		previousSize = raw.size
 	}
-	return s.appendSet(ty, key, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(key), previousSize)))
+	return s.appendSet(ty, kb, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize)))
 }
 
-// Delete removes key. Deleting a missing key succeeds.
-func (db *DB) Delete(key []byte) error {
-	s, hash := db.shard(key)
+// Upsert atomically reads the current value and stores fn's result, inserting
+// when the key is missing. The callback receives the existing value and true,
+// or the zero value of T and false for a missing or expired key. Expired keys
+// are treated as absent and replaced. A stored type different from T fails
+// with an error wrapping ErrTypeMismatch without calling fn, like Update.
+// The callback runs once under the shard's exclusive lock. It must be short
+// and must not call methods on this DB. A panic propagates without changing
+// the value. Options apply when inserting; an existing key keeps its
+// expiration, like Update. An unchanged encoding does not append a record.
+func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts ...Option) error {
+	expiration := db.expiration
+	if len(opts) > 0 {
+		options := Options{expiration: expiration}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(&options)
+			}
+		}
+		expiration = options.expiration
+	}
+	kb := []byte(key)
+	s, hash := db.shard(kb)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	change, err := s.index.prepareDelete(s.log, key, hash)
+	var value T
+	var pos int
+	var ty recordType
+	var err error
+	var previous []byte
+	var raw scalarValue
+	exists := false
+	out, byteValue := any(&value).(*[]byte)
+	sout, stringValue := any(&value).(*string)
+	if byteValue || stringValue {
+		var prevExp int64
+		// liveOnly treats expired keys as absent; prepareSet below replaces
+		// the expired entry in place.
+		pos, previous, ty, prevExp, err = s.index.lookupPayload(s.log, kb, hash, s.log.writeBuffer[:], true)
+		if err != nil {
+			return fmt.Errorf("index upsert: %w", err)
+		}
+		if pos >= 0 {
+			if err := checkType[T](ty); err != nil {
+				return fmt.Errorf("index upsert: %w", err)
+			}
+			if byteValue {
+				*out = bytes.Clone(previous)
+			} else {
+				*sout = string(previous)
+			}
+			expiration = prevExp
+			exists = true
+		}
+	} else {
+		var prevExp int64
+		pos, raw, prevExp, err = s.index.findScalar(s.log, kb, hash)
+		if err != nil {
+			return fmt.Errorf("index upsert: %w", err)
+		}
+		if pos >= 0 {
+			if isExpired(prevExp) {
+				pos = -1
+			} else {
+				value, err = decodeScalar[T](raw)
+				if err != nil {
+					return fmt.Errorf("index upsert: %w", err)
+				}
+				expiration = prevExp
+				exists = true
+			}
+		}
+	}
+	var encoded [8]byte
+	ty, payload, err := encodeValue(fn(value, exists), &encoded)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if byteValue || stringValue {
+			if bytes.Equal(payload, previous) {
+				return nil
+			}
+		} else if scalarBytes(ty, payload) == raw {
+			return nil
+		}
+		previousSize := len(previous)
+		if !byteValue && !stringValue {
+			previousSize = raw.size
+		}
+		return s.appendSet(ty, kb, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize)))
+	}
+	change, err := s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
+	if err != nil {
+		return fmt.Errorf("prepare upsert: %w", err)
+	}
+	return s.appendSet(ty, kb, payload, change)
+}
+
+// Delete removes key. Deleting a missing key succeeds.
+func (db *DB) Delete[K Key](key K) error {
+	kb := []byte(key)
+	s, hash := db.shard(kb)
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if s.closed {
+		return os.ErrClosed
+	}
+	change, err := s.index.prepareDelete(s.log, kb, hash)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
 	}
@@ -333,12 +463,61 @@ func (db *DB) Delete(key []byte) error {
 		s.maybeScheduleCompaction()
 		return nil
 	}
-	if _, _, err := s.log.write(typeDelete, key, nil, 0); err != nil {
+	if _, _, err := s.log.write(typeDelete, kb, nil, 0); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)
 	s.maybeScheduleCompaction()
 	return nil
+}
+
+// Scan returns an iterator over every live key/value pair in the database.
+// Pairs are yielded in shard order; order within a shard is unspecified, and
+// the scan is not a point-in-time snapshot: writes to shards not yet scanned
+// become visible, while writes to scanned shards do not. Each shard's read
+// lock is held while that shard is scanned, so writers on the shard block
+// until its scan completes. Expired entries are skipped.
+// The yielded slices are reused across iterations: copy them to retain.
+// Iteration stops early on a read error, which cannot happen without
+// underlying storage corruption.
+func (db *DB) Scan() iter.Seq2[[]byte, []byte] {
+	return func(yield func([]byte, []byte) bool) {
+		var buf []byte
+		for i := range db.shards {
+			s := &db.shards[i]
+			if !scanShard(s, &buf, yield) {
+				return
+			}
+		}
+	}
+}
+
+// scanShard scans one shard under its read lock, reusing buf across record
+// reads. It reports whether iteration should continue.
+func scanShard(s *Shard, buf *[]byte, yield func([]byte, []byte) bool) bool {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	if s.closed {
+		return false
+	}
+	for _, slot := range s.index.slots {
+		if empty(slot) {
+			continue
+		}
+		addr := slot & addressMask
+		key, value, _, expiration, err := s.log.readPayload(addr>>26, addr&offsetMask, *buf)
+		if err != nil {
+			return false
+		}
+		*buf = key[:cap(key)]
+		if isExpired(expiration) {
+			continue
+		}
+		if !yield(key, value) {
+			return false
+		}
+	}
+	return true
 }
 
 // Close waits for active operations and releases the logs and index mappings

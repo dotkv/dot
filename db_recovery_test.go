@@ -136,7 +136,7 @@ func TestDBRecovery(t *testing.T) {
 			t.Fatalf("key %d: value length=%d error=%v, want length=%d error=%v", i, len(got), err, len(wantValues[i]), wantErr)
 		}
 	}
-	if got, err := db.Get[[]byte](nil); err != nil || string(got) != "empty key" {
+	if got, err := db.Get[[]byte]([]byte(nil)); err != nil || string(got) != "empty key" {
 		t.Fatalf("empty key: value=%q error=%v", got, err)
 	}
 	if len(s.index.expirations) != 2 {
