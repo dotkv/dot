@@ -1,0 +1,403 @@
+"use strict";
+
+(() => {
+  const byID = (id) => document.getElementById(id);
+  const chart = byID("chart");
+  const context = chart.getContext("2d");
+  const metricButtons = [...document.querySelectorAll("[data-metric]")];
+  const ranges = [...document.querySelectorAll("[data-range]")];
+  const metrics = {
+    disk_bytes: { label: "On-disk size", color: "--accent", unit: "bytes" },
+    obsolete_bytes: { label: "Obsolete bytes", color: "--obsolete", unit: "bytes" },
+    entry_count: { label: "Entries", color: "--entries", unit: "count" },
+    index_mapped_bytes: { label: "Index mmap", color: "--update", unit: "bytes" },
+  };
+  const operations = ["get", "set", "delete", "update"];
+  const operationColors = { get: "--accent", set: "--obsolete", delete: "--entries", update: "--update" };
+  const tooltip = byID("tooltip");
+  for (const op of operations) {
+    const name = op[0].toUpperCase() + op.slice(1);
+    for (const [suffix, label, unit] of [["ops", "ops/sec", "rate"], ["mean_ns", "mean latency", "latency"], ["p99_ns", "p99 latency", "latency"]]) {
+      const key = `${op}_${suffix}`;
+      metrics[key] = { label: `${name} ${label}`, color: operationColors[op], unit, dash: suffix === "p99_ns" ? [5, 3] : [] };
+    }
+  }
+  for (const [key, metric] of Object.entries(metrics)) {
+    const marker = document.createElement("span");
+    marker.id = `point-${key}`;
+    marker.className = "hover-point";
+    marker.style.setProperty("--series-color", `var(${metric.color})`);
+    marker.hidden = true;
+    tooltip.before(marker);
+    const row = document.createElement("div");
+    row.id = `tooltip-${key}`;
+    row.className = "tooltip-row";
+    const labelElement = document.createElement("span");
+    const dot = document.createElement("i");
+    dot.className = "series-dot";
+    dot.style.setProperty("--series-color", `var(${metric.color})`);
+    labelElement.append(dot, metric.label);
+    const value = document.createElement("strong");
+    value.id = `tooltip-value-${key}`;
+    row.append(labelElement, value);
+    tooltip.append(row);
+  }
+  const selected = new Set(["disk_bytes"]);
+  // A ring bounds both memory and rendering work, even at very short intervals.
+  const capacity = 20_000;
+  const history = new Array(capacity);
+  let head = 0;
+  let count = 0;
+  const at = (index) => history[(head + index) % capacity];
+  const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+  const decimal = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+  const fixedDecimal = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const compactRate = new Intl.NumberFormat(undefined, { notation: "compact", minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const timestamp = new Intl.DateTimeFormat(undefined, {
+    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    second: "2-digit", fractionalSecondDigits: 3,
+  });
+  const byteUnits = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  const latencyUnits = ["ns", "µs", "ms", "s"];
+  let range = 60_000;
+  let interval = 1000;
+  let latest = null;
+  let view = null;
+  let pointer = null;
+  let frame = null;
+  let socket = null;
+  let retry = null;
+  let stopped = false;
+
+  function byteUnit(value) {
+    return Math.min(byteUnits.length - 1, Math.max(0, Math.floor(Math.log2(value || 1) / 10)));
+  }
+
+  function bytes(value) {
+    const unit = byteUnit(value);
+    return `${(value / 1024 ** unit).toLocaleString(undefined, { maximumFractionDigits: unit ? 1 : 0 })} ${byteUnits[unit]}`;
+  }
+
+  function format(key, value, exact = false) {
+    if (value === null) return "—";
+    if (metrics[key].unit === "rate") return rate(value);
+    if (metrics[key].unit === "latency") {
+      const unit = latencyUnit(value);
+      const display = `${key.endsWith("p99_ns") ? "≈ " : ""}${fixedDecimal.format(value / 1000 ** unit)} ${latencyUnits[unit]}`;
+      return exact && unit > 0 ? `${display} (${fixedDecimal.format(value)} ns)` : display;
+    }
+    if (metrics[key].unit !== "bytes") return number.format(value);
+    return exact && value >= 1024 ? `${bytes(value)} (${number.format(value)} bytes)` : bytes(value);
+  }
+
+  function rate(value) {
+    return (value < 1000 ? fixedDecimal : compactRate).format(value);
+  }
+
+  function latencyUnit(value) {
+    return Math.min(latencyUnits.length - 1, Math.max(0, Math.floor(Math.log10(value || 1) / 3)));
+  }
+
+  function status(text, connected = false) {
+    byID("status").textContent = text;
+    byID("status-dot").classList.toggle("connected", connected);
+  }
+
+  function notice(text) {
+    byID("notice").textContent = text;
+    byID("notice").hidden = !text;
+  }
+
+  function requestDraw() {
+    if (frame !== null) return;
+    frame = requestAnimationFrame(() => { frame = null; draw(); });
+  }
+
+  function receive(sample) {
+    if (![sample.time, sample.interval_ms, sample.disk_bytes, sample.obsolete_bytes, sample.entry_count, sample.index_mapped_bytes]
+      .every((value) => Number.isFinite(value) && value >= 0)) throw new Error("Invalid snapshot");
+    interval = Math.max(1, sample.interval_ms);
+    status("Connected", true);
+    // Reconnecting can send the current snapshot again. Store only chart fields.
+    if (latest && sample.time < latest.time) return;
+    latest = {
+      time: sample.time, disk_bytes: sample.disk_bytes,
+      obsolete_bytes: sample.obsolete_bytes, entry_count: sample.entry_count,
+      index_mapped_bytes: sample.index_mapped_bytes,
+    };
+    for (const op of operations) {
+      const reading = sample.operations?.[op];
+      if (!reading || !Number.isFinite(reading.ops_per_second) || reading.ops_per_second < 0
+        || ![reading.mean_ns, reading.p99_ns].every((value) => value === null || (Number.isFinite(value) && value >= 0))) throw new Error("Invalid operation metrics");
+      latest[`${op}_ops`] = reading.ops_per_second;
+      latest[`${op}_mean_ns`] = reading.mean_ns;
+      latest[`${op}_p99_ns`] = reading.p99_ns;
+      for (const suffix of ["ops", "mean_ns", "p99_ns"]) {
+        const key = `${op}_${suffix}`;
+        byID(`value-${key}`).textContent = format(key, latest[key]);
+      }
+    }
+    if (!count || sample.time > at(count - 1).time) {
+      history[(head + count) % capacity] = latest;
+      if (count < capacity) count++;
+      else head = (head + 1) % capacity;
+    }
+    if (!sample.ready) latest.disk_bytes = latest.obsolete_bytes = latest.entry_count = latest.index_mapped_bytes = null;
+    notice(sample.disk_stale ? "Disk usage is unavailable; showing its previous reading." : "");
+    byID("empty").hidden = true;
+    requestDraw();
+  }
+
+  function lowerBound(time, low = 0) {
+    let high = count;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (at(mid).time < time) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
+
+  function niceStep(value) {
+    const magnitude = 10 ** Math.floor(Math.log10(value));
+    const fraction = value / magnitude;
+    return (fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10) * magnitude;
+  }
+
+  function axis(key, maximum) {
+    // Round in the displayed unit so byte labels stay at 100 KiB, 200 KiB, etc.
+    const kind = metrics[key].unit;
+    const unit = kind === "bytes" ? byteUnit(maximum) : kind === "latency" ? latencyUnit(maximum) : 0;
+    const divisor = (kind === "bytes" ? 1024 : 1000) ** unit;
+    const step = Math.max(kind === "rate" ? 0 : 1, niceStep(Math.max(maximum / divisor, kind === "rate" ? 0.01 : 1) / 4));
+    const ticks = Math.max(1, Math.ceil(maximum / divisor / step));
+    return { ceiling: ticks * step * divisor, ticks, step, unit };
+  }
+
+  function timeStep(span, width) {
+    const target = span / Math.max(2, Math.floor(width / 125));
+    const steps = [1000, 2000, 5000, 10_000, 15_000, 30_000, 60_000, 120_000,
+      300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000, 10_800_000,
+      21_600_000, 43_200_000, 86_400_000];
+    return steps.find((step) => step >= target) || niceStep(target / 86_400_000) * 86_400_000;
+  }
+
+  function draw() {
+    const bounds = chart.getBoundingClientRect();
+    const width = bounds.width, height = bounds.height;
+    if (!width || !height) return;
+    const scale = window.devicePixelRatio || 1;
+    chart.width = Math.round(width * scale);
+    chart.height = Math.round(height * scale);
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    if (!latest) return;
+    const colors = getComputedStyle(document.documentElement);
+    const muted = colors.getPropertyValue("--muted").trim();
+    const grid = colors.getPropertyValue("--grid").trim();
+    const keys = [...selected];
+    const left = 86, right = width - 20, top = 20, bottom = height - 34;
+    const end = Math.max(Date.now(), latest.time);
+    const start = range === Infinity ? at(0).time : end - range;
+    const span = Math.max(interval, end - start);
+    const low = lowerBound(start);
+    const first = Math.max(0, low - 1);
+    const x = (time) => left + (time - start) / span * (right - left);
+    const maxima = keys.map((key) => {
+      let maximum = 0;
+      // Include the preceding sample used to draw the segment at the left edge.
+      for (let i = first; i < count; i++) maximum = Math.max(maximum, at(i)[key]);
+      return maximum;
+    });
+    const limits = axis(keys[0], Math.max(...maxima));
+    const y = (value) => bottom - value / limits.ceiling * (bottom - top);
+    const series = keys.map((key) => ({ key, color: colors.getPropertyValue(metrics[key].color).trim(), y }));
+    context.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    for (let i = 0; i <= limits.ticks; i++) {
+      const row = bottom - (bottom - top) * i / limits.ticks;
+      context.strokeStyle = grid;
+      context.lineWidth = 1;
+      context.beginPath(); context.moveTo(left, row); context.lineTo(right, row); context.stroke();
+      context.fillStyle = muted;
+      context.textAlign = "right";
+      const unit = metrics[keys[0]].unit;
+      const suffix = unit === "bytes" ? ` ${byteUnits[limits.unit]}` : unit === "latency" ? ` ${latencyUnits[limits.unit]}` : "";
+      const value = limits.step * i;
+      const label = unit === "rate" ? rate(value) : `${(unit === "latency" ? fixedDecimal : decimal).format(value)}${suffix}`;
+      context.fillText(label, left - 12, row + 4);
+    }
+    const step = timeStep(span, right - left);
+    const offset = new Date(start).getTimezoneOffset() * 60_000;
+    const firstTick = Math.ceil((start - offset) / step) * step + offset;
+    context.fillStyle = muted;
+    const dateClock = span >= 86_400_000
+      ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : clock;
+    for (let time = firstTick; time <= start + span; time += step) {
+      context.textAlign = "center";
+      // Keep centered labels inside the canvas at either end.
+      const label = dateClock.format(time);
+      const half = context.measureText(label).width / 2;
+      const column = Math.max(left + half, Math.min(right - half, x(time)));
+      context.fillText(label, column, height - 9);
+    }
+
+    context.save();
+    context.beginPath(); context.rect(left, top - 3, right - left + 3, bottom - top + 6); context.clip();
+    for (const line of series) {
+      // Keep first/last and extrema per pixel; compaction drops remain visible.
+      const points = [];
+      const gaps = new Set();
+      let bucket = null;
+      let missing = false;
+      function flush() {
+        if (!bucket) return;
+        const keep = [...new Set([bucket.first, bucket.min, bucket.max, bucket.last])];
+        keep.sort((a, b) => a.time - b.time);
+        points.push(...keep);
+      }
+      for (let i = first; i < count; i++) {
+        const point = at(i);
+        if (point[line.key] === null) {
+          flush(); bucket = null; missing = true;
+          continue;
+        }
+        const pixel = Math.floor(x(point.time));
+        if (missing || (i > 0 && point.time - at(i - 1).time > interval * 3)) {
+          flush();
+          bucket = null;
+          gaps.add(point);
+          missing = false;
+        }
+        if (!bucket || bucket.pixel !== pixel) {
+          flush();
+          bucket = { pixel, first: point, last: point, min: point, max: point };
+        } else {
+          bucket.last = point;
+          if (point[line.key] < bucket.min[line.key]) bucket.min = point;
+          if (point[line.key] > bucket.max[line.key]) bucket.max = point;
+        }
+      }
+      flush();
+      context.strokeStyle = line.color;
+      context.fillStyle = line.color;
+      context.lineWidth = 2;
+      context.lineJoin = "round";
+      context.setLineDash(metrics[line.key].dash || []);
+      context.beginPath();
+      for (let i = 0; i < points.length; i++) {
+        const point = points[i];
+        if (i === 0 || gaps.has(point)) context.moveTo(x(point.time), line.y(point[line.key]));
+        else context.lineTo(x(point.time), line.y(point[line.key]));
+      }
+      context.stroke();
+      context.setLineDash([]);
+      if (points.length) {
+        const last = points[points.length - 1];
+        context.beginPath(); context.arc(x(last.time), line.y(last[line.key]), 3, 0, Math.PI * 2); context.fill();
+      }
+    }
+    context.restore();
+    view = { low, start, span, x, left, right, top, bottom, width, height, series };
+    showHover();
+    const values = keys.map((key) => `${metrics[key].label}: ${format(key, latest[key])}`).join(". ");
+    const period = range === Infinity ? "retained history" : range === 60_000 ? "the last minute" : "the last hour";
+    chart.setAttribute("aria-label", `${keys.map((key) => metrics[key].label).join(", ")} over ${period}. Latest values: ${values}. ${number.format(count - low)} snapshots.`);
+  }
+
+  function showHover() {
+    const crosshair = byID("crosshair");
+    for (const key of Object.keys(metrics)) byID(`point-${key}`).hidden = true;
+    if (!pointer || !view || view.low >= count || pointer.x < view.left || pointer.x > view.right || pointer.y < view.top || pointer.y > view.bottom) {
+      tooltip.hidden = crosshair.hidden = true;
+      return;
+    }
+    const time = view.start + (pointer.x - view.left) / (view.right - view.left) * view.span;
+    let index = Math.min(count - 1, lowerBound(time, view.low));
+    if (index > view.low && time - at(index - 1).time < at(index).time - time) index--;
+    const sample = at(index);
+    const column = view.x(sample.time);
+    crosshair.hidden = false;
+    crosshair.style.left = `${column}px`;
+    crosshair.style.top = `${view.top}px`;
+    crosshair.style.height = `${view.bottom - view.top}px`;
+    byID("tooltip-time").textContent = timestamp.format(sample.time);
+    byID("tooltip-time").dateTime = new Date(sample.time).toISOString();
+    for (const key of Object.keys(metrics)) {
+      byID(`tooltip-${key}`).hidden = !selected.has(key);
+      if (selected.has(key)) byID(`tooltip-value-${key}`).textContent = format(key, sample[key], true);
+    }
+    for (const line of view.series) {
+      const marker = byID(`point-${line.key}`);
+      if (sample[line.key] === null) continue;
+      marker.hidden = false;
+      marker.style.left = `${column}px`;
+      marker.style.top = `${line.y(sample[line.key])}px`;
+    }
+    tooltip.hidden = false;
+    const box = tooltip.getBoundingClientRect();
+    const side = pointer.x + 14 + box.width <= view.width ? pointer.x + 14 : pointer.x - box.width - 14;
+    tooltip.style.left = `${Math.max(4, Math.min(view.width - box.width - 4, side))}px`;
+    tooltip.style.top = `${Math.max(4, Math.min(view.height - box.height - 4, pointer.y - box.height - 14))}px`;
+  }
+
+  function connect() {
+    if (stopped) return;
+    const url = new URL("ws", window.location.href);
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    socket = new WebSocket(url);
+    socket.addEventListener("open", () => { status("Connected", true); });
+    socket.addEventListener("message", (event) => {
+      try { receive(JSON.parse(event.data)); }
+      catch { status("Invalid snapshot"); }
+    });
+    socket.addEventListener("close", () => {
+      if (stopped) return;
+      status("Reconnecting…");
+      retry = setTimeout(connect, 1000);
+    });
+    socket.addEventListener("error", () => socket.close());
+  }
+
+  for (const button of metricButtons) {
+    button.addEventListener("click", () => {
+      const key = button.dataset.metric;
+      if (selected.has(key)) {
+        if (selected.size === 1) return;
+        selected.delete(key);
+      } else {
+        for (const other of selected) {
+          if (metrics[other].unit !== metrics[key].unit) selected.delete(other);
+        }
+        selected.add(key);
+      }
+      for (const other of metricButtons) other.setAttribute("aria-pressed", String(selected.has(other.dataset.metric)));
+      requestDraw();
+    });
+  }
+  for (const button of ranges) {
+    button.addEventListener("click", () => {
+      range = button.dataset.range === "all" ? Infinity : Number(button.dataset.range);
+      for (const other of ranges) other.setAttribute("aria-pressed", String(other === button));
+      requestDraw();
+    });
+  }
+  chart.addEventListener("pointermove", (event) => {
+    const bounds = chart.getBoundingClientRect();
+    pointer = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    showHover();
+  });
+  for (const event of ["pointerleave", "pointercancel"]) {
+    chart.addEventListener(event, () => { pointer = null; showHover(); });
+  }
+  new ResizeObserver(requestDraw).observe(chart);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", requestDraw);
+  window.addEventListener("pagehide", () => {
+    stopped = true;
+    clearTimeout(retry);
+    socket?.close();
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) { stopped = false; connect(); }
+  });
+  connect();
+})();

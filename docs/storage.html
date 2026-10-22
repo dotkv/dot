@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Understand layout, durability, recovery, and background maintenance.">
+  <meta name="color-scheme" content="light dark">
+  <title>Storage &amp; recovery · Dot</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html"><span class="brand-dot" aria-hidden="true"></span>Dot <span class="brand-label">Documentation</span></a>
+    <div class="header-actions">
+      <a href="https://github.com/dotkv/dot">GitHub <span aria-hidden="true">↗</span></a>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>Menu</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" id="site-nav">
+      <p class="nav-label">Documentation</p>
+      <nav aria-label="Documentation">
+        <a href="index.html">Getting started</a>
+        <a href="usage.html">Usage</a>
+        <a href="storage.html" aria-current="page">Storage &amp; recovery</a>
+        <a href="metrics.html">Metrics dashboard</a>
+        <a href="development.html">Development</a>
+      </nav>
+      <p class="sidebar-note">A small, log-backed<br>key-value store for Go.</p>
+    </aside>
+    <main id="content" tabindex="-1">
+      <div class="page-heading">
+        <p class="eyebrow">Dot / Documentation</p>
+        <h1>Storage &amp; recovery</h1>
+        <p class="lead">Understand layout, durability, recovery, and background maintenance.</p>
+      </div>
+      <article aria-label="Storage &amp; recovery">
+<h2 id="database-layout">Database layout</h2>
+
+<p>New databases default to 64 key shards. Pass <code>WithShardCount(count)</code> to <code>Open</code>
+to choose a power of two between 1 and 1024:</p>
+
+<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithShardCount(16))</code></pre>
+
+<p><code>META</code> stores the shard count, format version, segment ID and size bit counts,
+and record alignment. It is synced and atomically published before shard
+initialization. Reopening without <code>WithShardCount</code> uses the stored count. An
+explicitly different count returns an error wrapping <code>ErrMigrationRequired</code>;
+changing shard routing requires rewriting the database. Unsupported versions
+or segment layouts also return <code>ErrMigrationRequired</code> before log recovery.
+Automatic data migrations are not supported.</p>
+
+<p>An empty database directory can be initialized. A nonempty directory without
+<code>META</code>, including a database created by an older release, is rejected because
+its layout cannot be established safely. Empty or malformed metadata is also
+rejected rather than replaced. <code>WithShardCount</code> has no effect on key operations.</p>
+
+<h2 id="single-process-access">Single-process access</h2>
+
+<p><code>Open</code> takes an exclusive file lock on <code>&lt;path&gt;/LOCK</code> and holds it until
+<code>Close</code>. A second <code>Open</code> of the same path — from any process, or again in the
+same process — fails with an error wrapping <code>ErrDatabaseLocked</code>. The kernel
+releases the lock if the process dies, so it can never go stale. File locking
+is not reliable on NFS; use local storage.</p>
+
+<h2 id="recovery">Recovery</h2>
+
+<p><code>Open</code> replays each shard&#x27;s log segments in order to rebuild its index, applying
+sets, deletes, and expirations. It resumes appending at the end of the newest
+segment. An incomplete final record in that segment is truncated; checksum
+failures, invalid records, or incomplete records in older segments fail opening.
+Segment IDs wrap after <code>1048575</code>. Published filenames must form one contiguous
+run around that ring, leaving at least one vacant ID. <code>Open</code> infers the newest
+segment from this gap and rejects layouts with multiple gaps or no vacant ID.
+Recovery scans all retained log records; checkpoints and a manifest are not used.</p>
+
+<p>Each shard index starts with <code>1 &lt;&lt; 14</code> eight-byte slots: 128 KiB per shard, or
+8 MiB of initial anonymous mmap storage at the default 64 shards. Resident memory
+depends on pages touched. Each slot contains three metadata bits, a
+19-bit hashtag, a 20-bit segment ID, and a 22-bit offset in 16-byte units within
+the segment&#x27;s 64 MiB start range. The hashtag supports growth without reading
+keys up to <code>1 &lt;&lt; 33</code> slots per shard. At 75% occupancy, the theoretical index
+ceiling is 6,442,450,944 entries per shard, or 412,316,860,416 across the default
+64 balanced shards; RAM and retained log space can impose lower limits.</p>
+
+<p>Indexes double at 75% occupancy. During background maintenance, an index below
+25% occupancy shrinks by half, down to the initial 128 KiB per shard. Each pass
+halves at most once. Shrinking merges runs using only in-memory slot metadata:
+it performs no database file reads and takes linear time in the old capacity,
+like growth. The rebuild holds that shard&#x27;s exclusive lock and briefly retains
+both mappings. Allocation failure preserves the existing index; failed unmaps
+retain the old mapping for a later maintenance retry. Shrink failures do not
+fail foreground mutations or disable disk compaction scheduling.</p>
+
+<p>Failed writes that made partial progress are truncated back to the last complete
+record, and the repair is synced. If rollback fails, further appends fail until
+the database is reopened. Successful writes are not synced individually; pass
+<code>WithSync(true)</code> to <code>Open</code> (or to a single <code>Set</code>/<code>Delete</code>/<code>Update</code>) to
+fsync the log before the call returns.</p>
+
+<h2 id="compaction">Compaction</h2>
+
+<p>Successful mutations queue background compaction when more than 33% of a shard&#x27;s
+encoded log bytes are obsolete and at least 1 MiB is obsolete. A single worker
+serves a bounded queue with at most one queued request per shard. Checks use
+incremental byte counters, without scanning segments or adding reads to the write
+path. Compaction holds one shard&#x27;s exclusive lock for its pass; other shards can
+continue serving requests.</p>
+
+<p>Pass <code>WithCompactionThreshold(ratio, minObsoleteBytes)</code> to <code>Open</code> to configure the
+state trigger. For example, <code>WithCompactionThreshold(0.4, 1&lt;&lt;20)</code> requires more
+than 40% obsolete bytes and at least 1 MiB of obsolete data in that shard. The
+second argument is <strong>bytes</strong>, replacing the previous record-count unit. The ratio
+must be finite and in <code>[0, 1)</code>; a zero minimum is allowed. The option has no effect
+when passed to <code>Set</code>.</p>
+
+<p>Both thresholds count complete encoded records: the 21-byte header, key, value,
+and alignment padding. Obsolete bytes are total retained record bytes minus
+bytes referenced by the index. Deletes count toward retained history until
+compaction removes them.
+Expired records become obsolete when pruned from the index. Counters are rebuilt
+from existing logs during recovery. Index slots remain eight bytes.</p>
+
+<p>A larger minimum trades more retained history for fewer compaction passes and
+sync operations. The minimum applies per shard: 1 MiB across 64 shards amounts
+to roughly 64 MiB of possible obsolete history before considering the ratio,
+queued work, and live data. This is a scheduling threshold, not a disk-space cap.</p>
+
+<p>Every ten seconds, the worker also checks shards with tracked expirations or
+pending cleanup. It prunes expired index entries, then applies the configured
+obsolete-byte ratio without the state trigger&#x27;s minimum byte count. Every shard
+without a queued pass also checks for sparse indexes and retained mappings,
+even when disk compaction is unnecessary. Queued and explicit compaction passes
+check for shrinking after they finish using index positions. Failed disk passes
+wait for the ticker to retry, including when pruning removed the last expiration
+entry. Recovery queues eligible history, already
+expired records, and unfinished packing without waiting for another write.
+Pending passes complete even below the configured thresholds.</p>
+
+<p>The pass first removes obsolete history from oldest to newest, preserving delete
+and expiration semantics. It then packs current records toward the existing head
+and removes empty files only from the oldest boundary, keeping one filename gap.
+Values retain their encodings and expiration times.</p>
+
+<p>Replacement records use a 64 KiB output buffer, flushed before the temporary
+<code>NNNNNNN.log.compact</code> file is synced and atomically renamed over its published
+log. Multi-segment passes first sync the active head before discarding older
+history. A lone head needs only the synced replacement; its original stays intact
+until rename. The directory is synced before retiring any sources. An interrupted
+pass can leave identical records in source and destination files; replay handles
+those normally. Unpublished temporary files are discarded during recovery.
+Compaction needs temporary space for one output segment and holds relocation
+information proportional to the shard&#x27;s index size.</p>
+
+<h2 id="record-format">Record format</h2>
+
+<p>The 21-byte record header is <code>[crc32 4][type 1][keylen 4][vallen 4][expiration 8]</code>,
+followed by the key and value, then zero padding to a 16-byte boundary. Every
+record starts at a 16-byte-aligned offset. Header integers are big-endian. The
+checksum covers the type, lengths, expiration, key, and value, excluding padding;
+recovery also validates that padding is zero. Type tags are fixed:</p>
+
+<div class="table-scroll" role="region" aria-label="Reference table" tabindex="0">
+<table>
+<thead><tr><th scope="col">Tag</th><th scope="col">Type</th><th scope="col">Value payload</th></tr></thead>
+<tbody>
+
+<tr><td><code>0x01</code></td><td>Delete</td><td>Empty; expiration must be zero</td></tr>
+
+<tr><td><code>0x02</code></td><td><code>[]byte</code></td><td>Any length, including empty</td></tr>
+
+<tr><td><code>0x03</code></td><td><code>int64</code></td><td>8 little-endian bytes</td></tr>
+
+<tr><td><code>0x04</code></td><td><code>uint64</code></td><td>8 little-endian bytes</td></tr>
+
+<tr><td><code>0x05</code></td><td><code>float64</code></td><td>8 little-endian bytes containing its IEEE 754 bits</td></tr>
+
+<tr><td><code>0x06</code></td><td><code>bool(false)</code></td><td>Empty</td></tr>
+
+<tr><td><code>0x07</code></td><td><code>bool(true)</code></td><td>Empty</td></tr>
+
+<tr><td><code>0x08</code></td><td><code>string</code></td><td>Any length, including empty</td></tr>
+
+</tbody>
+</table>
+</div>
+
+<p>Both boolean tags have the logical type <code>bool</code>. Empty bytes, false, true, and
+deletes remain distinct records. Invalid tags or payload lengths return an error
+wrapping <code>ErrInvalidValue</code>. Compaction and recovery preserve value types and
+exact floating-point bits. Unchanged writes compare type, payload, and expiration.</p>
+
+<p>With 16-byte keys, eight-byte values occupy 48 bytes per record (three padding
+bytes), and 1 KiB values occupy 1,072 bytes (eleven padding bytes).</p>
+      </article>
+      <nav class="pagination" aria-label="Previous and next pages"><a href="usage.html" rel="prev"><span>Previous</span>Usage</a><a href="metrics.html" rel="next"><span>Next</span>Metrics dashboard <span aria-hidden="true">→</span></a></nav>
+      <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/storage.html">Edit this page <span aria-hidden="true">↗</span></a></footer>
+    </main>
+    <aside class="toc">
+      <p class="nav-label">On this page</p>
+      <nav aria-label="On this page">
+        <a href="#database-layout">Database layout</a>
+        <a href="#single-process-access">Single-process access</a>
+        <a href="#recovery">Recovery</a>
+        <a href="#compaction">Compaction</a>
+        <a href="#record-format">Record format</a>
+      </nav>
+    </aside>
+  </div>
+  <p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Dot · Metrics</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <h1 class="brand"><span class="dot" aria-hidden="true"></span>Dot<span class="version">{{.Version}}</span></h1>
+      <div class="connection" role="status" aria-live="polite">
+        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+        <span id="status">Connecting…</span>
+      </div>
+    </header>
+
+    <p id="notice" class="notice" role="status" hidden></p>
+
+    <section class="operations" aria-label="Operations">
+      <div class="operations-scroll">
+        <table>
+          <thead><tr><th scope="col">Operation</th><th scope="col">Ops/sec</th><th scope="col">Mean latency</th><th scope="col">p99 latency</th></tr></thead>
+          <tbody>
+          <tr>
+            <th scope="row"><span class="series-dot get" aria-hidden="true"></span>Get</th>
+            <td><button type="button" class="operation-value" data-metric="get_ops" aria-pressed="false" aria-label="Graph Get ops/sec"><span id="value-get_ops">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="get_mean_ns" aria-pressed="false" aria-label="Graph Get mean latency"><span id="value-get_mean_ns">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="get_p99_ns" aria-pressed="false" aria-label="Graph Get p99 latency"><span id="value-get_p99_ns">—</span></button></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="series-dot set" aria-hidden="true"></span>Set</th>
+            <td><button type="button" class="operation-value" data-metric="set_ops" aria-pressed="false" aria-label="Graph Set ops/sec"><span id="value-set_ops">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="set_mean_ns" aria-pressed="false" aria-label="Graph Set mean latency"><span id="value-set_mean_ns">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="set_p99_ns" aria-pressed="false" aria-label="Graph Set p99 latency"><span id="value-set_p99_ns">—</span></button></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="series-dot delete" aria-hidden="true"></span>Delete</th>
+            <td><button type="button" class="operation-value" data-metric="delete_ops" aria-pressed="false" aria-label="Graph Delete ops/sec"><span id="value-delete_ops">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="delete_mean_ns" aria-pressed="false" aria-label="Graph Delete mean latency"><span id="value-delete_mean_ns">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="delete_p99_ns" aria-pressed="false" aria-label="Graph Delete p99 latency"><span id="value-delete_p99_ns">—</span></button></td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="series-dot update" aria-hidden="true"></span>Update</th>
+            <td><button type="button" class="operation-value" data-metric="update_ops" aria-pressed="false" aria-label="Graph Update ops/sec"><span id="value-update_ops">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="update_mean_ns" aria-pressed="false" aria-label="Graph Update mean latency"><span id="value-update_mean_ns">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="update_p99_ns" aria-pressed="false" aria-label="Graph Update p99 latency"><span id="value-update_p99_ns">—</span></button></td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="history" aria-label="Metric history">
+      <div class="history-header">
+        <div class="button-group metric-options" role="group" aria-label="Metrics to graph">
+          <button type="button" data-metric="disk_bytes" aria-pressed="true"><span class="series-dot disk" aria-hidden="true"></span>On-disk size</button>
+          <button type="button" data-metric="obsolete_bytes" aria-pressed="false"><span class="series-dot obsolete" aria-hidden="true"></span>Obsolete bytes</button>
+          <button type="button" data-metric="entry_count" aria-pressed="false"><span class="series-dot entries" aria-hidden="true"></span>Entries</button>
+          <button type="button" data-metric="index_mapped_bytes" aria-pressed="false" title="Mapped address space for this database's index, including pages not resident in RAM"><span class="series-dot index-mmap" aria-hidden="true"></span>Index mmap</button>
+        </div>
+        <div class="button-group ranges" role="group" aria-label="Graph time range">
+          <button type="button" data-range="60000" aria-pressed="true">Last minute</button>
+          <button type="button" data-range="3600000" aria-pressed="false">Last hour</button>
+          <button type="button" data-range="all" aria-pressed="false">All</button>
+        </div>
+      </div>
+      <div class="plot">
+        <canvas id="chart" role="img" aria-label="Waiting for metric samples"></canvas>
+        <p id="empty" class="empty">Waiting for the first snapshot…</p>
+        <div id="crosshair" class="crosshair" hidden></div>
+        <div id="tooltip" class="tooltip" role="tooltip" hidden>
+          <time id="tooltip-time"></time>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</body>
+</html>

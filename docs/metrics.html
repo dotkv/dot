@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Inspect storage, throughput, and latency from an embedded dashboard.">
+  <meta name="color-scheme" content="light dark">
+  <title>Metrics dashboard · Dot</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html"><span class="brand-dot" aria-hidden="true"></span>Dot <span class="brand-label">Documentation</span></a>
+    <div class="header-actions">
+      <a href="https://github.com/dotkv/dot">GitHub <span aria-hidden="true">↗</span></a>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>Menu</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" id="site-nav">
+      <p class="nav-label">Documentation</p>
+      <nav aria-label="Documentation">
+        <a href="index.html">Getting started</a>
+        <a href="usage.html">Usage</a>
+        <a href="storage.html">Storage &amp; recovery</a>
+        <a href="metrics.html" aria-current="page">Metrics dashboard</a>
+        <a href="development.html">Development</a>
+      </nav>
+      <p class="sidebar-note">A small, log-backed<br>key-value store for Go.</p>
+    </aside>
+    <main id="content" tabindex="-1">
+      <div class="page-heading">
+        <p class="eyebrow">Dot / Documentation</p>
+        <h1>Metrics dashboard</h1>
+        <p class="lead">Inspect storage, throughput, and latency from an embedded dashboard.</p>
+      </div>
+      <article aria-label="Metrics dashboard">
+<h2 id="mount-the-handler">Mount the handler</h2>
+
+<p><code>MetricsHandler</code> serves a dashboard bundled into the binary, using plain HTML,
+CSS, and JavaScript with automatic light/dark styling. Mount it with <code>net/http</code>:</p>
+
+<pre><code class="language-go">mux := http.NewServeMux()
+mux.Handle(&quot;/debug/dot/&quot;, http.StripPrefix(&quot;/debug/dot&quot;, db.MetricsHandler()))
+if err := http.ListenAndServe(&quot;127.0.0.1:8080&quot;, mux); err != nil {
+    log.Print(err)
+}</code></pre>
+
+<p>The page opens a WebSocket using <code>github.com/coder/websocket</code> and receives the
+current metrics immediately, then once per second. Configure the push interval
+with <code>db.MetricsHandler(dot.WithMetricsInterval(250*time.Millisecond))</code>; the
+interval must be positive. Register the mount path with a trailing slash and
+strip the prefix without that slash, as shown above, so the handler receives
+paths beginning with <code>/</code>.</p>
+
+<h2 id="storage-metrics">Storage metrics</h2>
+
+<p>Disk usage scans filesystem allocation under the database path at each snapshot,
+outside shard locks. Storage counters do not scan index slots:</p>
+
+<div class="table-scroll" role="region" aria-label="Reference table" tabindex="0">
+<table>
+<thead><tr><th scope="col">Metric</th><th scope="col">Meaning</th></tr></thead>
+<tbody>
+
+<tr><td>On-disk size</td><td>Allocated filesystem blocks under the database path, including logs, <code>META</code>, <code>LOCK</code>, temporary compaction files, and directories. Sparse holes do not count; child symlinks are not followed and hard links count once. Filesystem-wide overhead is not attributable to this path.</td></tr>
+
+<tr><td>Obsolete bytes</td><td>Retained log bytes no longer referenced by the index, including replaced records and tombstones. Compaction reclaims this history.</td></tr>
+
+<tr><td>Entries</td><td>Keys currently in the index. Expired keys remain counted until pruning; this is not an exact live-key count.</td></tr>
+
+<tr><td>Index mmap</td><td>Mapped address space for this database&#x27;s anonymous index allocations, including any previous mapping retained after a failed unmap. Includes pages not resident in RAM; this measures index mapping size rather than resident memory.</td></tr>
+
+</tbody>
+</table>
+</div>
+
+<h2 id="operation-metrics">Operation metrics</h2>
+
+<p>The operations table reports Get, Set, Delete, and Update throughput, mean latency,
+and approximate p99 latency. Select table values to graph them; series with
+matching units can be compared. P99 lines are dashed. Rates display as <code>0.24</code> or
+<code>4.4K</code> under the Ops/sec header, with two decimal places below 1,000 and one in
+compact notation. Latencies keep two decimal places in their displayed unit.
+Rates and latencies use a trailing ten-second window sampled at one-second
+resolution. The boundary can extend the window by up to one sampling interval;
+rates divide by the actual elapsed time. Initial readings use the shorter time
+since collection began. Mean latency is total duration divided by timed calls;
+p99 comes from the combined window histogram, rounding up by at most 12.5%.
+Empty windows display zero throughput and unavailable latency. Small sample
+counts make p99 less stable.</p>
+
+<p>Operation instrumentation is enabled only while WebSocket viewers are connected.
+Counters and histograms are shared across all handlers and viewers on the DB.
+Disconnecting the last viewer disables recording and discards the window; a
+reconnection starts fresh. With no viewers, each operation only checks whether
+recording is enabled. Calls already in progress may finish recording to the old
+session. All API calls count, including errors, misses, and unchanged writes;
+Update counts once. Latency includes lock waits, callbacks, and requested syncs.
+Counters are maintained per shard, require no per-call allocations, and snapshots
+are approximate under concurrent calls rather than transactional.</p>
+
+<h2 id="latency-collection">Latency collection</h2>
+
+<p>Timing is enabled by default. For throughput without clock reads or histogram
+updates, use <code>db.MetricsHandler(dot.WithMetricsLatency(false))</code>. Timing remains
+active while any connected handler requests it. Histograms use bounded memory
+(about 1 MiB for the default 64 shards, plus window readings), independent of
+operation volume. Clock reads and counter/histogram updates occur on the operation
+path; window aggregation and percentile calculation run in dashboard collection.</p>
+
+<h2 id="sampling-and-stale-readings">Sampling and stale readings</h2>
+
+<p>Snapshots briefly try each shard&#x27;s read lock. Busy shards retain their previous
+readings; until every shard has been sampled,
+the UI waits before showing totals. Shards are sampled independently, so totals
+are not a point-in-time database snapshot. If a disk scan fails, the previous disk
+reading is retained and marked stale; the first complete scan is required before
+showing totals. Disk scans add work proportional to the number of files.</p>
+
+<h2 id="browser-history">Browser history</h2>
+
+<p>Collection is shared by viewers of the same handler and runs only while viewers
+are connected. The server keeps current readings only. The browser records graph
+history in a ring capped at 20,000 snapshots for last-minute, last-hour, and all
+retained-history views; older samples are evicted and reloading clears it. At the
+default interval this retains roughly 5.5 hours. Rendering preserves per-pixel
+extrema. Metric buttons support multiple selections with matching units on a
+shared scale; hovering shows sample values, including raw nanoseconds for latency.
+Closing the database stops its WebSockets.
+HTTP server shutdown and any authentication middleware remain with the application.</p>
+
+<h2 id="try-the-dashboard">Try the dashboard</h2>
+
+<p>The dashboard reads Dot's version from the binary's Go build metadata. Tagged
+dependencies show their release version without extra build flags. Untagged
+commits show <code>dev · &lt;short hash&gt;</code>; local builds with uncommitted changes append
+<code>· dirty</code>. Local replacements or missing metadata show <code>dev</code>.</p>
+
+<p>Run <code>go run -buildvcs=true ./fiddle</code> for a demo with a temporary database under <code>/tmp</code> and a
+repeating workload. See <a href="https://github.com/dotkv/dot/tree/master/fiddle">fiddle/README.md</a> for usage.</p>
+      </article>
+      <nav class="pagination" aria-label="Previous and next pages"><a href="storage.html" rel="prev"><span>Previous</span>Storage &amp; recovery</a><a href="development.html" rel="next"><span>Next</span>Development <span aria-hidden="true">→</span></a></nav>
+      <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/metrics.html">Edit this page <span aria-hidden="true">↗</span></a></footer>
+    </main>
+    <aside class="toc">
+      <p class="nav-label">On this page</p>
+      <nav aria-label="On this page">
+        <a href="#mount-the-handler">Mount the handler</a>
+        <a href="#storage-metrics">Storage metrics</a>
+        <a href="#operation-metrics">Operation metrics</a>
+        <a href="#latency-collection">Latency collection</a>
+        <a href="#sampling-and-stale-readings">Sampling and stale readings</a>
+        <a href="#browser-history">Browser history</a>
+        <a href="#try-the-dashboard">Try the dashboard</a>
+      </nav>
+    </aside>
+  </div>
+  <p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>
