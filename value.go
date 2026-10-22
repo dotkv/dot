@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// Value lists the types supported by Get, Set, Update, and Upsert. Records
+// Value lists the types supported by Get, Set, and Update. Records
 // retain their type: Get and Update require the stored type, while Set may
 // replace it. Integers use eight little-endian bytes; float64 uses its IEEE
 // 754 bits in the same byte order. Boolean values are encoded entirely in

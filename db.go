@@ -75,9 +75,10 @@ func acquireLock(path string) (*os.File, error) {
 
 // Options configures database and key operations.
 type Options struct {
-	expiration int64
-	syncWrites bool
-	compaction compactionThreshold
+	expiration    int64
+	expirationSet bool
+	syncWrites    bool
+	compaction    compactionThreshold
 }
 
 // Option configures Open or Set.
@@ -98,7 +99,9 @@ func WithCompactionThreshold(ratio float64, minObsoleteBytes uint64) Option {
 
 // WithExpiration sets the time at which a key expires. When passed to Open, it
 // sets the default expiration for Set calls on that database; when passed to
-// Set, it overrides the database default. A zero time.Time clears expiration.
+// Set or Update, it overrides the database default. On Update it sets the
+// expiration of the written record whether the key already exists or not. A
+// zero time.Time clears expiration.
 func WithExpiration(t time.Time) Option {
 	var ns int64
 	if !t.IsZero() {
@@ -109,12 +112,13 @@ func WithExpiration(t time.Time) Option {
 	}
 	return func(o *Options) {
 		o.expiration = ns
+		o.expirationSet = true
 	}
 }
 
 // WithSync makes writes durable before returning: the shard log is fsynced
 // after the record is appended. When passed to Open it applies to every Set,
-// Delete, Update, and Upsert on the database; when passed to one of those
+// Delete, Update, and Set on the database; when passed to one of those
 // calls it applies to that call only, overriding the database default.
 // WithSync(false) disables a database default for a single call. Syncing
 // costs a storage flush per write and is much slower than the default, which
@@ -126,8 +130,9 @@ func WithSync(syncWrites bool) Option {
 	}
 }
 
-// resolveOptions applies opts over the database defaults.
-func (db *DB) resolveOptions(opts []Option) (expiration int64, syncWrites bool) {
+// resolveOptions applies opts over the database defaults. expirationSet
+// reports whether any option explicitly set an expiration.
+func (db *DB) resolveOptions(opts []Option) (expiration int64, syncWrites, expirationSet bool) {
 	expiration, syncWrites = db.expiration, db.syncWrites
 	if len(opts) > 0 {
 		options := Options{expiration: expiration, syncWrites: syncWrites}
@@ -136,9 +141,9 @@ func (db *DB) resolveOptions(opts []Option) (expiration int64, syncWrites bool) 
 				opt(&options)
 			}
 		}
-		expiration, syncWrites = options.expiration, options.syncWrites
+		expiration, syncWrites, expirationSet = options.expiration, options.syncWrites, options.expirationSet
 	}
-	return expiration, syncWrites
+	return expiration, syncWrites, expirationSet
 }
 
 func isExpired(expiration int64) bool {
@@ -256,7 +261,7 @@ func (db *DB) shard(key []byte) (*Shard, uint64) {
 // or val, so callers may reuse their byte slices after Set returns. Set may
 // replace an existing key with a different type.
 func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
-	expiration, syncWrites := db.resolveOptions(opts)
+	expiration, syncWrites, _ := db.resolveOptions(opts)
 	var encoded [8]byte
 	ty, value, err := encodeValue(val, &encoded)
 	if err != nil {
@@ -338,18 +343,24 @@ func (db *DB) Get[T Value, K Key](key K) (T, error) {
 	return value, nil
 }
 
-// Update atomically replaces an existing value with fn's result, preserving its
-// expiration. Missing or expired keys return ErrNotFound without calling fn;
-// type mismatches and malformed encodings also fail without calling fn.
-// The callback runs once under the shard's exclusive lock. It must be short and
-// must not call methods on this DB. A panic propagates without changing the value.
-// Byte slices passed to fn are owned by the caller and may be mutated or retained.
-// Returned slices are copied before Update returns; nil stores an empty value.
-// An unchanged encoding does not append a record. A write error leaves the index
+// Update atomically reads the current value, calls fn, and stores fn's result,
+// inserting when the key is missing. The callback receives the existing value
+// and true, or the zero value of T and false for a missing or expired key.
+// Expired keys are treated as absent and replaced. If fn returns a non-nil
+// error, nothing is written and the error is returned as-is; the returned
+// value is ignored. A stored type different from T fails with an error
+// wrapping ErrTypeMismatch without calling fn, as do malformed encodings.
+// The callback runs once under the shard's exclusive lock. It must be short
+// and must not call methods on this DB. A panic propagates without changing
+// the value. Byte slices passed to fn are owned by the caller and may be
+// mutated or retained. Returned slices are copied before Update returns; nil
+// stores an empty value. If WithExpiration is passed, it sets the expiration
+// of the written record; otherwise an existing key keeps its expiration and
+// an insert uses the database default. An unchanged value with an unchanged
+// expiration does not append a record. A write error leaves the index
 // unchanged, but cannot undo any external effects of the callback.
-// Options other than WithSync have no effect.
-func (db *DB) Update[T Value, K Key](key K, fn func(T) T, opts ...Option) error {
-	_, syncWrites := db.resolveOptions(opts)
+func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (error, T), opts ...Option) error {
+	expiration, syncWrites, expirationSet := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	s.lock.Lock()
@@ -359,120 +370,37 @@ func (db *DB) Update[T Value, K Key](key K, fn func(T) T, opts ...Option) error 
 	}
 	var value T
 	var pos int
-	var expiration int64
 	var ty recordType
 	var err error
 	var previous []byte
 	var raw scalarValue
+	var prevExp int64
+	exists := false
 	out, byteValue := any(&value).(*[]byte)
 	sout, stringValue := any(&value).(*string)
 	if byteValue || stringValue {
 		// Keep the original in the write scratch space for no-op detection,
 		// and give the callback a separate copy it can mutate or retain.
-		pos, previous, ty, expiration, err = s.index.lookupPayload(s.log, kb, hash, s.log.writeBuffer[:], true)
-	} else {
-		pos, raw, expiration, err = s.index.findScalar(s.log, kb, hash)
-	}
-	if err != nil {
-		return fmt.Errorf("index update: %w", err)
-	}
-	if pos < 0 || isExpired(expiration) {
-		return ErrNotFound
-	}
-	if byteValue {
-		if err := checkType[T](ty); err != nil {
-			return fmt.Errorf("index update: %w", err)
-		}
-		*out = bytes.Clone(previous)
-	} else if stringValue {
-		if err := checkType[T](ty); err != nil {
-			return fmt.Errorf("index update: %w", err)
-		}
-		*sout = string(previous)
-	} else {
-		value, err = decodeScalar[T](raw)
-		if err != nil {
-			return fmt.Errorf("index update: %w", err)
-		}
-	}
-	var encoded [8]byte
-	ty, payload, err := encodeValue(fn(value), &encoded)
-	if err != nil {
-		return err
-	}
-	if byteValue || stringValue {
-		if bytes.Equal(payload, previous) {
-			return nil
-		}
-	} else if scalarBytes(ty, payload) == raw {
-		return nil
-	}
-	previousSize := len(previous)
-	if !byteValue && !stringValue {
-		previousSize = raw.size
-	}
-	change := s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize))
-	if err := s.appendSet(ty, kb, payload, change); err != nil {
-		return err
-	}
-	if syncWrites && change.kind != indexUnchanged {
-		return s.syncHead()
-	}
-	return nil
-}
-
-// Upsert atomically reads the current value and stores fn's result, inserting
-// when the key is missing. The callback receives the existing value and true,
-// or the zero value of T and false for a missing or expired key. Expired keys
-// are treated as absent and replaced. A stored type different from T fails
-// with an error wrapping ErrTypeMismatch without calling fn, like Update.
-// The callback runs once under the shard's exclusive lock. It must be short
-// and must not call methods on this DB. A panic propagates without changing
-// the value. Options apply when inserting; an existing key keeps its
-// expiration, like Update. An unchanged encoding does not append a record.
-func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts ...Option) error {
-	expiration, syncWrites := db.resolveOptions(opts)
-	kb := []byte(key)
-	s, hash := db.shard(kb)
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	if s.closed {
-		return os.ErrClosed
-	}
-	var value T
-	var pos int
-	var ty recordType
-	var err error
-	var previous []byte
-	var raw scalarValue
-	exists := false
-	out, byteValue := any(&value).(*[]byte)
-	sout, stringValue := any(&value).(*string)
-	if byteValue || stringValue {
-		var prevExp int64
-		// liveOnly treats expired keys as absent; prepareSet below replaces
-		// the expired entry in place.
+		// liveOnly treats expired keys as absent.
 		pos, previous, ty, prevExp, err = s.index.lookupPayload(s.log, kb, hash, s.log.writeBuffer[:], true)
 		if err != nil {
-			return fmt.Errorf("index upsert: %w", err)
+			return fmt.Errorf("index update: %w", err)
 		}
 		if pos >= 0 {
 			if err := checkType[T](ty); err != nil {
-				return fmt.Errorf("index upsert: %w", err)
+				return fmt.Errorf("index update: %w", err)
 			}
 			if byteValue {
 				*out = bytes.Clone(previous)
 			} else {
 				*sout = string(previous)
 			}
-			expiration = prevExp
 			exists = true
 		}
 	} else {
-		var prevExp int64
 		pos, raw, prevExp, err = s.index.findScalar(s.log, kb, hash)
 		if err != nil {
-			return fmt.Errorf("index upsert: %w", err)
+			return fmt.Errorf("index update: %w", err)
 		}
 		if pos >= 0 {
 			if isExpired(prevExp) {
@@ -480,31 +408,41 @@ func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts 
 			} else {
 				value, err = decodeScalar[T](raw)
 				if err != nil {
-					return fmt.Errorf("index upsert: %w", err)
+					return fmt.Errorf("index update: %w", err)
 				}
-				expiration = prevExp
 				exists = true
 			}
 		}
 	}
+	if exists && !expirationSet {
+		expiration = prevExp
+	}
+	fnErr, newValue := fn(value, exists)
+	if fnErr != nil {
+		return fnErr
+	}
 	var encoded [8]byte
-	ty, payload, err := encodeValue(fn(value, exists), &encoded)
+	ty, payload, err := encodeValue(newValue, &encoded)
 	if err != nil {
 		return err
 	}
 	if exists {
+		// An unchanged value with an unchanged expiration does not append
+		// a record.
+		sameValue := false
 		if byteValue || stringValue {
-			if bytes.Equal(payload, previous) {
-				return nil
-			}
-		} else if scalarBytes(ty, payload) == raw {
+			sameValue = bytes.Equal(payload, previous)
+		} else {
+			sameValue = scalarBytes(ty, payload) == raw
+		}
+		if sameValue && (!expirationSet || expiration == prevExp) {
 			return nil
 		}
 		previousSize := len(previous)
 		if !byteValue && !stringValue {
 			previousSize = raw.size
 		}
-		change := s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize))
+		change := s.index.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(kb), previousSize))
 		if err := s.appendSet(ty, kb, payload, change); err != nil {
 			return err
 		}
@@ -515,7 +453,7 @@ func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts 
 	}
 	change, err := s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
 	if err != nil {
-		return fmt.Errorf("prepare upsert: %w", err)
+		return fmt.Errorf("prepare update: %w", err)
 	}
 	if err := s.appendSet(ty, kb, payload, change); err != nil {
 		return err
@@ -529,7 +467,7 @@ func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts 
 // Delete removes key. Deleting a missing key succeeds.
 // Options other than WithSync have no effect.
 func (db *DB) Delete[K Key](key K, opts ...Option) error {
-	_, syncWrites := db.resolveOptions(opts)
+	_, syncWrites, _ := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	s.lock.Lock()

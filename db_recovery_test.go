@@ -156,7 +156,7 @@ func TestDBRecovery(t *testing.T) {
 	if err := db.Delete(retained[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update(scalarKey, func(v uint64) uint64 { return v + 1 }); err != nil {
+	if err := db.Update(scalarKey, func(v uint64, exists bool) (error, uint64) { return nil, v + 1 }); err != nil {
 		t.Fatal(err)
 	}
 	db = reopenDB(t, db)

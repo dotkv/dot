@@ -12,10 +12,10 @@ is not reliable on NFS; use local storage.
 
 ## Typed values
 
-`Set`, `Get`, `Update`, and `Upsert` support `[]byte`, `string`, `int64`,
+`Set`, `Get`, and `Update` support `[]byte`, `string`, `int64`,
 `uint64`, `float64`, and `bool`. Each record stores its value type. `Set` may
-replace an existing key with a different type; `Get[T]`, `Update[T]`, and
-`Upsert[T]` require the stored type and return an error wrapping
+replace an existing key with a different type; `Get[T]` and `Update[T]`
+require the stored type and return an error wrapping
 `ErrTypeMismatch` otherwise. Use `errors.Is` to check it. There are no
 implicit conversions: `string` and `[]byte` are distinct types, as are the
 numeric types. Missing or expired keys return `ErrNotFound` before checking
@@ -65,7 +65,7 @@ Recovery scans all retained log records; checkpoints and a manifest are not used
 Failed writes that made partial progress are truncated back to the last complete
 record, and the repair is synced. If rollback fails, further appends fail until
 the database is reopened. Successful writes are not synced individually; pass
-`WithSync(true)` to `Open` (or to a single `Set`/`Delete`/`Update`/`Upsert`) to
+`WithSync(true)` to `Open` (or to a single `Set`/`Delete`/`Update`) to
 fsync the log before the call returns.
 
 ## Compaction
@@ -138,24 +138,29 @@ are owned by the caller and may be mutated or retained; returned bytes are copie
 into the log. A panic leaves the stored value unchanged and releases the lock.
 A failed write cannot undo external effects performed by the callback.
 
-## Upsert
+## Update
 
-`Upsert` combines lookup and write for read-modify-write cycles that must also
-handle missing keys, such as counters:
+`Update` is the read-modify-write primitive: it reads the current value, calls
+the callback, and stores the callback's result, inserting when the key is
+missing:
 
 ```go
-err := db.Upsert("counter", func(cur uint64, exists bool) uint64 {
+err := db.Update("counter", func(cur uint64, exists bool) (error, uint64) {
 	if !exists {
-		return 1
+		return nil, 1
 	}
-	return cur + 1
+	return nil, cur + 1
 })
 ```
 
 The callback receives the current value and `true`, or the zero value and
-`false` for a missing or expired key. A type mismatch fails without calling
-the callback. Options apply when inserting; an existing key keeps its
-expiration, like `Update`. Unchanged encodings skip the log append.
+`false` for a missing or expired key. Returning a non-nil error aborts the
+write and propagates the error; the returned value is ignored. To update only
+existing keys, return `ErrNotFound` (or any error) when `exists` is false. A
+type mismatch fails without calling the callback. `WithExpiration` sets the
+expiration of the written record; otherwise an existing key keeps its
+expiration and an insert uses the database default. Unchanged values with an
+unchanged expiration skip the log append.
 
 ## Scan
 

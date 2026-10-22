@@ -32,7 +32,7 @@ func TestStringValues(t *testing.T) {
 	if _, err := db.Get[string]([]byte("byteskey")); !errors.Is(err, ErrTypeMismatch) {
 		t.Fatalf("Get[string] on []byte: error=%v, want ErrTypeMismatch", err)
 	}
-	if err := db.Update(key, func(cur string) string { return cur + " world" }); err != nil {
+	if err := db.Update(key, func(cur string, exists bool) (error, string) { return nil, cur + " world" }); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := db.Get[string](key); err != nil || got != " world" {
@@ -49,14 +49,14 @@ func TestStringKeys(t *testing.T) {
 	if got, err := db.Get[uint64]([]byte("skey")); err != nil || got != 42 {
 		t.Fatalf("Get with []byte key: got %d error=%v", got, err)
 	}
-	if err := db.Update("skey", func(cur uint64) uint64 { return cur + 1 }); err != nil {
+	if err := db.Update("skey", func(cur uint64, exists bool) (error, uint64) { return nil, cur + 1 }); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Upsert("skey", func(cur uint64, exists bool) uint64 {
+	if err := db.Update("skey", func(cur uint64, exists bool) (error, uint64) {
 		if !exists || cur != 43 {
-			t.Errorf("upsert saw cur=%d exists=%v", cur, exists)
+			t.Errorf("update saw cur=%d exists=%v", cur, exists)
 		}
-		return cur + 1
+		return nil, cur + 1
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -71,25 +71,25 @@ func TestStringKeys(t *testing.T) {
 	}
 }
 
-func TestUpsert(t *testing.T) {
+func TestUpdate(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("upsert-counter")
 
 	// Insert path: missing key reports exists=false and zero value.
-	if err := db.Upsert(key, func(cur uint64, exists bool) uint64 {
+	if err := db.Update(key, func(cur uint64, exists bool) (error, uint64) {
 		if exists || cur != 0 {
 			t.Errorf("insert: cur=%d exists=%v", cur, exists)
 		}
-		return 1
+		return nil, 1
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// Update path: existing key reports exists=true and current value.
-	if err := db.Upsert(key, func(cur uint64, exists bool) uint64 {
+	if err := db.Update(key, func(cur uint64, exists bool) (error, uint64) {
 		if !exists || cur != 1 {
 			t.Errorf("update: cur=%d exists=%v", cur, exists)
 		}
-		return cur + 1
+		return nil, cur + 1
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -97,24 +97,40 @@ func TestUpsert(t *testing.T) {
 		t.Fatalf("counter=%d error=%v, want 2", got, err)
 	}
 
+	// A callback error aborts the write and propagates as-is.
+	sentinel := errors.New("abort")
+	called := false
+	if err := db.Update(key, func(cur uint64, exists bool) (error, uint64) {
+		called = true
+		return sentinel, 0
+	}); !errors.Is(err, sentinel) {
+		t.Fatalf("callback error: error=%v, want %v", err, sentinel)
+	}
+	if !called {
+		t.Fatal("callback was not called")
+	}
+	if got, err := db.Get[uint64](key); err != nil || got != 2 {
+		t.Fatalf("aborted update changed value: got %d error=%v", got, err)
+	}
+
 	// Unchanged encoding appends no record.
 	s, _ := db.shard(key)
 	before := s.log.size
-	if err := db.Upsert(key, func(cur uint64, exists bool) uint64 { return cur }); err != nil {
+	if err := db.Update(key, func(cur uint64, exists bool) (error, uint64) { return nil, cur }); err != nil {
 		t.Fatal(err)
 	}
 	if s.log.size != before {
-		t.Fatal("unchanged upsert appended a record")
+		t.Fatal("unchanged update appended a record")
 	}
 
 	// Type mismatch fails without calling fn.
 	if err := db.Set([]byte("typed"), []byte("bytes")); err != nil {
 		t.Fatal(err)
 	}
-	called := false
-	err := db.Upsert([]byte("typed"), func(cur uint64, exists bool) uint64 {
+	called = false
+	err := db.Update([]byte("typed"), func(cur uint64, exists bool) (error, uint64) {
 		called = true
-		return cur
+		return nil, cur
 	})
 	if !errors.Is(err, ErrTypeMismatch) || called {
 		t.Fatalf("mismatch: error=%v called=%v", err, called)
@@ -125,11 +141,11 @@ func TestUpsert(t *testing.T) {
 	if err := db.Set([]byte("exp"), uint64(7), WithExpiration(past)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Upsert([]byte("exp"), func(cur uint64, exists bool) uint64 {
+	if err := db.Update([]byte("exp"), func(cur uint64, exists bool) (error, uint64) {
 		if exists || cur != 0 {
 			t.Errorf("expired: cur=%d exists=%v", cur, exists)
 		}
-		return 99
+		return nil, 99
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,12 +153,12 @@ func TestUpsert(t *testing.T) {
 		t.Fatalf("replaced expired: got %d error=%v", got, err)
 	}
 
-	// Existing keys keep their expiration, like Update.
+	// Without options, an existing key keeps its expiration.
 	future := time.Now().Add(time.Hour)
 	if err := db.Set([]byte("ttl"), "v", WithExpiration(future)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Upsert([]byte("ttl"), func(cur string, exists bool) string { return "v2" }); err != nil {
+	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (error, string) { return nil, "v2" }); err != nil {
 		t.Fatal(err)
 	}
 	s2, hash := db.shard([]byte("ttl"))
@@ -151,9 +167,23 @@ func TestUpsert(t *testing.T) {
 		t.Fatalf("expiration not preserved: expiration=%d error=%v", expiration, err)
 	}
 
+	// WithExpiration on Update sets the expiration of an existing key.
+	later := future.Add(time.Hour)
+	if err := db.Update([]byte("ttl"), func(cur string, exists bool) (error, string) { return nil, "v3" },
+		WithExpiration(later)); err != nil {
+		t.Fatal(err)
+	}
+	pos, _, _, expiration, err = s2.index.findPayload(s2.log, []byte("ttl"), hash, nil)
+	if err != nil || pos < 0 || expiration != later.UnixNano() {
+		t.Fatalf("expiration not updated: expiration=%d error=%v", expiration, err)
+	}
+	if got, err := db.Get[string]([]byte("ttl")); err != nil || got != "v3" {
+		t.Fatalf("value after expiration update: got %q error=%v", got, err)
+	}
+
 	// Options apply on insert.
 	ttl := time.Now().Add(2 * time.Hour)
-	if err := db.Upsert([]byte("ttl-new"), func(cur string, exists bool) string { return "n" },
+	if err := db.Update([]byte("ttl-new"), func(cur string, exists bool) (error, string) { return nil, "n" },
 		WithExpiration(ttl)); err != nil {
 		t.Fatal(err)
 	}
