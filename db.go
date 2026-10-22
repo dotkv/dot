@@ -44,6 +44,7 @@ type Key interface {
 type DB struct {
 	path             string
 	expiration       int64
+	syncWrites       bool
 	shards           [shardCount]Shard
 	backgroundCancel context.CancelFunc
 	backgroundWG     sync.WaitGroup
@@ -75,6 +76,7 @@ func acquireLock(path string) (*os.File, error) {
 // Options configures database and key operations.
 type Options struct {
 	expiration int64
+	syncWrites bool
 	compaction compactionThreshold
 }
 
@@ -110,6 +112,35 @@ func WithExpiration(t time.Time) Option {
 	}
 }
 
+// WithSync makes writes durable before returning: the shard log is fsynced
+// after the record is appended. When passed to Open it applies to every Set,
+// Delete, Update, and Upsert on the database; when passed to one of those
+// calls it applies to that call only, overriding the database default.
+// WithSync(false) disables a database default for a single call. Syncing
+// costs a storage flush per write and is much slower than the default, which
+// relies on the OS page cache. The index is rebuilt from the log at open, so
+// syncing the log is sufficient for durability.
+func WithSync(syncWrites bool) Option {
+	return func(o *Options) {
+		o.syncWrites = syncWrites
+	}
+}
+
+// resolveOptions applies opts over the database defaults.
+func (db *DB) resolveOptions(opts []Option) (expiration int64, syncWrites bool) {
+	expiration, syncWrites = db.expiration, db.syncWrites
+	if len(opts) > 0 {
+		options := Options{expiration: expiration, syncWrites: syncWrites}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(&options)
+			}
+		}
+		expiration, syncWrites = options.expiration, options.syncWrites
+	}
+	return expiration, syncWrites
+}
+
 func isExpired(expiration int64) bool {
 	return expiration != 0 && expiration <= time.Now().UnixNano()
 }
@@ -134,6 +165,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &DB{path: path,
 		expiration:       options.expiration,
+		syncWrites:       options.syncWrites,
 		backgroundCancel: cancel,
 		compactionQueue:  make(chan *Shard, shardCount),
 		lockFile:         lock,
@@ -224,16 +256,7 @@ func (db *DB) shard(key []byte) (*Shard, uint64) {
 // or val, so callers may reuse their byte slices after Set returns. Set may
 // replace an existing key with a different type.
 func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
-	expiration := db.expiration
-	if len(opts) > 0 {
-		options := Options{expiration: expiration}
-		for _, opt := range opts {
-			if opt != nil {
-				opt(&options)
-			}
-		}
-		expiration = options.expiration
-	}
+	expiration, syncWrites := db.resolveOptions(opts)
 	var encoded [8]byte
 	ty, value, err := encodeValue(val, &encoded)
 	if err != nil {
@@ -250,7 +273,13 @@ func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
-	return s.appendSet(ty, kb, value, change)
+	if err := s.appendSet(ty, kb, value, change); err != nil {
+		return err
+	}
+	if syncWrites && change.kind != indexUnchanged {
+		return s.syncHead()
+	}
+	return nil
 }
 
 // Get returns the value decoded as T. A missing key returns the zero value of T
@@ -318,7 +347,9 @@ func (db *DB) Get[T Value, K Key](key K) (T, error) {
 // Returned slices are copied before Update returns; nil stores an empty value.
 // An unchanged encoding does not append a record. A write error leaves the index
 // unchanged, but cannot undo any external effects of the callback.
-func (db *DB) Update[T Value, K Key](key K, fn func(T) T) error {
+// Options other than WithSync have no effect.
+func (db *DB) Update[T Value, K Key](key K, fn func(T) T, opts ...Option) error {
+	_, syncWrites := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	s.lock.Lock()
@@ -380,7 +411,14 @@ func (db *DB) Update[T Value, K Key](key K, fn func(T) T) error {
 	if !byteValue && !stringValue {
 		previousSize = raw.size
 	}
-	return s.appendSet(ty, kb, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize)))
+	change := s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize))
+	if err := s.appendSet(ty, kb, payload, change); err != nil {
+		return err
+	}
+	if syncWrites && change.kind != indexUnchanged {
+		return s.syncHead()
+	}
+	return nil
 }
 
 // Upsert atomically reads the current value and stores fn's result, inserting
@@ -393,16 +431,7 @@ func (db *DB) Update[T Value, K Key](key K, fn func(T) T) error {
 // the value. Options apply when inserting; an existing key keeps its
 // expiration, like Update. An unchanged encoding does not append a record.
 func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts ...Option) error {
-	expiration := db.expiration
-	if len(opts) > 0 {
-		options := Options{expiration: expiration}
-		for _, opt := range opts {
-			if opt != nil {
-				opt(&options)
-			}
-		}
-		expiration = options.expiration
-	}
+	expiration, syncWrites := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	s.lock.Lock()
@@ -475,17 +504,32 @@ func (db *DB) Upsert[T Value, K Key](key K, fn func(cur T, exists bool) T, opts 
 		if !byteValue && !stringValue {
 			previousSize = raw.size
 		}
-		return s.appendSet(ty, kb, payload, s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize)))
+		change := s.index.prepareUpdate(pos, hash, expiration, expiration, recordSize(len(kb), previousSize))
+		if err := s.appendSet(ty, kb, payload, change); err != nil {
+			return err
+		}
+		if syncWrites && change.kind != indexUnchanged {
+			return s.syncHead()
+		}
+		return nil
 	}
 	change, err := s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare upsert: %w", err)
 	}
-	return s.appendSet(ty, kb, payload, change)
+	if err := s.appendSet(ty, kb, payload, change); err != nil {
+		return err
+	}
+	if syncWrites && change.kind != indexUnchanged {
+		return s.syncHead()
+	}
+	return nil
 }
 
 // Delete removes key. Deleting a missing key succeeds.
-func (db *DB) Delete[K Key](key K) error {
+// Options other than WithSync have no effect.
+func (db *DB) Delete[K Key](key K, opts ...Option) error {
+	_, syncWrites := db.resolveOptions(opts)
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	s.lock.Lock()
@@ -506,6 +550,11 @@ func (db *DB) Delete[K Key](key K) error {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)
+	if syncWrites {
+		if err := s.syncHead(); err != nil {
+			return err
+		}
+	}
 	s.maybeScheduleCompaction()
 	return nil
 }

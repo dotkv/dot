@@ -37,6 +37,15 @@ func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange) 
 	return nil
 }
 
+// syncHead fsyncs the shard log's head file. It requires the shard's exclusive
+// lock and follows a successful record append.
+func (s *Shard) syncHead() error {
+	if err := s.log.headFile.Sync(); err != nil {
+		return fmt.Errorf("sync log: %w", err)
+	}
+	return nil
+}
+
 type compactionThreshold struct {
 	ratio            float64
 	minObsoleteBytes uint64
