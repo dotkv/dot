@@ -9,6 +9,7 @@ const now = Date.parse("2026-10-22T16:57:18.400Z");
 
 function dashboard() {
   const elements = {};
+  let currentTime = now;
   class Element {
     constructor() {
       this.hidden = false;
@@ -23,6 +24,8 @@ function dashboard() {
     before() {}
     append() {}
     replaceChildren() {}
+    focus() {}
+    setPointerCapture() {}
     emit(type, data = {}) { this.listeners[type]?.(data); }
     setAttribute(key, value) { this.attributes[key] = value; }
     getBoundingClientRect() { return { left: 0, top: 0, width: 900, height: 330 }; }
@@ -64,7 +67,7 @@ function dashboard() {
       matchMedia: () => new Element(), addEventListener() {},
     },
     WebSocket, URL, Intl,
-    Date: class extends Date { static now() { return now; } },
+    Date: class extends Date { static now() { return currentTime; } },
     getComputedStyle: () => ({ getPropertyValue: (key) => styles[key] }),
     requestAnimationFrame(callback) { scheduled = callback; return 1; },
     ResizeObserver: class { observe() {} },
@@ -85,6 +88,7 @@ function dashboard() {
     },
     pressed: (key) => buttons.find((button) => button.dataset.metric === key).attributes["aria-pressed"],
     disconnect: () => socket.emit("close"),
+    advance: (ms) => { currentTime += ms; },
     flush,
   };
 }
@@ -225,4 +229,119 @@ test("removed notices stay absent while reconnecting and scan errors retain thei
   ui.receive({ disk_stale: true });
   assert.match(ui.elements.notice.textContent, /Disk usage is unavailable/);
   assert.doesNotMatch(html, /History stays in this tab|id="coverage"|excluding metadata/);
+});
+
+const pointerEvent = (x, y = 100) => ({ button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {} });
+const keyEvent = (key) => ({ key, preventDefault() {} });
+const windowDescription = (ui) => ui.elements.scrubber.attributes["aria-valuetext"];
+
+function loadHistory(ui, seconds = 180) {
+  for (let i = seconds; i >= 0; i--) ui.receive({ time: now - i * 1000, disk_bytes: (i + 1) * 1024 });
+  ui.flush();
+}
+
+test("pausing holds the drawn time window, scale, and hover while new readings arrive", () => {
+  const ui = dashboard();
+  loadHistory(ui);
+  const labels = structuredClone(ui.labels);
+  const paths = structuredClone(ui.paths);
+  const description = windowDescription(ui);
+  ui.advance(500);
+  ui.elements.follow.emit("click"); ui.flush();
+  assert.equal(ui.elements.follow.attributes["aria-pressed"], "false");
+  assert.equal(ui.elements.follow.textContent, "Follow latest");
+  assert.equal(windowDescription(ui), description, "Pausing must retain the already drawn window");
+  ui.advance(9500);
+  ui.receive({ time: now + 10_000, disk_bytes: 1024 ** 4 }); ui.flush();
+  assert.deepEqual(ui.labels, labels, "Off-screen peaks must not rescale a paused chart");
+  assert.deepEqual(ui.paths, paths, "New samples must not slide existing points");
+  ui.elements.chart.emit("pointermove", pointerEvent(880));
+  assert.equal(ui.elements["tooltip-time"].dateTime, new Date(now).toISOString());
+  assert.match(ui.elements.chart.attributes["aria-label"], /Paused.*61 snapshots/);
+  ui.elements.follow.emit("click"); ui.flush();
+  assert.equal(ui.elements.follow.attributes["aria-pressed"], "true");
+  assert.notEqual(windowDescription(ui), description);
+  assert.notDeepEqual(yLabels(ui), labels.filter((label) => label.y !== 321).map((label) => label.text));
+});
+
+test("scrolling and dragging pan a fixed-size window within loaded history", () => {
+  const ui = dashboard();
+  loadHistory(ui);
+  let prevented = false;
+  ui.elements.chart.emit("wheel", { deltaX: 0, deltaY: -397, deltaMode: 0, preventDefault() { prevented = true; } });
+  ui.flush();
+  assert(prevented);
+  assert.equal(ui.elements.follow.attributes["aria-pressed"], "false");
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 90_000);
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuemax"]), 120_000);
+  assert.ok(Math.abs(parseFloat(ui.elements["scrubber-window"].style.width) - 100 / 3) < 1e-8);
+  ui.elements.chart.emit("pointerdown", pointerEvent(300));
+  ui.elements.chart.emit("pointermove", pointerEvent(697)); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 60_000);
+  ui.elements.chart.emit("pointerup");
+  const description = windowDescription(ui);
+  ui.elements.chart.emit("pointermove", pointerEvent(800)); ui.flush();
+  assert.equal(windowDescription(ui), description, "Releasing the pointer must finish the drag");
+  ui.elements.chart.emit("wheel", { deltaX: -1e6, deltaY: 0, deltaMode: 0, preventDefault() {} }); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 0);
+  ui.elements.chart.emit("wheel", { deltaX: 1e6, deltaY: 0, deltaMode: 0, preventDefault() {} }); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 120_000);
+  assert.equal(ui.elements.follow.attributes["aria-pressed"], "false", "Reaching the newest data must keep following off");
+});
+
+test("scrubber clicks, thumb drags, and keyboard controls navigate the loaded timeline", () => {
+  const ui = dashboard();
+  loadHistory(ui);
+  ui.elements.scrubber.emit("pointerdown", pointerEvent(450)); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 60_000);
+  ui.elements.scrubber.emit("pointerup");
+  ui.elements.scrubber.emit("pointerdown", pointerEvent(450));
+  ui.elements.scrubber.emit("pointermove", pointerEvent(600)); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 90_000);
+  ui.elements.scrubber.emit("pointercancel");
+  ui.elements.scrubber.emit("pointermove", pointerEvent(0)); ui.flush();
+  assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), 90_000);
+  for (const [key, expected] of [["Home", 0], ["ArrowRight", 6000], ["PageDown", 66_000], ["ArrowLeft", 60_000], ["PageUp", 0], ["End", 120_000]]) {
+    ui.elements.scrubber.emit("keydown", keyEvent(key)); ui.flush();
+    assert.equal(Number(ui.elements.scrubber.attributes["aria-valuenow"]), expected, key);
+  }
+});
+
+test("All and range changes stay paused, including when retained data is evicted", () => {
+  const ui = dashboard();
+  loadHistory(ui);
+  ui.click("all");
+  assert.equal(ui.elements.scrubber.attributes["aria-disabled"], "true");
+  const description = windowDescription(ui);
+  ui.elements.follow.emit("click"); ui.flush();
+  ui.advance(10_000);
+  ui.receive({ time: now + 10_000, disk_bytes: 1024 ** 4 }); ui.flush();
+  assert.equal(windowDescription(ui), description);
+  ui.click("60000");
+  assert.equal(ui.elements.follow.attributes["aria-pressed"], "false");
+  assert.match(ui.elements.chart.attributes["aria-label"], /61 snapshots/);
+  const minute = windowDescription(ui);
+  // Eviction must not push a paused time window forward or select newer samples.
+  for (let i = 1; i <= 20_000; i++) ui.receive({ time: now + 10_000 + i * 1000 });
+  ui.flush();
+  assert.equal(windowDescription(ui), minute);
+  assert.match(ui.elements.chart.attributes["aria-label"], /0 snapshots/);
+  ui.elements.chart.emit("pointermove", pointerEvent(880));
+  assert.equal(ui.elements.tooltip.hidden, true);
+  ui.elements.follow.emit("click"); ui.flush();
+  assert.match(ui.elements.chart.attributes["aria-label"], /Following latest samples.*61 snapshots/);
+});
+
+test("short histories do not intercept page scrolling or browser zoom gestures", () => {
+  const ui = dashboard();
+  ui.receive(); ui.flush();
+  const unexpected = () => assert.fail("Should allow normal scrolling");
+  assert.equal(ui.elements.scrubber.attributes["aria-disabled"], "true");
+  assert.equal(ui.elements.scrubber.tabIndex, -1);
+  ui.elements.chart.emit("wheel", { deltaX: 0, deltaY: -100, preventDefault: unexpected });
+  loadHistory(ui);
+  for (const modifier of ["ctrlKey", "metaKey"]) {
+    ui.elements.chart.emit("wheel", { deltaX: 0, deltaY: -100, [modifier]: true, preventDefault: unexpected });
+  }
+  assert.notEqual(ui.elements.follow.attributes["aria-pressed"], "false");
 });

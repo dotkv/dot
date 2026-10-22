@@ -64,10 +64,13 @@
           <button type="button" data-metric="entry_count" aria-pressed="false"><span class="series-dot entries" aria-hidden="true"></span>Entries</button>
           <button type="button" data-metric="index_mapped_bytes" aria-pressed="false" title="Mapped address space for this database's index, including pages not resident in RAM"><span class="series-dot index-mmap" aria-hidden="true"></span>Index mmap</button>
         </div>
-        <div class="button-group ranges" role="group" aria-label="Graph time range">
-          <button type="button" data-range="60000" aria-pressed="true">Last minute</button>
-          <button type="button" data-range="3600000" aria-pressed="false">Last hour</button>
-          <button type="button" data-range="all" aria-pressed="false">All</button>
+        <div class="history-controls">
+          <div class="button-group ranges" role="group" aria-label="Graph time range">
+            <button type="button" data-range="60000" aria-pressed="true">1 minute</button>
+            <button type="button" data-range="3600000" aria-pressed="false">1 hour</button>
+            <button type="button" data-range="all" aria-pressed="false">All</button>
+          </div>
+          <button id="follow" class="follow" type="button" aria-pressed="true" disabled>Following</button>
         </div>
       </div>
       <div class="plot">
@@ -77,6 +80,13 @@
         <div id="tooltip" class="tooltip" role="tooltip" hidden>
           <time id="tooltip-time"></time>
         </div>
+      </div>
+      <div class="history-navigation">
+        <div id="scrubber" class="scrubber" role="scrollbar" tabindex="-1" aria-label="Browse loaded metric history" aria-controls="chart" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true" aria-describedby="history-help">
+          <div id="scrubber-window" class="scrubber-window"></div>
+        </div>
+        <div class="scrubber-labels"><time id="loaded-start">—</time><time id="loaded-end">—</time></div>
+        <p id="history-help" class="sr-only">Scroll or drag the chart to browse history. Click or drag this scrubber, or use arrow keys, Page Up, Page Down, Home, and End. Select Follow latest to resume following new samples.</p>
       </div>
     </section>
 

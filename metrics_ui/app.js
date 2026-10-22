@@ -4,6 +4,8 @@
   const byID = (id) => document.getElementById(id);
   const chart = byID("chart");
   const context = chart.getContext("2d");
+  const follow = byID("follow");
+  const scrubber = byID("scrubber");
   const metricButtons = [...document.querySelectorAll("[data-metric]")];
   const ranges = [...document.querySelectorAll("[data-range]")];
   const metrics = {
@@ -63,8 +65,13 @@
   let range = 60_000;
   let interval = 1000;
   let latest = null;
+  let following = true;
+  // Keep absolute bounds while paused, even as the ring receives or evicts data.
+  let viewport = null;
   let view = null;
   let pointer = null;
+  let pan = null;
+  let scrub = null;
   let frame = null;
   let socket = null;
   let retry = null;
@@ -146,6 +153,7 @@
     if (!sample.ready) latest.disk_bytes = latest.obsolete_bytes = latest.entry_count = latest.index_mapped_bytes = null;
     notice(sample.disk_stale ? "Disk usage is unavailable; showing its previous reading." : "");
     byID("empty").hidden = true;
+    follow.disabled = false;
     requestDraw();
   }
 
@@ -157,6 +165,57 @@
       else high = mid;
     }
     return low;
+  }
+
+  function visibleWindow() {
+    if (!following) return viewport;
+    const end = Math.max(Date.now(), latest.time);
+    const start = range === Infinity ? at(0).time : end - range;
+    return { start, span: Math.max(interval, end - start) };
+  }
+
+  function historyBounds(span) {
+    const end = Math.max(Date.now(), latest.time);
+    return { start: Math.min(at(0).time, end - span), end };
+  }
+
+  function setFollowing(enabled) {
+    if (!enabled && following) viewport = view ? { start: view.start, span: view.span } : visibleWindow();
+    following = enabled;
+    follow.setAttribute("aria-pressed", String(enabled));
+    follow.textContent = enabled ? "Following" : "Follow latest";
+    requestDraw();
+  }
+
+  function navigate(start, span = visibleWindow().span) {
+    const bounds = historyBounds(span);
+    setFollowing(false);
+    viewport = { start: Math.max(bounds.start, Math.min(bounds.end - span, start)), span };
+  }
+
+  function updateNavigation(window) {
+    const oldest = at(0).time;
+    const newest = Math.max(Date.now(), latest.time);
+    const duration = Math.max(1, newest - oldest);
+    const maximum = Math.max(0, newest - oldest - window.span);
+    const position = Math.max(0, Math.min(maximum, window.start - oldest));
+    const left = Math.max(0, Math.min(1, (window.start - oldest) / duration));
+    const right = Math.max(0, Math.min(1, (window.start + window.span - oldest) / duration));
+    const width = Math.max(0.3, (right - left) * 100);
+    byID("scrubber-window").style.left = `${Math.min(100 - width, left * 100)}%`;
+    byID("scrubber-window").style.width = `${width}%`;
+    scrubber.setAttribute("aria-valuemax", String(Math.round(maximum)));
+    scrubber.setAttribute("aria-valuenow", String(Math.round(position)));
+    scrubber.setAttribute("aria-valuetext", `Viewing ${timestamp.format(window.start)} to ${timestamp.format(window.start + window.span)}`);
+    scrubber.setAttribute("aria-disabled", String(maximum === 0));
+    scrubber.tabIndex = maximum > 0 ? 0 : -1;
+    chart.classList.toggle("pannable", maximum > 0);
+    const label = newest - oldest >= 86_400_000 ? timestamp : clock;
+    for (const [id, time] of [["loaded-start", oldest], ["loaded-end", latest.time]]) {
+      byID(id).textContent = label.format(time);
+      byID(id).dateTime = new Date(time).toISOString();
+      byID(id).title = timestamp.format(time);
+    }
   }
 
   function niceStep(value) {
@@ -197,16 +256,17 @@
     const grid = colors.getPropertyValue("--grid").trim();
     const keys = [...selected];
     const left = 86, right = width - 20, top = 20, bottom = height - 34;
-    const end = Math.max(Date.now(), latest.time);
-    const start = range === Infinity ? at(0).time : end - range;
-    const span = Math.max(interval, end - start);
+    const { start, span } = visibleWindow();
+    const end = start + span;
     const low = lowerBound(start);
+    let high = lowerBound(end, low);
+    if (high < count && at(high).time === end) high++;
     const first = Math.max(0, low - 1);
     const x = (time) => left + (time - start) / span * (right - left);
     const maxima = keys.map((key) => {
       let maximum = 0;
       // Include the preceding sample used to draw the segment at the left edge.
-      for (let i = first; i < count; i++) maximum = Math.max(maximum, at(i)[key]);
+      for (let i = first; i < high; i++) maximum = Math.max(maximum, at(i)[key]);
       return maximum;
     });
     const limits = axis(keys[0], Math.max(...maxima));
@@ -255,7 +315,7 @@
         keep.sort((a, b) => a.time - b.time);
         points.push(...keep);
       }
-      for (let i = first; i < count; i++) {
+      for (let i = first; i < high; i++) {
         const point = at(i);
         if (point[line.key] === null) {
           flush(); bucket = null; missing = true;
@@ -297,22 +357,23 @@
       }
     }
     context.restore();
-    view = { low, start, span, x, left, right, top, bottom, width, height, series };
+    view = { low, high, start, span, x, left, right, top, bottom, width, height, series };
+    updateNavigation({ start, span });
     showHover();
     const values = keys.map((key) => `${metrics[key].label}: ${format(key, latest[key])}`).join(". ");
-    const period = range === Infinity ? "retained history" : range === 60_000 ? "the last minute" : "the last hour";
-    chart.setAttribute("aria-label", `${keys.map((key) => metrics[key].label).join(", ")} over ${period}. Latest values: ${values}. ${number.format(count - low)} snapshots.`);
+    const period = `${timestamp.format(start)} to ${timestamp.format(end)}`;
+    chart.setAttribute("aria-label", `${keys.map((key) => metrics[key].label).join(", ")} from ${period}. ${following ? "Following latest samples" : "Paused"}. Latest values: ${values}. ${number.format(high - low)} snapshots.`);
   }
 
   function showHover() {
     const crosshair = byID("crosshair");
     for (const key of Object.keys(metrics)) byID(`point-${key}`).hidden = true;
-    if (!pointer || !view || view.low >= count || pointer.x < view.left || pointer.x > view.right || pointer.y < view.top || pointer.y > view.bottom) {
+    if (!pointer || !view || view.low >= view.high || pointer.x < view.left || pointer.x > view.right || pointer.y < view.top || pointer.y > view.bottom) {
       tooltip.hidden = crosshair.hidden = true;
       return;
     }
     const time = view.start + (pointer.x - view.left) / (view.right - view.left) * view.span;
-    let index = Math.min(count - 1, lowerBound(time, view.low));
+    let index = Math.min(view.high - 1, lowerBound(time, view.low));
     if (index > view.low && time - at(index - 1).time < at(index).time - time) index--;
     const sample = at(index);
     const column = view.x(sample.time);
@@ -377,18 +438,100 @@
   for (const button of ranges) {
     button.addEventListener("click", () => {
       range = button.dataset.range === "all" ? Infinity : Number(button.dataset.range);
+      if (!following) {
+        const end = viewport.start + viewport.span;
+        const span = range === Infinity ? Math.max(interval, end - at(0).time) : range;
+        viewport = { start: end - span, span };
+      }
       for (const other of ranges) other.setAttribute("aria-pressed", String(other === button));
       requestDraw();
     });
   }
+  follow.addEventListener("click", () => { if (latest) setFollowing(!following); });
+  chart.addEventListener("wheel", (event) => {
+    if (!view || event.ctrlKey || event.metaKey) return;
+    const window = visibleWindow();
+    const bounds = historyBounds(window.span);
+    if (bounds.end - bounds.start <= window.span) return;
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    if (!delta) return;
+    const pixels = delta * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? view.right - view.left : 1);
+    event.preventDefault();
+    navigate(window.start + pixels / (view.right - view.left) * window.span);
+  }, { passive: false });
+  chart.addEventListener("pointerdown", (event) => {
+    if (!view || event.button !== 0) return;
+    const bounds = chart.getBoundingClientRect();
+    const x = event.clientX - bounds.left, y = event.clientY - bounds.top;
+    if (x < view.left || x > view.right || y < view.top || y > view.bottom) return;
+    const window = visibleWindow();
+    const history = historyBounds(window.span);
+    if (history.end - history.start <= window.span) return;
+    setFollowing(false);
+    pan = { id: event.pointerId, x: event.clientX, ...window };
+    pointer = null;
+    showHover();
+    chart.classList.toggle("panning", true);
+    chart.setPointerCapture(event.pointerId);
+  });
   chart.addEventListener("pointermove", (event) => {
+    if (pan && pan.id === event.pointerId) {
+      navigate(pan.start - (event.clientX - pan.x) / (view.right - view.left) * pan.span, pan.span);
+      return;
+    }
     const bounds = chart.getBoundingClientRect();
     pointer = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
     showHover();
   });
-  for (const event of ["pointerleave", "pointercancel"]) {
-    chart.addEventListener(event, () => { pointer = null; showHover(); });
+  chart.addEventListener("pointerleave", () => { pointer = null; showHover(); });
+  for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    chart.addEventListener(event, () => {
+      pan = null;
+      pointer = null;
+      chart.classList.toggle("panning", false);
+      showHover();
+    });
   }
+  function scrubTo(event) {
+    const fraction = Math.max(0, Math.min(1, (event.clientX - scrub.left) / scrub.width));
+    navigate(scrub.oldest + fraction * scrub.duration - scrub.offset, scrub.span);
+  }
+  scrubber.addEventListener("pointerdown", (event) => {
+    if (!view || event.button !== 0) return;
+    const window = visibleWindow();
+    const oldest = at(0).time;
+    const duration = Math.max(Date.now(), latest.time) - oldest;
+    if (duration <= window.span) return;
+    const bounds = scrubber.getBoundingClientRect();
+    if (!bounds.width) return;
+    const time = oldest + (event.clientX - bounds.left) / bounds.width * duration;
+    const offset = time >= window.start && time <= window.start + window.span ? time - window.start : window.span / 2;
+    scrub = { id: event.pointerId, oldest, duration, left: bounds.left, width: bounds.width, offset, span: window.span };
+    event.preventDefault();
+    scrubber.focus({ preventScroll: true });
+    scrubber.setPointerCapture(event.pointerId);
+    scrubTo(event);
+  });
+  scrubber.addEventListener("pointermove", (event) => {
+    if (scrub && scrub.id === event.pointerId) scrubTo(event);
+  });
+  for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    scrubber.addEventListener(event, () => { scrub = null; });
+  }
+  scrubber.addEventListener("keydown", (event) => {
+    if (!view) return;
+    const window = visibleWindow();
+    const bounds = historyBounds(window.span);
+    if (bounds.end - bounds.start <= window.span) return;
+    const starts = {
+      ArrowLeft: window.start - window.span / 10, ArrowRight: window.start + window.span / 10,
+      PageUp: window.start - window.span, PageDown: window.start + window.span,
+      Home: bounds.start, End: bounds.end - window.span,
+    };
+    if (!(event.key in starts)) return;
+    event.preventDefault();
+    navigate(starts[event.key]);
+  });
   new ResizeObserver(requestDraw).observe(chart);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", requestDraw);
   window.addEventListener("pagehide", () => {

@@ -67,7 +67,11 @@ button { font: inherit; font-size: 12px; cursor: pointer; }
 .button-group button { display: flex; align-items: center; gap: 6px; white-space: nowrap; border: 0; border-radius: 3px; padding: 5px 10px; color: var(--muted); background: transparent; }
 .button-group button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .metric-options { flex-wrap: wrap; min-width: 0; max-width: 100%; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button:focus-visible, .scrubber:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.history-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.follow { min-width: 94px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: transparent; }
+.follow[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.follow:disabled { cursor: default; opacity: 0.5; }
 .disk { --series-color: var(--accent); }
 .obsolete { --series-color: var(--obsolete); }
 .entries, .delete { --series-color: var(--entries); }
@@ -77,8 +81,17 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .index-mmap { --series-color: var(--update); }
 .series-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--series-color); flex-shrink: 0; }
 .metric-options button[aria-pressed="false"] .series-dot { opacity: 0.4; }
-.plot { position: relative; height: 330px; margin: 14px 14px 18px; }
+.plot { position: relative; height: 330px; margin: 14px 14px 4px; }
 canvas { display: block; width: 100%; height: 100%; }
+canvas.pannable { cursor: grab; touch-action: pan-y; }
+canvas.panning { cursor: grabbing; }
+.history-navigation { margin: 0 34px 18px 100px; }
+.scrubber { position: relative; height: 24px; border-radius: 4px; cursor: pointer; touch-action: none; user-select: none; }
+.scrubber::before { content: ""; position: absolute; inset: 8px 0; border-radius: 4px; background: var(--grid); }
+.scrubber-window { position: absolute; top: 6px; bottom: 6px; left: 0; width: 100%; border-radius: 4px; background: var(--accent); opacity: 0.65; }
+.scrubber:hover .scrubber-window, .scrubber:focus-visible .scrubber-window { opacity: 1; }
+.scrubber[aria-disabled="true"] { cursor: default; opacity: 0.5; }
+.scrubber-labels { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; pointer-events: none; }
 .empty[hidden] { display: none; }
 .crosshair { position: absolute; width: 1px; background: var(--muted); opacity: 0.45; pointer-events: none; }
@@ -97,6 +110,7 @@ canvas { display: block; width: 100%; height: 100%; }
   .history-header { align-items: flex-start; flex-direction: column; padding: 18px 16px 4px; }
   .operations th, .operations td { padding: 10px 16px; }
   .plot { height: 280px; margin-left: 4px; margin-right: 4px; }
+  .history-navigation { margin-left: 90px; margin-right: 24px; }
 }
 
 @media (max-width: 440px) {
