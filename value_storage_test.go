@@ -252,7 +252,7 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tag := hashtag(hash)
+			tag := fingerprint(hash)
 			if !fingerprintMatch {
 				tag ^= 1 << addressBits
 			}
@@ -278,7 +278,7 @@ func TestIndexFindScalarCollisions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		idx.insert(home, hashtag(hash)|logAddress(segment, off))
+		idx.insert(home, fingerprint(hash)|logAddress(segment, off))
 	}
 	for _, tc := range []struct {
 		key   string
@@ -599,7 +599,7 @@ func TestDBTypeChecksAfterKeyMatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.index.insert(int(hash&uint64(len(s.index.slots)-1)), hashtag(hash)|logAddress(segment, off))
+		s.index.insert(int(hash&uint64(len(s.index.slots)-1)), fingerprint(hash)|logAddress(segment, off))
 	}
 	checkScalarGet(t, db, key, int64(42), nil)
 	if err := db.Update(key, func(v int64, _ bool) (int64, error) { return v + 1, nil }); err != nil {

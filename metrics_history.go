@@ -136,50 +136,68 @@ func openMetricsHistory(path string, now time.Time, retention time.Duration) *me
 		return h
 	}
 	h.file = f
-	var header [metricsHistoryHeaderSize]byte
-	info, err := f.Stat()
-	if err == nil {
-		if info.Size() == 0 {
-			err = initializeMetricsHistory(f, h.created, h.slots)
-			if err == nil {
-				err = f.Sync()
-			}
-			if err == nil {
-				err = syncMetricsHistoryDirectory(path)
-			}
-		} else if _, err = f.ReadAt(header[:], 0); err == nil {
-			version := binary.LittleEndian.Uint32(header[8:12])
-			oldSlots := int64(binary.LittleEndian.Uint64(header[24:32]))
-			if string(header[:8]) != metricsHistoryMagic || binary.LittleEndian.Uint32(header[60:]) != crc32.ChecksumIEEE(header[:60]) {
-				err = errors.New("invalid metrics history header")
-			} else if version != metricsHistoryFormatVersion {
-				err = fmt.Errorf("unsupported metrics format version %d (want %d)", version, metricsHistoryFormatVersion)
-			} else if binary.LittleEndian.Uint32(header[12:16]) != 0 || !bytes.Equal(header[32:60], make([]byte, 28)) {
-				err = errors.New("invalid metrics history header: nonzero reserved bytes")
-			} else if oldSlots < 1 || oldSlots > int64(time.Duration(1<<63-1)/time.Second) || info.Size() != metricsHistoryFileSize(oldSlots) {
-				err = errors.New("invalid metrics history file size")
-			} else {
-				h.created = int64(binary.LittleEndian.Uint64(header[16:24]))
-				if h.created <= 0 || h.created > now.UnixMilli() {
-					err = errors.New("invalid metrics history creation time")
-				} else if oldSlots != h.slots {
-					var resized *os.File
-					resized, err = resizeMetricsHistory(path, f, oldSlots, h.slots, h.created, now)
-					if err == nil {
-						f.Close()
-						f = resized
-						h.file = f
-					}
-				}
-			}
+	defer func() {
+		if err != nil {
+			h.err = errors.Join(err, f.Close())
+			h.file = nil
+			h.created = now.UnixMilli()
 		}
-	}
+	}()
+	info, err := f.Stat()
 	if err != nil {
-		h.err = errors.Join(err, f.Close())
-		h.file = nil
-		h.created = now.UnixMilli()
+		return h
+	}
+	if info.Size() == 0 {
+		if err = initializeMetricsHistory(f, h.created, h.slots); err != nil {
+			return h
+		}
+		if err = f.Sync(); err != nil {
+			return h
+		}
+		err = syncMetricsHistoryDirectory(path)
+		return h
+	}
+	var oldSlots int64
+	h.created, oldSlots, err = readMetricsHistoryHeader(f, info.Size(), now)
+	if err != nil {
+		return h
+	}
+	if oldSlots != h.slots {
+		var resized *os.File
+		resized, err = resizeMetricsHistory(path, f, oldSlots, h.slots, h.created, now)
+		if err != nil {
+			return h
+		}
+		f.Close()
+		h.file = resized
 	}
 	return h
+}
+
+func readMetricsHistoryHeader(f *os.File, fileSize int64, now time.Time) (created, slots int64, err error) {
+	var header [metricsHistoryHeaderSize]byte
+	if _, err := f.ReadAt(header[:], 0); err != nil {
+		return 0, 0, err
+	}
+	if string(header[:8]) != metricsHistoryMagic || binary.LittleEndian.Uint32(header[60:]) != crc32.ChecksumIEEE(header[:60]) {
+		return 0, 0, errors.New("invalid metrics history header")
+	}
+	version := binary.LittleEndian.Uint32(header[8:12])
+	if version != metricsHistoryFormatVersion {
+		return 0, 0, fmt.Errorf("unsupported metrics format version %d (want %d)", version, metricsHistoryFormatVersion)
+	}
+	if binary.LittleEndian.Uint32(header[12:16]) != 0 || !bytes.Equal(header[32:60], make([]byte, 28)) {
+		return 0, 0, errors.New("invalid metrics history header: nonzero reserved bytes")
+	}
+	slots = int64(binary.LittleEndian.Uint64(header[24:32]))
+	if slots < 1 || slots > int64(time.Duration(1<<63-1)/time.Second) || fileSize != metricsHistoryFileSize(slots) {
+		return 0, 0, errors.New("invalid metrics history file size")
+	}
+	created = int64(binary.LittleEndian.Uint64(header[16:24]))
+	if created <= 0 || created > now.UnixMilli() {
+		return 0, 0, errors.New("invalid metrics history creation time")
+	}
+	return created, slots, nil
 }
 
 func (db *DB) startMetricsHistory(retention time.Duration, latency bool) *metricsHistory {

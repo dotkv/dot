@@ -11,11 +11,11 @@ const (
 	indexBits                = 14
 	segmentOffsetBits        = segmentSizeBits - logAlignmentBits
 	addressBits              = segmentOffsetBits + segmentIDBits
-	hashtagBits              = 61 - addressBits
+	fingerprintBits          = 61 - addressBits
 	offsetMask        uint64 = (1 << segmentOffsetBits) - 1
 	segmentMask       uint64 = ((1 << segmentIDBits) - 1) << segmentOffsetBits
 	addressMask       uint64 = segmentMask | offsetMask
-	hashtagMask       uint64 = ((1 << hashtagBits) - 1) << addressBits
+	fingerprintMask   uint64 = ((1 << fingerprintBits) - 1) << addressBits
 	occupiedMask      uint64 = 1 << 63
 	continuationMask  uint64 = 1 << 62
 	shiftedMask       uint64 = 1 << 61
@@ -29,7 +29,7 @@ type indexExpiration struct {
 }
 
 type Index struct {
-	// [occupied 1][continuation 1][shifted 1][hashtag 19][segment 20][offset 22]
+	// [occupied 1][continuation 1][shifted 1][fingerprint 19][segment 20][offset 22]
 	// Offsets address 16-byte units within each segment.
 	// Entries with the same home bucket form a run, ordered by home bucket.
 	// occupied belongs to the bucket, even when its entries are displaced;
@@ -143,10 +143,10 @@ func (idx *Index) prune() {
 	}
 }
 
-func hashtag(hash uint64) uint64 {
+func fingerprint(hash uint64) uint64 {
 	// Keep the bits immediately above the initial bucket bits, so growing
 	// can split a bucket using its fingerprint instead of reading its keys.
-	return (hash >> indexBits << addressBits) & hashtagMask
+	return (hash >> indexBits << addressBits) & fingerprintMask
 }
 
 func logAddress(segment, offset uint64) uint64 {
@@ -161,7 +161,7 @@ func addressOffset(address uint64) uint64 {
 	return (address & offsetMask) << logAlignmentBits
 }
 
-func empty(slot uint64) bool {
+func isEmptySlot(slot uint64) bool {
 	return slot&metadataMask == 0
 }
 
@@ -177,7 +177,7 @@ func (idx *Index) grow() error {
 		}
 	}
 	// The 19 fingerprint bits support tables up to 2^33 slots (64 GiB).
-	if uint64(n) >= 1<<(indexBits+hashtagBits) {
+	if uint64(n) >= 1<<(indexBits+fingerprintBits) {
 		return errors.New("index capacity exceeded")
 	}
 	slots, err := idx.memory.allocate(2 * n)
@@ -190,7 +190,7 @@ func (idx *Index) grow() error {
 	// when a cluster wraps around the end of the table. Match each run to
 	// the next occupied home bucket, then split it using the next hash bit.
 	start := 0
-	for !empty(old[start]) {
+	for !isEmptySlot(old[start]) {
 		start++
 	}
 	// Relative to this empty bucket, each new half receives an ordered
@@ -201,7 +201,7 @@ func (idx *Index) grow() error {
 	home := start
 	for i := 1; i <= n; i++ {
 		slot := old[(start+i)&(n-1)]
-		if empty(slot) {
+		if isEmptySlot(slot) {
 			continue
 		}
 		if slot&continuationMask == 0 {
@@ -212,7 +212,7 @@ func (idx *Index) grow() error {
 				}
 			}
 		}
-		bucket := home | int((slot&hashtagMask)>>(addressBits-indexBits))&n
+		bucket := home | int((slot&fingerprintMask)>>(addressBits-indexBits))&n
 		relative := (bucket - start - 1) & (2*n - 1)
 		half := 0
 		if relative >= n {
@@ -268,7 +268,7 @@ func (idx *Index) insert(home int, slot uint64) {
 	if idx.segmentRefCounts != nil {
 		idx.segmentRefCounts[addressSegment(slot)]++
 	}
-	if empty(idx.slots[home]) {
+	if isEmptySlot(idx.slots[home]) {
 		idx.slots[home] = slot | occupiedMask
 		return
 	}
@@ -291,7 +291,7 @@ func (idx *Index) insert(home int, slot uint64) {
 	for {
 		previous := idx.slots[pos]
 		idx.slots[pos] = slot&^occupiedMask | previous&occupiedMask
-		if empty(previous) {
+		if isEmptySlot(previous) {
 			return
 		}
 		slot = previous | shiftedMask
@@ -338,25 +338,26 @@ func (idx *Index) remove(home, pos int) {
 }
 
 // findPayload returns the matching slot, value, type, and expiration, or position -1
-// for a miss. A nil buf gives Get owned storage; Set and Delete lend their
-// write buffer. Consume the value before reusing that buffer. The hash is computed by DB.
+// for a miss. A nil buf returns owned storage and skips expired entries for Get.
+// Set, Delete, and replay lend scratch storage and must locate expired entries.
+// Consume the value before reusing that buffer. The hash is computed by DB.
 func (idx *Index) findPayload(log *Log, key []byte, hash uint64, buf []byte) (int, []byte, recordType, int64, error) {
 	return idx.lookupPayload(log, key, hash, buf, buf == nil)
 }
 
-// lookupPayload can skip expired entries even when a caller borrows scratch
-// storage. Set and Delete must locate expired entries to replace or remove them.
+// lookupPayload can skip expired entries independently of buffer ownership.
+// Update uses liveOnly with scratch storage to treat expired keys as absent.
 func (idx *Index) lookupPayload(log *Log, key []byte, hash uint64, buf []byte, liveOnly bool) (int, []byte, recordType, int64, error) {
 	mask := len(idx.slots) - 1
 	home := int(hash & uint64(mask))
 	if idx.slots[home]&occupiedMask == 0 {
 		return -1, nil, 0, 0, nil
 	}
-	tag := hashtag(hash)
+	tag := fingerprint(hash)
 	pos := idx.run(home)
 	for {
 		slot := idx.slots[pos]
-		if slot&hashtagMask == tag && (!liveOnly || !idx.slotExpired(slot)) {
+		if slot&fingerprintMask == tag && (!liveOnly || !idx.slotExpired(slot)) {
 			k, v, ty, expiration, err := log.readPayload(addressSegment(slot), addressOffset(slot), buf)
 			if err != nil {
 				return 0, nil, 0, 0, fmt.Errorf("log read: %w", err)
@@ -386,7 +387,7 @@ func (idx *Index) prepareSet(log *Log, ty recordType, key []byte, val []byte, ha
 		}
 		return indexChange{
 			home:       int(hash & uint64(len(idx.slots)-1)),
-			slot:       hashtag(hash),
+			slot:       fingerprint(hash),
 			hash:       hash,
 			expiration: expiration,
 			kind:       indexInsert,
@@ -426,7 +427,7 @@ func (idx *Index) replay(log *Log, ty recordType, key []byte, hash, addr uint64,
 		}
 		change = indexChange{
 			home:       int(hash & uint64(len(idx.slots)-1)),
-			slot:       hashtag(hash),
+			slot:       fingerprint(hash),
 			hash:       hash,
 			expiration: expiration,
 			kind:       indexInsert,
@@ -488,11 +489,11 @@ func (idx *Index) findScalar(log *Log, key []byte, hash uint64) (int, scalarValu
 	if idx.slots[home]&occupiedMask == 0 {
 		return -1, scalarValue{}, 0, nil
 	}
-	tag := hashtag(hash)
+	tag := fingerprint(hash)
 	pos := idx.run(home)
 	for {
 		slot := idx.slots[pos]
-		if slot&hashtagMask == tag && !idx.slotExpired(slot) {
+		if slot&fingerprintMask == tag && !idx.slotExpired(slot) {
 			raw, expiration, matched, err := log.readScalar(addressSegment(slot), addressOffset(slot), key)
 			if err != nil {
 				return 0, scalarValue{}, 0, fmt.Errorf("log read: %w", err)

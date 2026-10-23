@@ -96,7 +96,7 @@ func (s *Shard) compactLocked() error {
 	}
 	positions := make([][]int, len(segments))
 	for pos, slot := range idx.slots {
-		if !empty(slot) {
+		if !isEmptySlot(slot) {
 			seg := addressSegment(slot)
 			positions[rank[seg]] = append(positions[rank[seg]], pos)
 		}

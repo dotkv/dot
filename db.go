@@ -519,6 +519,7 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 	if err != nil {
 		return err
 	}
+	var change indexChange
 	if exists {
 		// An unchanged value with an unchanged expiration does not append
 		// a record.
@@ -535,15 +536,12 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 		if !byteValue && !stringValue {
 			previousSize = raw.size
 		}
-		change := s.index.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(kb), previousSize))
-		if err := s.appendSet(ty, kb, payload, change, durability); err != nil {
-			return err
+		change = s.index.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(kb), previousSize))
+	} else {
+		change, err = s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
+		if err != nil {
+			return fmt.Errorf("prepare update: %w", err)
 		}
-		return s.finishDurability(durability)
-	}
-	change, err := s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
-	if err != nil {
-		return fmt.Errorf("prepare update: %w", err)
 	}
 	if err := s.appendSet(ty, kb, payload, change, durability); err != nil {
 		return err
@@ -621,7 +619,7 @@ func scanShard(s *Shard, buf *[]byte, yield func([]byte, []byte) bool) bool {
 		return false
 	}
 	for _, slot := range s.index.slots {
-		if empty(slot) {
+		if isEmptySlot(slot) {
 			continue
 		}
 		addr := slot & addressMask

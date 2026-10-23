@@ -23,7 +23,7 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 	entries := 0
 	addresses := make(map[uint64]bool)
 	for _, slot := range s.index.slots {
-		if !empty(slot) {
+		if !isEmptySlot(slot) {
 			refs[addressSegment(slot)]++
 			entries++
 			addresses[slot&addressMask] = true

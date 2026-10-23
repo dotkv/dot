@@ -281,7 +281,9 @@ func TestMetricsHistoryRetentionAndRestart(t *testing.T) {
 	// The first two rows own the same slot, exactly seven days apart.
 	h.append(historySample(now.Add(-h.retention), 1))
 	h.append(historySample(now, 99))
-	h.append(historySample(now.Add(-h.retention+time.Second), 2))
+	// Keep this row well inside retention: querying the ring can cross a second
+	// boundary, so a row just one second inside retention can expire mid-test.
+	h.append(historySample(now.Add(-h.retention/2), 2))
 	h.append(historySample(now.Add(-8*24*time.Hour), 3))
 	path := h.file.Name()
 	if err := h.file.Close(); err != nil {
@@ -289,10 +291,10 @@ func TestMetricsHistoryRetentionAndRestart(t *testing.T) {
 	}
 	h.file = nil
 	h = openMetricsHistory(path, time.Now(), h.retention)
-	defer h.file.Close()
 	if h.err != nil {
 		t.Fatal(h.err)
 	}
+	defer h.file.Close()
 	got, err := h.query(context.Background(), now.Add(-8*24*time.Hour).UnixMilli(), now.UnixMilli(), []int{0})
 	if err != nil || len(got.Samples) != 2 || got.Samples[0].DiskBytes != 2 || got.Samples[1].DiskBytes != 99 {
 		t.Fatalf("retained history=%+v err=%v", got.Samples, err)

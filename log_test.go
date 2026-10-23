@@ -460,7 +460,7 @@ func TestLogSealedReadsCloseFiles(t *testing.T) {
 
 func TestIndexAlignedAddressLayout(t *testing.T) {
 	// Pin the compressed address independently of the encoding constants,
-	// including the final usable start offset and all 19 hashtag bits.
+	// including the final usable start offset and all 19 fingerprint bits.
 	for _, tc := range []struct {
 		segment, offset, packed uint64
 	}{
@@ -474,16 +474,16 @@ func TestIndexAlignedAddressLayout(t *testing.T) {
 			t.Fatalf("address (%d, %d): packed=%#x, want %#x", tc.segment, tc.offset, packed, tc.packed)
 		}
 	}
-	tag := hashtag(((1 << 19) - 1) << 14)
+	tag := fingerprint(((1 << 19) - 1) << 14)
 	slot := logAddress(1048575, (1<<26)-16) | tag | metadataMask
 	if slot != ^uint64(0) || addressOffset(slot) != (1<<26)-16 || addressSegment(slot) != 1048575 {
-		t.Fatalf("address, hashtag, and metadata fields overlap or leave gaps: %#x", slot)
+		t.Fatalf("address, fingerprint, and metadata fields overlap or leave gaps: %#x", slot)
 	}
-	if hashtag(1<<(14+19)) != 0 {
-		t.Fatal("hashtag retained a bit outside the 19-bit budget")
+	if fingerprint(1<<(14+19)) != 0 {
+		t.Fatal("fingerprint retained a bit outside the 19-bit budget")
 	}
 	idx := newInternalIndex(t)
-	if len(idx.slots)*8*defaultShardCount != 8<<20 || indexBits+hashtagBits != 33 {
+	if len(idx.slots)*8*defaultShardCount != 8<<20 || indexBits+fingerprintBits != 33 {
 		t.Fatal("index does not provide 8 MiB initial mappings and the 2^33-slot growth limit")
 	}
 }

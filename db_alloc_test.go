@@ -75,7 +75,7 @@ func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 						t.Fatal(err)
 					}
 					// Force fingerprint matches so every candidate needs a log read.
-					idx.insert(home, hashtag(hash)|logAddress(segment, off))
+					idx.insert(home, fingerprint(hash)|logAddress(segment, off))
 				}
 				for _, buf := range [][]byte{nil, log.writeBuffer[:0]} {
 					wantAllocs := 1.0
@@ -160,7 +160,7 @@ func TestIndexFindScalarCollisionAllocations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		idx.insert(home, hashtag(hash)|logAddress(segment, off))
+		idx.insert(home, fingerprint(hash)|logAddress(segment, off))
 	}
 	for _, hit := range []bool{false, true} {
 		key := []byte("missing")

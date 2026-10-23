@@ -32,7 +32,7 @@ func newInternalIndex(t testing.TB) *Index {
 
 // Give every synthetic entry a unique offset and exercise segment bits too.
 func entrySlot(id int, hash uint64) uint64 {
-	return uint64(id) | uint64(id%1024)<<segmentOffsetBits | hashtag(hash)
+	return uint64(id) | uint64(id%1024)<<segmentOffsetBits | fingerprint(hash)
 }
 
 func checkIndex(t *testing.T, idx *Index, entries []indexEntry) {
@@ -51,7 +51,7 @@ func checkIndex(t *testing.T, idx *Index, entries []indexEntry) {
 		if (slot&occupiedMask != 0) != (counts[pos] != 0) {
 			t.Fatalf("bucket %d: wrong occupancy bit", pos)
 		}
-		if empty(slot) {
+		if isEmptySlot(slot) {
 			if slot != 0 {
 				t.Fatalf("bucket %d: empty slot retains entry bits", pos)
 			}
@@ -70,7 +70,7 @@ func checkIndex(t *testing.T, idx *Index, entries []indexEntry) {
 			t.Fatalf("entry %d: wrong shifted bit", id)
 		}
 		previous := idx.slots[(pos-1)&mask]
-		continuation := !empty(previous) && entries[previous&offsetMask].hash&uint64(mask) == uint64(home)
+		continuation := !isEmptySlot(previous) && entries[previous&offsetMask].hash&uint64(mask) == uint64(home)
 		if (slot&continuationMask != 0) != continuation {
 			t.Fatalf("entry %d: wrong continuation bit", id)
 		}
@@ -87,7 +87,7 @@ func checkIndex(t *testing.T, idx *Index, entries []indexEntry) {
 		pos := idx.run(home)
 		for i := 0; i < count; i++ {
 			slot := idx.slots[pos]
-			if empty(slot) || int(entries[slot&offsetMask].hash&uint64(mask)) != home {
+			if isEmptySlot(slot) || int(entries[slot&offsetMask].hash&uint64(mask)) != home {
 				t.Fatalf("bucket %d: run contains an entry from another bucket", home)
 			}
 			if (slot&continuationMask != 0) != (i != 0) {

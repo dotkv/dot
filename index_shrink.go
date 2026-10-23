@@ -29,13 +29,13 @@ func (idx *Index) shrink() error {
 	// Count entries in each destination bucket using the replacement mapping as
 	// scratch space. Walking runs recovers their home buckets without log reads.
 	start := 0
-	for !empty(old[start]) {
+	for !isEmptySlot(old[start]) {
 		start++
 	}
 	home := start
 	for i := 1; i <= n; i++ {
 		slot := old[(start+i)&(n-1)]
-		if empty(slot) {
+		if isEmptySlot(slot) {
 			continue
 		}
 		if slot&continuationMask == 0 {
@@ -91,7 +91,7 @@ func (idx *Index) shrink() error {
 				continue
 			}
 			source := positions[half]
-			for empty(old[source]) {
+			for isEmptySlot(old[source]) {
 				source = (source + 1) & (n - 1)
 			}
 			for {
