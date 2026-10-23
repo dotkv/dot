@@ -107,7 +107,8 @@ sample; they are not a point-in-time snapshot.</p>
 <h2 id="operation-metrics">Operation metrics</h2>
 
 <p>The table shows Get, Set, Delete, and Update throughput, mean latency, and
-approximate p99 over a trailing ten-second window. Initial readings use a shorter
+approximate p99 over a trailing ten-second window. <code>Add</code> and
+<code>Sub</code> count as updates. Initial readings use a shorter
 window. All calls count, including misses and errors; latency includes lock waits,
 update callbacks, and syncs. P99 rounds up by at most 12.5% and is less useful with
 few samples. Empty windows show zero throughput and unavailable latency.</p>

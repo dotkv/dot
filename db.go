@@ -49,6 +49,7 @@ type Key interface {
 type DB struct {
 	path             string
 	expiration       int64
+	ttl              time.Duration
 	durability       Durability
 	shards           []Shard
 	shardCountBits   uint
@@ -88,7 +89,9 @@ func acquireLock(path string) (*os.File, error) {
 // Options configures database and key operations.
 type Options struct {
 	expiration    int64
+	ttl           time.Duration
 	expirationSet bool
+	condition     func(scalarValue, []byte, bool) error
 	durability    Durability
 	compaction    compactionThreshold
 	shardCount    int
@@ -124,10 +127,10 @@ func WithCompactionThreshold(ratio float64, minObsoleteBytes uint64) Option {
 }
 
 // WithExpiration sets a fixed deadline at which a key becomes unreadable.
-// For a TTL, compute time.Now().Add(ttl) on each write. When passed to Open,
+// For a relative lifetime, use WithTTL. When passed to Open,
 // the same deadline applies to every Set and to Update inserts unless overridden.
-// Update preserves an existing key's deadline unless this option is passed.
-// A zero time.Time clears expiration.
+// Update, Add, and Sub preserve an existing key's deadline unless overridden.
+// A zero time.Time clears expiration. If combined with WithTTL, the last option wins.
 func WithExpiration(t time.Time) Option {
 	var ns int64
 	if !t.IsZero() {
@@ -138,6 +141,23 @@ func WithExpiration(t time.Time) Option {
 	}
 	return func(o *Options) {
 		o.expiration = ns
+		o.ttl = 0
+		o.expirationSet = true
+	}
+}
+
+// WithTTL sets a key's lifetime relative to the write, after acquiring the shard
+// lock and running any Update callback. The duration is evaluated on each write,
+// so the option can be reused or passed to Open as a default. Update, Add, and
+// Sub preserve an existing key's deadline unless WithTTL or WithExpiration is
+// passed explicitly; inserts use the database default. A zero duration clears
+// expiration; a negative duration expires immediately. If combined with
+// WithExpiration, the last option wins. Deadlines beyond the disk format's range
+// are clamped to its nearest limit. This option has no effect on Delete.
+func WithTTL(ttl time.Duration) Option {
+	return func(o *Options) {
+		o.expiration = 0
+		o.ttl = ttl
 		o.expirationSet = true
 	}
 }
@@ -161,8 +181,8 @@ const (
 func (d Durability) valid() bool { return d <= Buffer }
 
 // WithDurability sets the default for Open or overrides it for one Set,
-// Update, or Delete. Write and Sync also flush earlier buffered writes in the
-// same shard; Sync fsyncs them. This applies even to unchanged values and
+// Update, Add, Sub, or Delete. Write and Sync also flush earlier buffered writes
+// in the same shard; Sync fsyncs them. This applies even to unchanged values and
 // missing deletes. Other shards are unaffected. Close flushes pending buffers
 // without fsync. Background flush failures block further mutations in that
 // shard and are returned by its subsequent mutations and Close.
@@ -172,20 +192,38 @@ func WithDurability(durability Durability) Option {
 	}
 }
 
-// resolveOptions applies opts over the database defaults. expirationSet
-// reports whether any option explicitly set an expiration.
-func (db *DB) resolveOptions(opts []Option) (expiration int64, durability Durability, expirationSet bool) {
-	expiration, durability = db.expiration, db.durability
-	if len(opts) > 0 {
-		options := Options{expiration: expiration, durability: durability}
-		for _, opt := range opts {
-			if opt != nil {
-				opt(&options)
-			}
-		}
-		expiration, durability, expirationSet = options.expiration, options.durability, options.expirationSet
+// resolveOptions applies opts over the database defaults without evaluating TTLs.
+// expirationSet reports whether an operation explicitly set an expiration.
+func (db *DB) resolveOptions(opts []Option) Options {
+	defaults := Options{expiration: db.expiration, ttl: db.ttl, durability: db.durability}
+	if len(opts) == 0 {
+		return defaults
 	}
-	return expiration, durability, expirationSet
+	options := defaults
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	return options
+}
+
+func (o Options) deadline() int64 {
+	if o.ttl == 0 {
+		return o.expiration
+	}
+	now, ttl := time.Now().UnixNano(), int64(o.ttl)
+	if ttl > 0 && now > math.MaxInt64-ttl {
+		return math.MaxInt64
+	}
+	if ttl < 0 && now < math.MinInt64-ttl {
+		return math.MinInt64
+	}
+	ns := now + ttl
+	if ns == 0 {
+		ns = 1 // Zero denotes no expiration in the disk format.
+	}
+	return ns
 }
 
 func isExpired(expiration int64) bool {
@@ -201,6 +239,9 @@ func Open(path string, opts ...Option) (*DB, error) {
 		if opt != nil {
 			opt(&options)
 		}
+	}
+	if options.condition != nil {
+		return nil, errors.New("WithCondition is only supported on mutations, not Open")
 	}
 	if !options.durability.valid() {
 		return nil, fmt.Errorf("invalid durability %d", options.durability)
@@ -222,6 +263,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	db := &DB{
 		path:             path,
 		expiration:       options.expiration,
+		ttl:              options.ttl,
 		durability:       options.durability,
 		backgroundCancel: cancel,
 		lockFile:         lock,
@@ -325,14 +367,16 @@ func validShardCount(count int) bool {
 
 // Set stores val using the encoding described by Value. It does not retain key
 // or val, so callers may reuse their byte slices after Set returns. Set may
-// replace an existing key with a different type.
+// replace an existing key with a different type. WithCondition checks the
+// previous value atomically before writing.
 func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	var metricsShard *Shard
 	if m := db.operationMetrics.Load(); m != nil {
 		started := m.begin()
 		defer func() { m.record(operationSet, metricsShard, started) }()
 	}
-	expiration, durability, _ := db.resolveOptions(opts)
+	options := db.resolveOptions(opts)
+	durability := options.durability
 	if !durability.valid() {
 		return fmt.Errorf("invalid durability %d", durability)
 	}
@@ -352,7 +396,10 @@ func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	if s.log.writeErr != nil {
 		return s.log.writeErr
 	}
-	change, err := s.index.prepareSet(s.log, ty, kb, value, hash, expiration)
+	if err := options.checkCondition(s, kb, hash); err != nil {
+		return err
+	}
+	change, err := s.index.prepareSet(s.log, ty, kb, value, hash, options.deadline())
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
@@ -435,18 +482,21 @@ func (db *DB) Get[T Value, K Key](key K) (T, error) {
 // and must not call methods on this DB. A panic propagates without changing
 // the value. Byte slices passed to fn are owned by the caller and may be
 // mutated or retained. Returned slices are copied before Update returns; nil
-// stores an empty value. If WithExpiration is passed, it sets the expiration
-// of the written record; otherwise an existing key keeps its expiration and
+// stores an empty value. WithExpiration or WithTTL sets the expiration of the
+// written record; otherwise an existing key keeps its expiration and
 // an insert uses the database default. An unchanged value with an unchanged
 // expiration does not append a record. A write error leaves the index
 // unchanged, but cannot undo any external effects of the callback.
+// WithCondition checks the previous value before fn; a rejected condition
+// returns ErrConditionFailed without calling fn.
 func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error), opts ...Option) error {
 	var metricsShard *Shard
 	if m := db.operationMetrics.Load(); m != nil {
 		started := m.begin()
 		defer func() { m.record(operationUpdate, metricsShard, started) }()
 	}
-	expiration, durability, expirationSet := db.resolveOptions(opts)
+	options := db.resolveOptions(opts)
+	durability := options.durability
 	if !durability.valid() {
 		return fmt.Errorf("invalid durability %d", durability)
 	}
@@ -507,12 +557,22 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 			}
 		}
 	}
-	if exists && !expirationSet {
-		expiration = prevExp
+	if options.condition != nil {
+		conditionValue := raw
+		if byteValue || stringValue {
+			conditionValue = scalarValue{ty: ty, size: len(previous)}
+		}
+		if err := options.condition(conditionValue, previous, exists); err != nil {
+			return err
+		}
 	}
 	newValue, fnErr := fn(value, exists)
 	if fnErr != nil {
 		return fnErr
+	}
+	expiration := prevExp
+	if !exists || options.expirationSet {
+		expiration = options.deadline()
 	}
 	var encoded [8]byte
 	ty, payload, err := encodeValue(newValue, &encoded)
@@ -529,7 +589,7 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 		} else {
 			sameValue = scalarBytes(ty, payload) == raw
 		}
-		if sameValue && (!expirationSet || expiration == prevExp) {
+		if sameValue && expiration == prevExp {
 			return s.finishDurability(durability)
 		}
 		previousSize := len(previous)
@@ -550,14 +610,16 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 }
 
 // Delete removes key. Deleting a missing key succeeds.
-// Options other than WithDurability have no effect.
+// WithCondition checks the previous value atomically before deleting, including
+// for missing keys. Other options except WithDurability have no effect.
 func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	var metricsShard *Shard
 	if m := db.operationMetrics.Load(); m != nil {
 		started := m.begin()
 		defer func() { m.record(operationDelete, metricsShard, started) }()
 	}
-	_, durability, _ := db.resolveOptions(opts)
+	options := db.resolveOptions(opts)
+	durability := options.durability
 	if !durability.valid() {
 		return fmt.Errorf("invalid durability %d", durability)
 	}
@@ -571,6 +633,9 @@ func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	}
 	if s.log.writeErr != nil {
 		return s.log.writeErr
+	}
+	if err := options.checkCondition(s, kb, hash); err != nil {
+		return err
 	}
 	change, err := s.index.prepareDelete(s.log, kb, hash)
 	if err != nil {

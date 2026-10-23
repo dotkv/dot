@@ -50,7 +50,7 @@ database closes or the process exits.</p>
 <h2 id="durability">Durability</h2>
 
 <p><code>WithDurability</code> selects a default mode for <code>Open</code>, or overrides
-it for a single <code>Set</code>, <code>Update</code>, or <code>Delete</code>:</p>
+it for a single <code>Set</code>, <code>Update</code>, <code>Add</code>, <code>Sub</code>, or <code>Delete</code>:</p>
 
 <pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
 
@@ -73,6 +73,9 @@ drain pending bytes (even for unchanged values or missing deletes);
 <code>Sync</code> then fsyncs that shard. A background flush failure blocks
 further mutations in that shard and is returned by subsequent mutations and
 <code>Close</code>.</p>
+
+<p>A rejected <code>WithCondition</code> returns <code>ErrConditionFailed</code>
+without applying the mutation's durability request or flushing earlier buffered writes.</p>
 
 <p>Reads, atomic updates, and scans see buffered writes immediately. A process
 crash can lose buffered writes, while <code>Write</code> and flushed

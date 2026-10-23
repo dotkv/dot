@@ -74,21 +74,57 @@ A missing or expired key passes the type's zero value with `exists == false`:
 Returning an error aborts the write. Keep the callback short and do not call
 methods on the same database from it.
 
+For numeric values, `Add` and `Sub` update atomically and return the new value:
+
+```go
+count, err := db.Add("counter", uint64(1))
+count, err = db.Sub("counter", uint64(1))
+```
+
+They support all numeric value types, including `time.Duration`, and require
+the stored type. Missing or expired keys start at zero. Integer overflow or
+underflow leaves the value unchanged and returns an error wrapping
+`dot.ErrValueOverflow`; floating-point values follow Go arithmetic. Existing
+expiration is preserved unless explicitly overridden.
+
+## Mutate conditionally
+
+`WithCondition` checks the current value under the same shard lock as the
+mutation. It works with `Set`, `Update`, `Add`, `Sub`, and `Delete`:
+
+```go
+count, err := db.Add("active-jobs", 1,
+	dot.WithCondition(func(current int, exists bool) bool {
+		return current < 100
+	}),
+)
+```
+
+A false predicate returns `dot.ErrConditionFailed` without applying the
+mutation or its expiration and durability options. Missing or expired keys
+pass the type's zero value and `exists == false`; an existing value must match
+the predicate's type. The predicate runs once before any update callback or
+arithmetic, and must not call methods on this database. Conditions are only
+supported on mutations; `Open` rejects them. The last `WithCondition` wins.
+
 ## Expire a value and sync the write
 
 ```go
 err := db.Set("session", "active",
-	dot.WithExpiration(time.Now().Add(15*time.Minute)),
+	dot.WithTTL(15*time.Minute),
 	dot.WithDurability(dot.Sync),
 )
 ```
 
-The key becomes unreadable at the given time. Compute `time.Now().Add(ttl)` on
-each write for a fresh TTL; a deadline passed to `dot.Open` is shared by all
-writes that use that default.
+The key becomes unreadable after 15 minutes. `WithTTL` starts a fresh lifetime
+on each write, so it can be reused or passed to `Open` as a default. `Update`,
+`Add`, and `Sub` preserve an existing key's deadline unless overridden; inserts
+use the database default. A zero TTL clears expiration; a negative TTL expires
+immediately. For a fixed deadline, use `WithExpiration(time)`; when combined
+with `WithTTL`, the last option wins.
 
 `WithDurability` sets the default for `Open` or overrides it for a single `Set`,
-`Update`, or `Delete`:
+`Update`, `Add`, `Sub`, or `Delete`:
 
 | Mode | Before returning |
 | --- | --- |

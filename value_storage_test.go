@@ -630,6 +630,115 @@ func TestDBUpdatePreservesExpiration(t *testing.T) {
 	}
 }
 
+func TestDBTTLDeadlines(t *testing.T) {
+	for name, mutate := range map[string]func(*DB, ...Option) error{
+		"update": func(db *DB, opts ...Option) error {
+			return db.Update("key", func(v int64, _ bool) (int64, error) { return v + 1, nil }, opts...)
+		},
+		"add": func(db *DB, opts ...Option) error { _, err := db.Add("key", int64(1), opts...); return err },
+		"sub": func(db *DB, opts ...Option) error { _, err := db.Sub("key", int64(1), opts...); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := newInternalDB(t, WithShardCount(1), WithTTL(time.Hour))
+			stopTestMaintenance(db)
+			expiration := func() int64 {
+				t.Helper()
+				s, hash := db.shard([]byte("key"))
+				s.lock.RLock()
+				defer s.lock.RUnlock()
+				pos, _, deadline, err := s.index.findScalar(s.log, []byte("key"), hash)
+				if err != nil || pos < 0 {
+					t.Fatalf("read stored deadline: position=%d, %v", pos, err)
+				}
+				return deadline
+			}
+			// Inserts use a fresh relative default, including through arithmetic.
+			before := time.Now().Add(time.Hour).UnixNano()
+			if err := mutate(db); err != nil {
+				t.Fatal(err)
+			}
+			if got := expiration(); got < before || got > time.Now().Add(time.Hour).UnixNano() {
+				t.Fatalf("default TTL deadline=%d, want one hour from the insert", got)
+			}
+			for _, deadline := range []time.Time{{}, time.Now().Add(2 * time.Hour)} {
+				if err := db.Set("key", int64(5), WithExpiration(deadline)); err != nil {
+					t.Fatal(err)
+				}
+				previous := expiration()
+				if err := mutate(db); err != nil {
+					t.Fatal(err)
+				}
+				if got := expiration(); got != previous {
+					t.Fatalf("mutation changed deadline: %d, want %d", got, previous)
+				}
+				before := time.Now().Add(time.Hour).UnixNano()
+				if err := mutate(db, WithTTL(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				if got := expiration(); got < before || got > time.Now().Add(time.Hour).UnixNano() {
+					t.Fatalf("override TTL deadline=%d, want one hour from the mutation", got)
+				}
+				if err := mutate(db, WithTTL(0)); err != nil {
+					t.Fatal(err)
+				}
+				if got := expiration(); got != 0 {
+					t.Fatalf("zero TTL did not clear deadline: %d", got)
+				}
+			}
+			var callbackFinished time.Time
+			if err := db.Update("key", func(v int64, _ bool) (int64, error) {
+				callbackFinished = time.Now()
+				return v, nil
+			}, WithTTL(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			deadline := expiration()
+			if deadline < callbackFinished.Add(time.Hour).UnixNano() {
+				t.Fatal("TTL was evaluated before the callback finished")
+			}
+			// Reopening must retain the absolute deadline written to the log.
+			db = reopenBufferedDB(t, db)
+			if got := expiration(); got != deadline {
+				t.Fatalf("recovery changed deadline: %d, want %d", got, deadline)
+			}
+		})
+	}
+}
+
+func TestDBArithmeticWriteFailure(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	if err := db.Set("key", int64(4)); err != nil {
+		t.Fatal(err)
+	}
+	s := &db.shards[0]
+	stopTestMaintenance(db)
+	if err := s.log.headFile.Truncate(logSegmentSize); err != nil {
+		t.Fatal(err)
+	}
+	s.log.size = logSegmentSize
+	blocker := s.log.segmentPath(s.log.headSegment + 1)
+	if err := os.Mkdir(blocker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(string, int64, ...Option) (int64, error){db.Add[int64, string], db.Sub[int64, string]} {
+		if got, err := mutate("key", 1); err == nil || got != 0 {
+			t.Fatalf("failed append returned %d, %v; want zero and an error", got, err)
+		}
+		if got, err := db.Get[int64]("key"); err != nil || got != 4 {
+			t.Fatalf("failed append changed value: %d, %v", got, err)
+		}
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.Add("key", int64(1)); err != nil || got != 5 {
+		t.Fatalf("Add after rotation failure: %d, %v", got, err)
+	}
+	if got, err := db.Sub("key", int64(1)); err != nil || got != 4 {
+		t.Fatalf("Sub after rotation failure: %d, %v", got, err)
+	}
+}
+
 func TestDBUpdateWriteFailure(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("key")

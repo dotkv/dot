@@ -83,7 +83,7 @@ once at a time. <code>Close</code> releases resources and keeps the data.
 <h2 id="configure-writes">Configure the database</h2>
 
 <p>Options passed to <code>Open</code> set database defaults. Write options can also be set
-on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> calls:</p>
+on individual <code>Set</code>, <code>Update</code>, <code>Add</code>, <code>Sub</code>, and <code>Delete</code> calls:</p>
 
 <pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
 
@@ -92,7 +92,9 @@ on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> cal
 <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Use</th></tr></thead>
 <tbody>
 <tr><td><code>WithDurability(mode)</code></td><td><code>dot.Buffer</code></td><td>Buffer writes, write immediately, or sync before returning.</td></tr>
-<tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>Set a fixed deadline for Set and Update; a zero time clears it.</td></tr>
+<tr><td><code>WithTTL(duration)</code></td><td>No expiration</td><td>Set a lifetime from each write; zero clears expiration and negative durations expire immediately.</td></tr>
+<tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>Set a fixed deadline; a zero time clears it.</td></tr>
+<tr><td><code>WithCondition(predicate)</code></td><td>Always apply</td><td>Check the current value atomically before a mutation. Supported on individual mutations; Open rejects it.</td></tr>
 <tr><td><code>WithShardCount(count)</code></td><td>64</td><td>Choose a new database's shard count: a power of two from 1 to 1024.</td></tr>
 <tr><td><code>WithCompactionThreshold(ratio, bytes)</code></td><td>0.33, 1 MiB</td><td>Adjust background cleanup thresholds per shard.</td></tr>
 </tbody>

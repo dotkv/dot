@@ -202,7 +202,7 @@ func TestBufferIdleDeadline(t *testing.T) {
 
 func TestDurabilityOverridesFlushPending(t *testing.T) {
 	for _, mode := range []Durability{Write, Sync} {
-		for _, operation := range []string{"set", "unchanged-set", "update", "unchanged-update", "insert", "delete", "missing-delete"} {
+		for _, operation := range []string{"set", "unchanged-set", "update", "unchanged-update", "insert", "add", "unchanged-add", "sub", "unchanged-sub", "delete", "missing-delete"} {
 			t.Run(fmt.Sprintf("%d/%s", mode, operation), func(t *testing.T) {
 				db := newBufferedDB(t)
 				if err := db.Set("key", uint64(1)); err != nil {
@@ -230,6 +230,18 @@ func TestDurabilityOverridesFlushPending(t *testing.T) {
 					err = db.Delete("key", opt)
 				case "missing-delete":
 					err = db.Delete("missing", opt)
+				case "add", "unchanged-add":
+					delta := uint64(1)
+					if operation == "unchanged-add" {
+						delta = 0
+					}
+					_, err = db.Add("key", delta, opt)
+				case "sub", "unchanged-sub":
+					delta := uint64(1)
+					if operation == "unchanged-sub" {
+						delta = 0
+					}
+					_, err = db.Sub("key", delta, opt)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -243,6 +255,52 @@ func TestDurabilityOverridesFlushPending(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestConditionRejectionPreservesPendingWrite(t *testing.T) {
+	for name, mutate := range map[string]func(*DB, ...Option) error{
+		"set": func(db *DB, opts ...Option) error { return db.Set("key", uint64(8), opts...) },
+		"update": func(db *DB, opts ...Option) error {
+			return db.Update("key", func(v uint64, _ bool) (uint64, error) { return v + 1, nil }, opts...)
+		},
+		"add":    func(db *DB, opts ...Option) error { _, err := db.Add("key", uint64(1), opts...); return err },
+		"sub":    func(db *DB, opts ...Option) error { _, err := db.Sub("key", uint64(1), opts...); return err },
+		"delete": func(db *DB, opts ...Option) error { return db.Delete("key", opts...) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := newBufferedDB(t)
+			stopTestMaintenance(db)
+			s := &db.shards[0]
+			// Keep the idle flush timer out of these exact storage assertions.
+			s.flushTimer = time.AfterFunc(time.Hour, func() {})
+			deadline := time.Now().Add(time.Hour)
+			if err := db.Set("key", uint64(7), WithExpiration(deadline)); err != nil {
+				t.Fatal(err)
+			}
+			size, pending := s.log.size, len(s.log.pending)
+			err := mutate(db, WithTTL(-time.Hour), WithDurability(Sync), WithCondition(func(uint64, bool) bool { return false }))
+			if err != ErrConditionFailed {
+				t.Fatalf("rejected mutation: %v", err)
+			}
+			info, err := s.log.headFile.Stat()
+			if err != nil || info.Size() != 0 || s.log.size != size || len(s.log.pending) != pending {
+				t.Fatalf("rejected mutation appended or flushed: stat=%v size=%d pending=%d error=%v", info, s.log.size, len(s.log.pending), err)
+			}
+			_, hash := db.shard([]byte("key"))
+			_, _, expiration, err := s.index.findScalar(s.log, []byte("key"), hash)
+			if err != nil || expiration != deadline.UnixNano() {
+				t.Fatalf("rejected mutation changed expiration: %d, %v", expiration, err)
+			}
+			// An approved no-op still honors its explicit durability request.
+			if _, err := db.Add("key", uint64(0), WithDurability(Sync), WithCondition(func(uint64, bool) bool { return true })); err != nil {
+				t.Fatal(err)
+			}
+			info, err = s.log.headFile.Stat()
+			if err != nil || info.Size() != int64(size) || s.log.size != size || len(s.log.pending) != 0 {
+				t.Fatalf("approved no-op did not flush: stat=%v size=%d pending=%d error=%v", info, s.log.size, len(s.log.pending), err)
+			}
+		})
 	}
 }
 

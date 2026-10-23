@@ -13,11 +13,12 @@ go test -race ./...
 
 The public suite has five files:
 
-- `api_test.go`: keys, scans, errors, ownership, expiration, callbacks, and locks.
+- `api_test.go`: keys, scans, errors, ownership, expiration, relative TTLs,
+  conditions, callbacks, and locks.
 - `values_test.go`: every supported type, edge values, type mismatches, updates,
-  and raw scan encodings checked using the standard library.
-- `concurrency_test.go`: concurrent reads, mutations, atomic increments, shutdown,
-  and recovery of concurrent writes.
+  arithmetic boundaries, and raw scan encodings checked using the standard library.
+- `concurrency_test.go`: concurrent reads, mutations, atomic updates and
+  arithmetic, conditional limits, shutdown, and recovery of concurrent writes.
 - `metrics_test.go`: HTTP assets, prefixed dashboards, WebSocket updates, shared
   viewers, and disconnect on database close, decoded through the JSON protocol.
 - `model_test.go`: deterministic mixed-operation traces against an independent

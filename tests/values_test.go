@@ -25,6 +25,7 @@ type valueCase struct {
 	access     func(*testing.T, *dot.DB, string, string)
 	update     func(*testing.T, *dot.DB, string, *valueCase, ...dot.Option)
 	abort      func(*testing.T, *dot.DB, string)
+	condition  func(func(any, bool) bool) dot.Option
 }
 
 func sameValue(got, want any) bool {
@@ -146,6 +147,9 @@ func typedValue[T dot.Value](name string, want T) valueCase {
 				t.Fatalf("aborted Update[%s]: calls=%d error=%v", kind, calls, err)
 			}
 		},
+		condition: func(fn func(any, bool) bool) dot.Option {
+			return dot.WithCondition(func(v T, exists bool) bool { return fn(v, exists) })
+		},
 	}
 }
 
@@ -235,4 +239,184 @@ func TestValueContracts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConditionValues(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	for _, v := range valueCases() {
+		t.Run(v.name, func(t *testing.T) {
+			check(t, v.set(db, v.name))
+			calls := 0
+			err := db.Delete(v.name, v.condition(func(got any, exists bool) bool {
+				calls++
+				if !exists || !sameValue(got, v.value) {
+					t.Fatalf("predicate decoded %v, exists=%t; want %v", got, exists, v.value)
+				}
+				return false
+			}))
+			if err != dot.ErrConditionFailed || calls != 1 {
+				t.Fatalf("typed condition: %v, calls=%d", err, calls)
+			}
+			v.check(t, db, v.name)
+			check(t, db.Delete(v.name, v.condition(func(got any, exists bool) bool {
+				return exists && sameValue(got, v.value)
+			})))
+			for _, expired := range []bool{false, true} {
+				if expired {
+					check(t, v.set(db, v.name, dot.WithTTL(-time.Hour)))
+				}
+				calls := 0
+				check(t, db.Delete(v.name, v.condition(func(got any, exists bool) bool {
+					calls++
+					zero := reflect.Zero(reflect.TypeOf(v.value)).Interface()
+					if exists || !reflect.DeepEqual(got, zero) {
+						t.Fatalf("absent predicate decoded %v, exists=%t; want %v", got, exists, zero)
+					}
+					return true
+				})))
+				if calls != 1 {
+					t.Fatalf("absent predicate ran %d times", calls)
+				}
+			}
+		})
+	}
+}
+
+func TestArithmeticIntegers(t *testing.T) {
+	for _, mode := range []dot.Durability{dot.Buffer, dot.Write, dot.Sync} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			db := newDB(t, dot.WithShardCount(1), dot.WithDurability(mode))
+			checkIntegerArithmetic(t, db, int(math.MinInt), int(math.MaxInt))
+			checkIntegerArithmetic(t, db, int8(math.MinInt8), int8(math.MaxInt8))
+			checkIntegerArithmetic(t, db, int16(math.MinInt16), int16(math.MaxInt16))
+			checkIntegerArithmetic(t, db, int32(math.MinInt32), int32(math.MaxInt32))
+			checkIntegerArithmetic(t, db, int64(math.MinInt64), int64(math.MaxInt64))
+			checkIntegerArithmetic(t, db, uint(0), uint(math.MaxUint))
+			checkIntegerArithmetic(t, db, uint8(0), uint8(math.MaxUint8))
+			checkIntegerArithmetic(t, db, uint16(0), uint16(math.MaxUint16))
+			checkIntegerArithmetic(t, db, uint32(0), uint32(math.MaxUint32))
+			checkIntegerArithmetic(t, db, uint64(0), uint64(math.MaxUint64))
+			checkIntegerArithmetic(t, db, time.Duration(math.MinInt64), time.Duration(math.MaxInt64))
+		})
+	}
+}
+
+func checkIntegerArithmetic[T dot.Number](t *testing.T, db *dot.DB, minimum, maximum T) {
+	t.Helper()
+	t.Run(fmt.Sprintf("%T", minimum), func(t *testing.T) {
+		check(t, db.Delete("counter"))
+		if got, err := db.Add("counter", T(2)); err != nil || got != 2 {
+			t.Fatalf("Add missing: %v, %v; want 2", got, err)
+		}
+		if got, err := db.Sub([]byte("counter"), T(1)); err != nil || got != 1 {
+			t.Fatalf("Sub existing: %v, %v; want 1", got, err)
+		}
+		cases := []struct {
+			initial, delta, want T
+			subtract, overflow   bool
+		}{
+			{maximum, 0, maximum, false, false},
+			{minimum, 0, minimum, true, false},
+			{maximum, 1, 0, false, true},
+			{minimum, 1, 0, true, true},
+			{minimum, 1, minimum + 1, false, false},
+			{maximum, 1, maximum - 1, true, false},
+			{maximum, maximum, 0, true, false},
+			{minimum, minimum, 0, true, false},
+		}
+		if minimum < 0 {
+			negativeOne := minimum - minimum - 1
+			cases = append(cases, []struct {
+				initial, delta, want T
+				subtract, overflow   bool
+			}{
+				{minimum, negativeOne, 0, false, true},
+				{maximum, negativeOne, 0, true, true},
+				{0, minimum, 0, true, true},
+				{minimum, maximum, negativeOne, false, false},
+				{maximum, minimum, negativeOne, false, false},
+				{minimum, negativeOne, minimum + 1, true, false},
+			}...)
+		}
+		for _, tc := range cases {
+			check(t, db.Set("counter", tc.initial))
+			var got T
+			var err error
+			if tc.subtract {
+				got, err = db.Sub("counter", tc.delta)
+			} else {
+				got, err = db.Add("counter", tc.delta)
+			}
+			var wantErr error
+			stored := tc.want
+			if tc.overflow {
+				wantErr, stored = dot.ErrValueOverflow, tc.initial
+			}
+			if !errors.Is(err, wantErr) || got != tc.want {
+				t.Fatalf("initial=%v delta=%v subtract=%v: %v, %v; want %v, %v", tc.initial, tc.delta, tc.subtract, got, err, tc.want, wantErr)
+			}
+			if got, err := db.Get[T]("counter"); err != nil || got != stored {
+				t.Fatalf("stored value=%v, %v; want %v", got, err, stored)
+			}
+		}
+		check(t, db.Delete("counter"))
+		got, err := db.Sub("counter", T(1))
+		if minimum < 0 {
+			if err != nil || got != minimum-minimum-1 {
+				t.Fatalf("Sub missing signed: %v, %v; want -1", got, err)
+			}
+		} else {
+			if !errors.Is(err, dot.ErrValueOverflow) || got != 0 {
+				t.Fatalf("Sub missing unsigned: %v, %v; want zero and ErrValueOverflow", got, err)
+			}
+			if _, err := db.Get[T]("counter"); err != dot.ErrNotFound {
+				t.Fatalf("underflow inserted a missing key: %v", err)
+			}
+		}
+	})
+}
+
+func TestArithmeticFloats(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	checkFloatArithmetic(t, db, float32(math.MaxFloat32))
+	checkFloatArithmetic(t, db, float64(math.MaxFloat64))
+}
+
+func checkFloatArithmetic[T interface{ float32 | float64 }](t *testing.T, db *dot.DB, maximum T) {
+	t.Helper()
+	t.Run(fmt.Sprintf("%T", maximum), func(t *testing.T) {
+		infinity, nan, negativeZero := T(math.Inf(1)), T(math.NaN()), T(math.Copysign(0, -1))
+		for _, tc := range []struct{ initial, delta, add, sub T }{
+			{1.5, 0.25, 1.75, 1.25},
+			{maximum, maximum, infinity, 0},
+			{infinity, infinity, infinity, nan},
+			{nan, 1, nan, nan},
+			{negativeZero, negativeZero, negativeZero, 0},
+		} {
+			for _, subtract := range []bool{false, true} {
+				check(t, db.Set("float", tc.initial))
+				var got, want T
+				var err error
+				if subtract {
+					got, err = db.Sub("float", tc.delta)
+					want = tc.sub
+				} else {
+					got, err = db.Add("float", tc.delta)
+					want = tc.add
+				}
+				check(t, err)
+				stored, err := db.Get[T]("float")
+				check(t, err)
+				for _, value := range []T{got, stored} {
+					if math.IsNaN(float64(want)) {
+						if !math.IsNaN(float64(value)) {
+							t.Fatalf("got %v, want NaN", value)
+						}
+					} else if !sameValue(value, want) {
+						t.Fatalf("initial=%v delta=%v subtract=%v: got %v, want %v", tc.initial, tc.delta, subtract, value, want)
+					}
+				}
+			}
+		}
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,6 +164,309 @@ func TestDBExpiration(t *testing.T) {
 	equal(t, dbWithDefault, key, val)
 	check(t, dbWithDefault.Set(key, val, dot.WithExpiration(time.Time{})))
 	equal(t, dbWithDefault, key, val)
+}
+
+func TestDBTTL(t *testing.T) {
+	for _, defaultTTL := range []bool{false, true} {
+		t.Run(fmt.Sprintf("default=%t", defaultTTL), func(t *testing.T) {
+			ttl := dot.WithTTL(50 * time.Millisecond)
+			openOpts := []dot.Option{dot.WithShardCount(1)}
+			var writeOpts []dot.Option
+			if defaultTTL {
+				openOpts = append(openOpts, ttl)
+			} else {
+				writeOpts = append(writeOpts, ttl)
+			}
+			db := newDB(t, openOpts...)
+			check(t, db.Set("old", "value", writeOpts...))
+			time.Sleep(80 * time.Millisecond)
+			if _, err := db.Get[string]("old"); err != dot.ErrNotFound {
+				t.Fatalf("TTL did not expire: %v", err)
+			}
+			// Reusing the option or database default must start a new lifetime.
+			check(t, db.Set("fresh", "value", writeOpts...))
+			if got, err := db.Get[string]("fresh"); err != nil || got != "value" {
+				t.Fatalf("reused TTL: %q, %v", got, err)
+			}
+		})
+	}
+	t.Run("overrides", func(t *testing.T) {
+		db := newDB(t, dot.WithShardCount(1), dot.WithTTL(-time.Hour))
+		past, future := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+		for _, tc := range []struct {
+			name    string
+			opts    []dot.Option
+			expired bool
+		}{
+			{"default", nil, true},
+			{"positive", []dot.Option{dot.WithTTL(time.Hour)}, false},
+			{"zero", []dot.Option{dot.WithTTL(0)}, false},
+			{"negative", []dot.Option{dot.WithTTL(-time.Hour)}, true},
+			{"maximum", []dot.Option{dot.WithTTL(time.Duration(math.MaxInt64))}, false},
+			{"minimum", []dot.Option{dot.WithTTL(time.Duration(math.MinInt64))}, true},
+			{"absolute-wins", []dot.Option{dot.WithTTL(time.Hour), dot.WithExpiration(past)}, true},
+			{"relative-wins", []dot.Option{dot.WithExpiration(past), dot.WithTTL(time.Hour)}, false},
+			{"absolute-clears", []dot.Option{dot.WithTTL(-time.Hour), dot.WithExpiration(time.Time{})}, false},
+			{"relative-clears", []dot.Option{dot.WithExpiration(future), dot.WithTTL(0)}, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				check(t, db.Set(tc.name, "value", tc.opts...))
+				got, err := db.Get[string](tc.name)
+				if tc.expired {
+					if err != dot.ErrNotFound || got != "" {
+						t.Fatalf("expired value=%q, %v", got, err)
+					}
+				} else if err != nil || got != "value" {
+					t.Fatalf("live value=%q, %v", got, err)
+				}
+			})
+		}
+	})
+}
+
+func TestDBArithmeticErrors(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	check(t, db.Set("wrong", "value"))
+	for _, operation := range []func(string, uint64, ...dot.Option) (uint64, error){db.Add[uint64, string], db.Sub[uint64, string]} {
+		if got, err := operation("wrong", 1); got != 0 || !errors.Is(err, dot.ErrTypeMismatch) {
+			t.Fatalf("type mismatch: %d, %v", got, err)
+		}
+		if got, err := db.Get[string]("wrong"); err != nil || got != "value" {
+			t.Fatalf("type mismatch changed value: %q, %v", got, err)
+		}
+		check(t, db.Set("expired", "old type", dot.WithTTL(-time.Hour)))
+		if got, err := operation("expired", 0); err != nil || got != 0 {
+			t.Fatalf("expired type was not treated as absent: %d, %v", got, err)
+		}
+		if got, err := db.Get[uint64]("expired"); err != nil || got != 0 {
+			t.Fatalf("expired key not replaced: %d, %v", got, err)
+		}
+	}
+	check(t, db.Close())
+	if got, err := db.Add("closed", 1); got != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Add closed: %d, %v", got, err)
+	}
+	if got, err := db.Sub("closed", 1); got != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Sub closed: %d, %v", got, err)
+	}
+}
+
+func TestDBArithmeticRecovery(t *testing.T) {
+	for _, mode := range []dot.Durability{dot.Buffer, dot.Write, dot.Sync} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			path := t.TempDir()
+			db, err := dot.Open(path, dot.WithShardCount(1), dot.WithDurability(mode))
+			check(t, err)
+			t.Cleanup(func() { check(t, db.Close()) })
+			if got, err := db.Add("counter", int64(5)); err != nil || got != 5 {
+				t.Fatalf("initial Add: %d, %v", got, err)
+			}
+			if got, err := db.Sub("counter", int64(2)); err != nil || got != 3 {
+				t.Fatalf("initial Sub: %d, %v", got, err)
+			}
+			check(t, db.Close())
+			db, err = dot.Open(path)
+			check(t, err)
+			if got, err := db.Get[int64]("counter"); err != nil || got != 3 {
+				t.Fatalf("recovery lost arithmetic: %d, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDBConditions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*dot.DB, ...dot.Option) (int, error)
+		stored int
+		result int
+	}{
+		{"set", func(db *dot.DB, opts ...dot.Option) (int, error) { return 0, db.Set("key", 11, opts...) }, 11, 0},
+		{"update", func(db *dot.DB, opts ...dot.Option) (int, error) {
+			return 0, db.Update("key", func(v int, _ bool) (int, error) { return v + 1, nil }, opts...)
+		}, 8, 0},
+		{"add", func(db *dot.DB, opts ...dot.Option) (int, error) { return db.Add("key", 3, opts...) }, 10, 10},
+		{"sub", func(db *dot.DB, opts ...dot.Option) (int, error) { return db.Sub("key", 3, opts...) }, 4, 4},
+		{"delete", func(db *dot.DB, opts ...dot.Option) (int, error) { return 0, db.Delete("key", opts...) }, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newDB(t, dot.WithShardCount(1))
+			check(t, db.Set("key", 7))
+			calls := 0
+			predicate := func(allow bool) dot.Option {
+				return dot.WithCondition(func(v int, exists bool) bool {
+					calls++
+					if !exists || v != 7 {
+						t.Fatalf("predicate saw %d, exists=%t; want 7, true", v, exists)
+					}
+					return allow
+				})
+			}
+			if got, err := tc.mutate(db, predicate(false), dot.WithTTL(-time.Hour)); err != dot.ErrConditionFailed || got != 0 || calls != 1 {
+				t.Fatalf("rejected mutation: result=%d error=%v calls=%d", got, err, calls)
+			}
+			if got, err := db.Get[int]("key"); err != nil || got != 7 {
+				t.Fatalf("rejected mutation changed value or expiration: %d, %v", got, err)
+			}
+			wrongType := dot.WithCondition(func(string, bool) bool {
+				t.Fatal("type mismatch invoked predicate")
+				return true
+			})
+			if got, err := tc.mutate(db, wrongType); got != 0 || !errors.Is(err, dot.ErrTypeMismatch) {
+				t.Fatalf("predicate type mismatch: %d, %v", got, err)
+			}
+			if got, err := tc.mutate(db, dot.WithCondition[int](nil)); err == nil || got != 0 {
+				t.Fatalf("nil predicate: %d, %v", got, err)
+			}
+			func() {
+				defer func() {
+					if got := recover(); got != "condition panic" {
+						t.Fatalf("predicate panic: %v", got)
+					}
+				}()
+				_, _ = tc.mutate(db, dot.WithCondition(func(int, bool) bool { panic("condition panic") }))
+			}()
+			if got, err := db.Get[int]("key"); err != nil || got != 7 {
+				t.Fatalf("predicate panic or error changed value or retained lock: %d, %v", got, err)
+			}
+			if got, err := tc.mutate(db, wrongType, predicate(true)); err != nil || got != tc.result || calls != 2 {
+				t.Fatalf("approved mutation/last condition: result=%d error=%v calls=%d", got, err, calls)
+			}
+			if tc.name == "delete" {
+				if _, err := db.Get[int]("key"); err != dot.ErrNotFound {
+					t.Fatalf("approved deletion failed: %v", err)
+				}
+			} else if got, err := db.Get[int]("key"); err != nil || got != tc.stored {
+				t.Fatalf("approved mutation stored %d, %v; want %d", got, err, tc.stored)
+			}
+			for _, expired := range []bool{false, true} {
+				check(t, db.Delete("key"))
+				if expired {
+					check(t, db.Set("key", "expired type", dot.WithTTL(-time.Hour)))
+				}
+				calls := 0
+				absent := dot.WithCondition(func(v int, exists bool) bool {
+					calls++
+					if exists || v != 0 {
+						t.Fatalf("missing/expired predicate: %d, exists=%t", v, exists)
+					}
+					return false
+				})
+				if got, err := tc.mutate(db, absent); err != dot.ErrConditionFailed || got != 0 || calls != 1 {
+					t.Fatalf("missing/expired rejection: %d, %v, calls=%d", got, err, calls)
+				}
+				if _, err := db.Get[int]("key"); err != dot.ErrNotFound {
+					t.Fatalf("rejection inserted key: %v", err)
+				}
+				if _, err := tc.mutate(db, dot.WithCondition(func(v int, exists bool) bool { return v == 0 && !exists })); err != nil {
+					t.Fatalf("approved missing/expired mutation: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestDBConditionOrdering(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	check(t, db.Set("key", 1))
+	for _, allow := range []bool{false, true} {
+		conditionCalled, updateCalled := false, false
+		err := db.Update("key", func(v int, exists bool) (int, error) {
+			updateCalled = true
+			if !conditionCalled {
+				t.Fatal("update callback ran before condition")
+			}
+			return v + 1, nil
+		}, dot.WithCondition(func(v int, exists bool) bool {
+			conditionCalled = true
+			return allow
+		}))
+		var wantErr error
+		if !allow {
+			wantErr = dot.ErrConditionFailed
+		}
+		if err != wantErr || !conditionCalled || updateCalled != allow {
+			t.Fatalf("ordering: error=%v predicate=%t update=%t", err, conditionCalled, updateCalled)
+		}
+	}
+	// A condition checks the old type; Set may replace it with another type.
+	check(t, db.Set("key", "replacement", dot.WithCondition(func(v int, exists bool) bool { return exists && v == 2 })))
+	never := dot.WithCondition(func(v string, exists bool) bool {
+		t.Fatal("operation type mismatch invoked predicate")
+		return true
+	})
+	if err := db.Update("key", func(v int, _ bool) (int, error) {
+		t.Fatal("type mismatch invoked update")
+		return v, nil
+	}, never); !errors.Is(err, dot.ErrTypeMismatch) {
+		t.Fatalf("operation type mismatch: %v", err)
+	}
+	check(t, db.Set("limit", uint8(math.MaxUint8)))
+	for _, allow := range []bool{false, true} {
+		wantErr := dot.ErrConditionFailed
+		if allow {
+			wantErr = dot.ErrValueOverflow
+		}
+		if got, err := db.Add("limit", uint8(1), dot.WithCondition(func(uint8, bool) bool { return allow })); got != 0 || !errors.Is(err, wantErr) {
+			t.Fatalf("condition before overflow: %d, %v; want %v", got, err, wantErr)
+		}
+	}
+}
+
+func TestDBConditionByteOwnership(t *testing.T) {
+	for _, size := range []int{8, 8192} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			db := newDB(t, dot.WithShardCount(1))
+			original := bytes.Repeat([]byte{'a'}, size)
+			check(t, db.Set("key", original))
+			var retained []byte
+			condition := func(allow bool) dot.Option {
+				return dot.WithCondition(func(v []byte, exists bool) bool {
+					if !exists || !bytes.Equal(v, original) {
+						t.Fatalf("condition saw %q, exists=%t", v, exists)
+					}
+					retained = v
+					clear(v)
+					return allow
+				})
+			}
+			if err := db.Delete("key", condition(false)); err != dot.ErrConditionFailed {
+				t.Fatalf("rejected byte deletion: %v", err)
+			}
+			if got, err := db.Get[[]byte]("key"); err != nil || !bytes.Equal(got, original) {
+				t.Fatalf("rejected predicate mutated storage: %q, %v", got, err)
+			}
+			check(t, db.Update("key", func(v []byte, exists bool) ([]byte, error) {
+				if !exists || !bytes.Equal(v, original) {
+					t.Fatal("predicate changed update input")
+				}
+				return v, nil
+			}, condition(true)))
+			clear(retained)
+			if got, err := db.Get[[]byte]("key"); err != nil || !bytes.Equal(got, original) {
+				t.Fatalf("retained predicate input aliases storage: %q, %v", got, err)
+			}
+			check(t, db.Set("key", "new type", condition(true)))
+			clear(retained)
+			if got, err := db.Get[string]("key"); err != nil || got != "new type" {
+				t.Fatalf("conditional Set ownership: %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDBConditionOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-created")
+	db, err := dot.Open(path, dot.WithCondition(func(int, bool) bool {
+		t.Fatal("Open invoked condition")
+		return true
+	}))
+	if err == nil || db != nil {
+		t.Fatalf("Open accepted condition: %v, %v", db, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid option created a database: %v", err)
+	}
 }
 
 func TestLockFileDoubleOpen(t *testing.T) {
@@ -576,6 +880,12 @@ func TestDurabilityInvalid(t *testing.T) {
 		}
 		if err := db.Delete("missing", dot.WithDurability(d)); err == nil {
 			t.Fatal("Delete accepted invalid durability")
+		}
+		if got, err := db.Add("key", uint64(1), dot.WithDurability(d)); err == nil || got != 0 {
+			t.Fatalf("Add accepted invalid durability: %d, %v", got, err)
+		}
+		if got, err := db.Sub("key", uint64(1), dot.WithDurability(d)); err == nil || got != 0 {
+			t.Fatalf("Sub accepted invalid durability: %d, %v", got, err)
 		}
 	}
 }

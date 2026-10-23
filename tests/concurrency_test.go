@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dotkv/dot"
@@ -117,6 +118,126 @@ func TestDBUpdateConcurrentIncrements(t *testing.T) {
 	done.Wait()
 	if got, err := db.Get[uint64](key); err != nil || got != workers*increments {
 		t.Fatalf("got %d, want %d, error %v", got, workers*increments, err)
+	}
+}
+
+func TestDBArithmeticConcurrent(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	const workers, operations = 16, 200
+	for _, subtract := range []bool{false, true} {
+		results := make(chan int, workers*operations)
+		start := make(chan struct{})
+		var done sync.WaitGroup
+		for range workers {
+			done.Go(func() {
+				<-start
+				for range operations {
+					var value int
+					var err error
+					if subtract {
+						value, err = db.Sub("counter", 1)
+					} else {
+						value, err = db.Add("counter", 1)
+					}
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					results <- value
+				}
+			})
+		}
+		close(start)
+		done.Wait()
+		close(results)
+		seen := make(map[int]bool)
+		for result := range results {
+			if seen[result] {
+				t.Fatalf("duplicate arithmetic result %d", result)
+			}
+			seen[result] = true
+		}
+		for i := range workers * operations {
+			want := i + 1
+			if subtract {
+				want = i
+			}
+			if !seen[want] {
+				t.Fatalf("missing arithmetic result %d", want)
+			}
+		}
+		want := workers * operations
+		if subtract {
+			want = 0
+		}
+		if got, err := db.Get[int]("counter"); err != nil || got != want {
+			t.Fatalf("final value=%d, %v; want %d", got, err, want)
+		}
+	}
+}
+
+func TestDBConditionConcurrentLimits(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	const workers, attempts = 16, 50
+	for _, tc := range []struct {
+		name      string
+		mutate    func(string, int, ...dot.Option) (int, error)
+		predicate func(int, bool) bool
+		minimum   int
+		maximum   int
+		final     int
+	}{
+		{"add", db.Add[int, string], func(n int, _ bool) bool { return n < 100 }, 1, 100, 100},
+		{"sub", db.Sub[int, string], func(n int, _ bool) bool { return n > 10 }, 10, 99, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			condition := dot.WithCondition(func(n int, exists bool) bool {
+				calls.Add(1)
+				return tc.predicate(n, exists)
+			})
+			results := make(chan int, workers*attempts)
+			start := make(chan struct{})
+			var done sync.WaitGroup
+			for range workers {
+				done.Go(func() {
+					<-start
+					for range attempts {
+						value, err := tc.mutate("limit", 1, condition)
+						if err != nil && err != dot.ErrConditionFailed {
+							t.Error(err)
+							return
+						}
+						if err != nil && value != 0 {
+							t.Errorf("rejected arithmetic returned %d", value)
+						}
+						results <- value
+					}
+				})
+			}
+			close(start)
+			done.Wait()
+			close(results)
+			seen := make(map[int]bool)
+			for result := range results {
+				if result == 0 {
+					continue // Rejected condition.
+				}
+				if seen[result] || result < tc.minimum || result > tc.maximum {
+					t.Fatalf("duplicate or out-of-bounds result %d", result)
+				}
+				seen[result] = true
+			}
+			if got := len(seen); got != tc.maximum-tc.minimum+1 {
+				t.Fatalf("approved %d mutations, want %d", got, tc.maximum-tc.minimum+1)
+			}
+			if got := calls.Load(); got != workers*attempts {
+				t.Fatalf("predicate called %d times, want %d", got, workers*attempts)
+			}
+			if got, err := db.Get[int]("limit"); err != nil || got != tc.final {
+				t.Fatalf("limit=%d, %v; want %d", got, err, tc.final)
+			}
+		})
 	}
 }
 

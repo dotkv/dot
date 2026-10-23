@@ -340,6 +340,26 @@ func TestDBUpdateScalarAllocations(t *testing.T) {
 	checkScalarUpdateAllocations(t, db, time.Second)
 }
 
+func TestDBArithmeticAllocations(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	stopTestMaintenance(db)
+	key := []byte("counter")
+	if err := db.Set(key, int64(0)); err != nil {
+		t.Fatal(err)
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		if _, err := db.Add(key, int64(1)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Sub(key, int64(1)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("arithmetic allocated %g times, want 0", allocations)
+	}
+}
+
 func TestOperationMetricsAllocations(t *testing.T) {
 	for _, latency := range []bool{false, true} {
 		t.Run(fmt.Sprintf("latency=%t", latency), func(t *testing.T) {

@@ -24,15 +24,24 @@ type Value interface {
 		float32 | float64 | time.Duration
 }
 
+// Number lists the value types supported by Add and Sub. Arithmetic retains
+// the stored type, including the distinct type of time.Duration.
+type Number interface {
+	int | int8 | int16 | int32 | int64 |
+		uint | uint8 | uint16 | uint32 | uint64 |
+		float32 | float64 | time.Duration
+}
+
 // ErrInvalidValue indicates a malformed record type or value encoding.
 var ErrInvalidValue = errors.New("invalid value encoding")
 
 // ErrTypeMismatch indicates that the stored value has a different type from
-// the one requested by Get or Update. No implicit conversions are performed.
+// the one requested by Get, Update, Add, or Sub. No implicit conversions are performed.
 var ErrTypeMismatch = errors.New("value type mismatch")
 
 // ErrValueOverflow indicates that a stored int or uint does not fit the host's
-// int or uint type. Their disk encodings are always 64 bits, even on 32-bit hosts.
+// int or uint type, or that Add or Sub would overflow or underflow an integer.
+// The disk encodings of int and uint are always 64 bits, even on 32-bit hosts.
 var ErrValueOverflow = errors.New("value overflows requested type")
 
 type recordType byte

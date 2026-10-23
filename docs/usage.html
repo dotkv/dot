@@ -87,7 +87,8 @@ default:
     fmt.Println(value)
 }</code></pre>
 
-<p><code>db.Delete("greeting")</code> removes a key. Deleting a missing or expired key succeeds.</p>
+<p><code>db.Delete("greeting")</code> removes a key. Deleting a missing or expired key
+succeeds unless a <code>WithCondition</code> predicate rejects it.</p>
 
 <div class="table-scroll" role="region" aria-label="Common errors" tabindex="0">
 <table>
@@ -97,7 +98,8 @@ default:
 <tr><td><code>ErrTypeMismatch</code></td><td>The requested type differs from the stored value.</td></tr>
 <tr><td><code>ErrDatabaseLocked</code></td><td>Another Open holds this database path.</td></tr>
 <tr><td><code>ErrInvalidValue</code></td><td>A stored record has invalid data.</td></tr>
-<tr><td><code>ErrValueOverflow</code></td><td>A stored <code>int</code> or <code>uint</code> does not fit the host type.</td></tr>
+<tr><td><code>ErrValueOverflow</code></td><td>A stored integer does not fit the host type, or integer arithmetic would overflow or underflow.</td></tr>
+<tr><td><code>ErrConditionFailed</code></td><td>A mutation's predicate returned false; the key is unchanged.</td></tr>
 <tr><td><code>os.ErrClosed</code></td><td>The database has been closed.</td></tr>
 </tbody>
 </table>
@@ -105,26 +107,34 @@ default:
 
 <h2 id="expiration-and-sync">Expiration and durability</h2>
 
-<p><code>WithExpiration</code> takes a fixed <code>time.Time</code>: the key becomes unreadable
-at that time, even before cleanup removes its data. For a fresh 15-minute lifetime,
-compute the deadline on each write:</p>
+<p><code>WithTTL</code> sets a lifetime relative to each write. The key becomes unreadable
+when that lifetime ends, even before cleanup removes its data:</p>
 
 <pre><code class="language-go">err := db.Set(&quot;session&quot;, &quot;active&quot;,
-    dot.WithExpiration(time.Now().Add(15*time.Minute)),
+    dot.WithTTL(15*time.Minute),
     dot.WithDurability(dot.Sync),
 )</code></pre>
 
-<p>A deadline passed to <code>Open</code> is shared by all writes that use that default;
-it is not recalculated for each key. <code>Set</code> uses the default unless overridden.
-<code>Update</code> preserves an existing key's deadline; an insert uses the default.
-Pass <code>WithExpiration</code> to override either, or
-<code>dot.WithExpiration(time.Time{})</code> to clear expiration.</p>
+<p>A <code>WithTTL</code> option can be reused or passed to <code>Open</code> as a default;
+the deadline is calculated after acquiring the shard lock and running any update
+callback. <code>Set</code> uses the default unless overridden. <code>Update</code>,
+<code>Add</code>, and <code>Sub</code> preserve an existing key's deadline; an insert
+uses the default. Pass <code>WithTTL</code> explicitly to start a fresh lifetime.
+A zero TTL clears expiration; a negative TTL expires immediately. Deadlines
+outside the disk format's timestamp range are clamped to its nearest limit.</p>
+
+<p><code>WithExpiration</code> takes a fixed <code>time.Time</code> instead. A deadline
+passed to <code>Open</code> is shared by all writes that use that default.
+<code>dot.WithExpiration(time.Time{})</code> clears expiration. When combined with
+<code>WithTTL</code>, the last option wins. Expiration options have no effect on
+<code>Delete</code>. Written deadlines survive reopening; <code>Open</code> options
+are configured anew on each open.</p>
 
 <p>Writes use <code>dot.Buffer</code> by default: each active shard buffers up to
 64 KiB and writes to the file without fsync within 100 ms or when full. Reads see
 buffered records immediately. Pass <code>WithDurability</code> (<code>dot.Buffer</code>,
 <code>dot.Write</code>, or <code>dot.Sync</code>) on any <code>Set</code>,
-<code>Update</code>, or <code>Delete</code> call to override the database default
+<code>Update</code>, <code>Add</code>, <code>Sub</code>, or <code>Delete</code> call to override the database default
 for that write.</p>
 
 <h2 id="atomic-updates">Atomic updates</h2>
@@ -152,6 +162,67 @@ do not call methods on the same database from it. A type mismatch fails before
 the callback runs. Byte slices passed to the callback belong to the caller;
 returned bytes are copied. Returning nil bytes with no error stores an empty value.</p>
 
+<h2 id="arithmetic">Atomic arithmetic</h2>
+
+<pre><code class="language-go">count, err := db.Add("counter", uint64(1))
+count, err = db.Sub("counter", uint64(1))
+timeout, err := db.Add("timeout", 5*time.Second, dot.WithTTL(time.Hour))</code></pre>
+
+<p><code>Add</code> and <code>Sub</code> atomically change one numeric value and
+return the new value. They accept every numeric type supported by Dot, including
+<code>time.Duration</code>. The delta's type must match the stored type; for
+example, <code>db.Add("counter", 1)</code> uses <code>int</code> and cannot update
+a stored <code>uint64</code>.</p>
+
+<p>Missing and expired keys start at zero. Integer overflow or underflow, including
+subtracting a positive unsigned value from a missing key, returns an error wrapping
+<code>ErrValueOverflow</code> without changing or inserting the value. Floating-point
+operations follow Go arithmetic, including infinities and NaNs. On any error,
+the returned value is zero. Expiration and durability follow <code>Update</code>.
+The dashboard counts both methods as updates.</p>
+
+<h2 id="conditions">Conditional mutations</h2>
+
+<p><code>WithCondition</code> permits a <code>Set</code>, <code>Update</code>,
+<code>Add</code>, <code>Sub</code>, or <code>Delete</code> only when its predicate
+returns true. The predicate sees the current value and runs under the same shard
+lock as the mutation. This makes application limits atomic:</p>
+
+<pre><code class="language-go">count, err := db.Add("active-jobs", 1,
+    dot.WithCondition(func(current int, exists bool) bool {
+        return current &lt; 100
+    }),
+)</code></pre>
+
+<p>For compare-and-delete, check the current owner:</p>
+
+<pre><code class="language-go">err := db.Delete("lock", dot.WithCondition(
+    func(owner string, exists bool) bool {
+        return exists &amp;&amp; owner == myToken
+    },
+))</code></pre>
+
+<p>Missing and expired keys pass the predicate's zero value and
+<code>exists == false</code>, even when an expired record had a different type.
+A live value must match the predicate's type; mismatches return an error wrapping
+<code>ErrTypeMismatch</code> before the predicate runs. <code>Set</code> may write
+a different type after the condition passes. <code>Update</code>, <code>Add</code>,
+and <code>Sub</code> also require their own value type to match the stored value.</p>
+
+<p>The predicate runs once before an update callback or arithmetic. Returning false
+returns <code>ErrConditionFailed</code> directly, without calling the update
+callback or applying the mutation, expiration options, or durability request.
+Integer overflow checks still apply after an accepted condition. <code>Add</code>
+and <code>Sub</code> return zero on failure.</p>
+
+<p>Keep predicates short and do not call methods on the same database from them.
+Byte slices passed to predicates belong to the caller and can be changed or
+retained without affecting the stored value or an update callback's input. A panic
+propagates without applying the mutation. A later storage error cannot undo a
+predicate's external effects. A nil predicate returns an error. Conditions may be
+reused across operations; the last <code>WithCondition</code> option wins.
+<code>Open</code> rejects conditions; pass them to individual mutations.</p>
+
 <h2 id="scan">Scan</h2>
 
 <pre><code class="language-go">for key, value := range db.Scan() {
@@ -178,6 +249,8 @@ Yielded slices are reused; copy them to retain them.</p>
         <a href="#delete-and-handle-errors">Delete and handle errors</a>
         <a href="#expiration-and-sync">Expiration and durability</a>
         <a href="#atomic-updates">Atomic updates</a>
+        <a href="#arithmetic">Atomic arithmetic</a>
+        <a href="#conditions">Conditional mutations</a>
         <a href="#scan">Scan</a>
       </nav>
     </aside>
