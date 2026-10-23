@@ -135,49 +135,6 @@ func TestDBShardRouting(t *testing.T) {
 	}
 }
 
-func TestDBGetValueOwnership(t *testing.T) {
-	for _, size := range []int{0, 128, logWriteBufferSize, 64 << 10} {
-		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
-			db := newInternalDB(t)
-			key := []byte("key")
-			value := bytes.Repeat([]byte{'v'}, size)
-			if err := db.Set(key, value); err != nil {
-				t.Fatal(err)
-			}
-			first, err := db.Get[[]byte](key)
-			if err != nil || first == nil || !bytes.Equal(first, value) {
-				t.Fatalf("first get: value=%q error=%v", first, err)
-			}
-			retained, err := db.Get[[]byte](key)
-			if err != nil || !bytes.Equal(retained, value) {
-				t.Fatalf("second get: value=%q error=%v", retained, err)
-			}
-			if len(first) > 0 {
-				first[0] ^= 1
-				if !bytes.Equal(retained, value) {
-					t.Fatal("Get results share storage")
-				}
-			}
-			updated := bytes.Repeat([]byte{'u'}, 128)
-			if err := db.Set(key, updated); err != nil {
-				t.Fatal(err)
-			}
-			if got, err := db.Get[[]byte](key); err != nil || !bytes.Equal(got, updated) {
-				t.Fatalf("updated get: value=%q error=%v", got, err)
-			}
-			if err := db.Delete(key); err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(retained, value) {
-				t.Fatal("later operations changed a retained Get result")
-			}
-			if got, err := db.Get[[]byte](key); err != ErrNotFound || got != nil {
-				t.Fatalf("deleted key: value=%q error=%v", got, err)
-			}
-		})
-	}
-}
-
 func TestDBShardLogRotation(t *testing.T) {
 	db := newInternalDB(t)
 	var keys [defaultShardCount][]byte

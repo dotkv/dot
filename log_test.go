@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -453,5 +455,299 @@ func TestLogSealedReadsCloseFiles(t *testing.T) {
 		if got := countOpen(); got != 0 {
 			t.Fatalf("failed read left %d sealed descriptors open", got)
 		}
+	}
+}
+
+func TestIndexAlignedAddressLayout(t *testing.T) {
+	// Pin the compressed address independently of the encoding constants,
+	// including the final usable start offset and all 19 hashtag bits.
+	for _, tc := range []struct {
+		segment, offset, packed uint64
+	}{
+		{0, 0, 0},
+		{0, 16, 1},
+		{1, 0, 1 << 22},
+		{1048575, (1 << 26) - 16, (1 << 42) - 1},
+	} {
+		packed := logAddress(tc.segment, tc.offset)
+		if packed != tc.packed || addressSegment(packed) != tc.segment || addressOffset(packed) != tc.offset {
+			t.Fatalf("address (%d, %d): packed=%#x, want %#x", tc.segment, tc.offset, packed, tc.packed)
+		}
+	}
+	tag := hashtag(((1 << 19) - 1) << 14)
+	slot := logAddress(1048575, (1<<26)-16) | tag | metadataMask
+	if slot != ^uint64(0) || addressOffset(slot) != (1<<26)-16 || addressSegment(slot) != 1048575 {
+		t.Fatalf("address, hashtag, and metadata fields overlap or leave gaps: %#x", slot)
+	}
+	if hashtag(1<<(14+19)) != 0 {
+		t.Fatal("hashtag retained a bit outside the 19-bit budget")
+	}
+	idx := newInternalIndex(t)
+	if len(idx.slots)*8*defaultShardCount != 8<<20 || indexBits+hashtagBits != 33 {
+		t.Fatal("index does not provide 8 MiB initial mappings and the 2^33-slot growth limit")
+	}
+}
+
+func TestLogAlignedRecordSizes(t *testing.T) {
+	log, _ := openRecoveryLog(t, t.TempDir())
+	key := make([]byte, 16)
+	for _, tc := range []struct{ value, bytes int }{{8, 48}, {1024, 1072}} {
+		before := log.size
+		_, off, err := log.write(typeBytes, key, make([]byte, tc.value), 0)
+		if err != nil || off != before || log.size-before != uint64(tc.bytes) {
+			t.Fatalf("%d-byte value: offset=%d bytes=%d error=%v, want %d bytes", tc.value, off, log.size-before, err, tc.bytes)
+		}
+	}
+}
+
+func TestLogRecoveryRejectsNonzeroPadding(t *testing.T) {
+	for _, sealed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "head", true: "sealed"}[sealed], func(t *testing.T) {
+			path := t.TempDir()
+			record := recoveryRecord(typeBytes, []byte("key"), []byte("value"), 0)
+			record[len(record)-1] = 1 // Outside the checksum, inside required zero padding.
+			name := writeRecoverySegment(t, path, 0, record)
+			if sealed {
+				writeRecoverySegment(t, path, 1, nil)
+			}
+			log, err := newLog(path, newInternalIndex(t))
+			if log != nil {
+				log.headFile.Close()
+			}
+			if log != nil || err == nil || !strings.Contains(err.Error(), "nonzero padding") {
+				t.Fatalf("corrupt padding accepted: %v", err)
+			}
+			if got, err := os.ReadFile(name); err != nil || !bytes.Equal(got, record) {
+				t.Fatalf("failed recovery changed the record: %v", err)
+			}
+		})
+	}
+}
+
+func TestLogRejectsInvalidTypedRecords(t *testing.T) {
+	cases := []struct {
+		name       string
+		ty         recordType
+		value      []byte
+		expiration int64
+	}{
+		{"zero-type", 0, nil, 0},
+		{"unknown-type", 0xff, nil, 0},
+		{"false-payload", typeBoolFalse, []byte{0}, 0},
+		{"true-payload", typeBoolTrue, []byte{1}, 0},
+		{"delete-payload", typeDelete, []byte{0}, 0},
+		{"delete-expiration", typeDelete, nil, 1},
+	}
+	for _, tc := range typedCases() {
+		if tc.payload == 0 || tc.logical == "[]byte" {
+			continue
+		}
+		sizes := []int{tc.payload - 1, tc.payload + 1}
+		if tc.payload > 1 {
+			sizes = append(sizes, 0)
+		}
+		for _, size := range sizes {
+			cases = append(cases, struct {
+				name       string
+				ty         recordType
+				value      []byte
+				expiration int64
+			}{fmt.Sprintf("%s-size-%d", tc.name, size), tc.ty, make([]byte, size), 0})
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Include long keys to exercise the scalar reader's fallback path.
+			for _, keySize := range []int{3, 1100} {
+				t.Run(fmt.Sprintf("key=%d", keySize), func(t *testing.T) {
+					key := bytes.Repeat([]byte{'k'}, keySize)
+					data := recoveryRecord(tc.ty, key, tc.value, tc.expiration)
+					log, _ := openRecoveryLog(t, t.TempDir())
+					if err := os.WriteFile(log.headFile.Name(), data, 0600); err != nil {
+						t.Fatal(err)
+					}
+					for _, buf := range [][]byte{nil, make([]byte, 4096)} {
+						if _, _, _, _, err := log.readPayload(0, 0, buf); !errors.Is(err, ErrInvalidValue) {
+							t.Fatalf("payload read accepted invalid record: %v", err)
+						}
+					}
+					if _, _, _, err := log.readScalar(0, 0, key); !errors.Is(err, ErrInvalidValue) {
+						t.Fatalf("scalar read accepted invalid record: %v", err)
+					}
+				})
+			}
+			for _, sealed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("recovery/sealed=%t", sealed), func(t *testing.T) {
+					path := t.TempDir()
+					data := append(recoveryRecord(typeBoolTrue, []byte("previous"), nil, 0),
+						recoveryRecord(tc.ty, []byte("bad"), tc.value, tc.expiration)...)
+					name := writeRecoverySegment(t, path, 0, data)
+					if sealed {
+						writeRecoverySegment(t, path, 1, nil)
+					}
+					log, err := newLog(path, newInternalIndex(t))
+					if log != nil {
+						log.headFile.Close()
+					}
+					if log != nil || !errors.Is(err, ErrInvalidValue) {
+						t.Fatalf("recovery accepted invalid record: %v", err)
+					}
+					if got, err := os.ReadFile(name); err != nil || !bytes.Equal(got, data) {
+						t.Fatalf("failed recovery changed records: %v", err)
+					}
+					if count := openFilesUnder(t, path); count != 0 {
+						t.Fatalf("failed recovery leaked %d descriptors", count)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLogTypedRecordTags(t *testing.T) {
+	// Pin the public disk format independently of the recordType constants.
+	for _, tc := range []struct {
+		ty    recordType
+		code  byte
+		value []byte
+	}{
+		{typeDelete, 0x01, nil},
+		{typeBytes, 0x02, nil},
+		{typeInt64, 0x03, make([]byte, 8)},
+		{typeUint64, 0x04, make([]byte, 8)},
+		{typeFloat64, 0x05, make([]byte, 8)},
+		{typeBoolFalse, 0x06, nil},
+		{typeBoolTrue, 0x07, nil},
+		{typeString, 0x08, nil},
+		{typeInt8, 0x09, make([]byte, 1)},
+		{typeInt16, 0x0a, make([]byte, 2)},
+		{typeInt32, 0x0b, make([]byte, 4)},
+		{typeUint8, 0x0c, make([]byte, 1)},
+		{typeUint16, 0x0d, make([]byte, 2)},
+		{typeUint32, 0x0e, make([]byte, 4)},
+		{typeFloat32, 0x0f, make([]byte, 4)},
+		{typeInt, 0x10, make([]byte, 8)},
+		{typeUint, 0x11, make([]byte, 8)},
+		{typeDuration, 0x12, make([]byte, 8)},
+	} {
+		log, _ := openRecoveryLog(t, t.TempDir())
+		if _, _, err := log.write(tc.ty, nil, tc.value, 0); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(log.headFile.Name())
+		if err != nil || uint64(len(data)) != recordSize(0, len(tc.value)) || data[4] != tc.code {
+			t.Fatalf("record tag %s: data=%x error=%v", tc.ty, data, err)
+		}
+	}
+}
+
+func TestLogRecoveryIncompleteTypedHead(t *testing.T) {
+	for _, tc := range typedCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			key := []byte("partial")
+			complete := recoveryRecord(tc.ty, key, make([]byte, tc.payload), 0)
+			for _, length := range []int{logHeaderSize - 1, len(complete) - 1} {
+				path := t.TempDir()
+				prefix := recoveryRecord(typeBoolFalse, []byte("keep"), nil, 0)
+				name := writeRecoverySegment(t, path, 0, append(bytes.Clone(prefix), complete[:length]...))
+				log, _ := openRecoveryLog(t, path)
+				got, err := os.ReadFile(name)
+				if err != nil || !bytes.Equal(got, prefix) || log.size != uint64(len(prefix)) {
+					t.Fatalf("incomplete typed record not repaired: size=%d error=%v", log.size, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLogWriteRollbackFailure(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close(); writer.Close() })
+	readResult := make(chan error, 1)
+	go func() {
+		// Consume some bytes, then break a write larger than the pipe buffer.
+		var prefix [10]byte
+		_, err := io.ReadFull(reader, prefix[:])
+		reader.Close()
+		readResult <- err
+	}()
+	log := Log{headFile: writer}
+	_, _, writeErr := log.write(typeBytes, []byte("key"), make([]byte, 2<<20), 0)
+	if err := <-readResult; err != nil {
+		t.Fatal(err)
+	}
+	// A pipe cannot be truncated, so the partial write cannot be rolled back.
+	if writeErr == nil || log.writeErr == nil || !strings.Contains(writeErr.Error(), "rollback failed") {
+		t.Fatalf("write error=%v, stored error=%v; want failed rollback", writeErr, log.writeErr)
+	}
+	if log.size != 0 {
+		t.Fatalf("failed write advanced size to %d", log.size)
+	}
+	f, err := os.OpenFile(filepath.Join(t.TempDir(), "head.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	log.headFile = f
+	for _, size := range []uint64{0, logSegmentSize} {
+		log.size = size
+		if _, _, err := log.write(typeBytes, nil, nil, 0); err != writeErr {
+			t.Fatalf("subsequent write error=%v, want %v", err, writeErr)
+		}
+		if info, err := f.Stat(); err != nil || info.Size() != 0 || log.headSegment != 0 {
+			t.Fatalf("blocked write appended or rotated: stat=%v segment=%d error=%v", info, log.headSegment, err)
+		}
+	}
+}
+
+func TestLogWriteFailureWithoutProgress(t *testing.T) {
+	path := t.TempDir()
+	log, _ := openRecoveryLog(t, path)
+	key, old := []byte("key"), []byte("old")
+	if _, _, err := log.write(typeBytes, key, old, 0); err != nil {
+		t.Fatal(err)
+	}
+	size, name := log.size, log.headFile.Name()
+	beforeBytes := log.recordBytes
+	if err := log.headFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	log.headFile, err = os.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := log.write(typeBytes, key, []byte("failed"), 0); err == nil {
+		t.Fatal("write to read-only log succeeded")
+	}
+	if log.size != size || log.writeErr != nil {
+		t.Fatal("zero-progress failure changed the size or blocked future writes")
+	}
+	if log.recordBytes != beforeBytes || log.segmentBytes[log.headSegment] != beforeBytes {
+		t.Fatal("zero-progress failure changed byte accounting")
+	}
+	if err := log.headFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	log.headFile, err = os.OpenFile(name, os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, off, err := log.write(typeBytes, key, []byte("new"), 0); err != nil || off != size {
+		t.Fatalf("retry: offset=%d error=%v, want offset %d", off, err, size)
+	}
+	if err := log.headFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Fatal(err)
+	}
+	log, idx := openRecoveryLog(t, path)
+	pos := checkRecoveredValue(t, log, idx, key, []byte("new"))
+	if addr := idx.slots[pos] & addressMask; addr != logAddress(0, size) {
+		t.Fatalf("retry address=%d, want %d", addr, size)
+	}
+	if got, _, _, _, err := log.readPayload(0, 0, nil); err != nil || !bytes.Equal(got, key) {
+		t.Fatalf("original record damaged: key=%q error=%v", got, err)
 	}
 }

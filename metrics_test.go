@@ -2,12 +2,12 @@ package dot
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"testing"
@@ -118,149 +118,6 @@ func TestMetricsBusyShard(t *testing.T) {
 	}
 }
 
-func TestMetricsHTTP(t *testing.T) {
-	db := newInternalDB(t)
-	mux := http.NewServeMux()
-	mux.Handle("/nested/dot/", http.StripPrefix("/nested/dot", db.MetricsHandler(WithMetricsHistory(0))))
-	for _, tc := range []struct {
-		method, path, contentType string
-		status                    int
-	}{
-		{"GET", "/nested/dot", "", http.StatusTemporaryRedirect},
-		{"GET", "/nested/dot/", "text/html", http.StatusOK},
-		{"GET", "/nested/dot/app.css", "text/css", http.StatusOK},
-		{"GET", "/nested/dot/app.js", "text/javascript", http.StatusOK},
-		{"GET", "/nested/dot/dot128.png", "image/png", http.StatusOK},
-		{"GET", "/nested/dot/dot512.png", "image/png", http.StatusOK},
-		{"HEAD", "/nested/dot/dot128.png", "image/png", http.StatusOK},
-		{"HEAD", "/nested/dot/", "text/html", http.StatusOK},
-		{"GET", "/nested/dot/missing", "", http.StatusNotFound},
-		{"GET", "/nested/dot/metrics_ui/", "", http.StatusNotFound},
-		{"POST", "/nested/dot/", "", http.StatusMethodNotAllowed},
-	} {
-		t.Run(tc.method+tc.path, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
-			if w.Code != tc.status || !strings.HasPrefix(w.Header().Get("Content-Type"), tc.contentType) {
-				t.Fatalf("status=%d content-type=%q", w.Code, w.Header().Get("Content-Type"))
-			}
-			if tc.method == "HEAD" && w.Body.Len() != 0 {
-				t.Fatal("HEAD returned a body")
-			}
-		})
-	}
-}
-
-func TestMetricsPrefixedDashboard(t *testing.T) {
-	db := newInternalDB(t, WithShardCount(1))
-	mux := http.NewServeMux()
-	// Match the example's mount: strip the prefix while preserving the path's slash.
-	const prefix = "/dot/metrics"
-	mux.Handle(prefix+"/", http.StripPrefix(prefix, db.MetricsHandler(WithMetricsHistory(0))))
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	for _, asset := range []string{"", "app.css", "app.js", "dot128.png", "dot512.png"} {
-		response, err := server.Client().Get(server.URL + prefix + "/" + asset)
-		if err != nil {
-			t.Fatal(err)
-		}
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Errorf("%s: status=%d, want 200", prefix+"/"+asset, response.StatusCode)
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	c, _, err := websocket.Dial(ctx, server.URL+prefix+"/ws", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.CloseNow()
-	var snapshot metricsSnapshot
-	if err := wsjson.Read(ctx, c, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if !snapshot.Ready {
-		t.Fatalf("incomplete snapshot: %+v", snapshot)
-	}
-}
-
-func TestMetricsWebSocket(t *testing.T) {
-	for _, custom := range []bool{false, true} {
-		t.Run(fmt.Sprintf("custom=%v", custom), func(t *testing.T) {
-			db := newInternalDB(t, WithShardCount(2))
-			opts := []MetricsOption{WithMetricsHistory(0)}
-			wantInterval := int64(1000)
-			if custom {
-				opts = append(opts, WithMetricsInterval(20*time.Millisecond))
-				wantInterval = 20
-			}
-			h := db.MetricsHandler(opts...).(*metricsHandler)
-			mux := http.NewServeMux()
-			mux.Handle("/prefix/", http.StripPrefix("/prefix", h))
-			server := httptest.NewServer(mux)
-			defer server.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			c, _, err := websocket.Dial(ctx, server.URL+"/prefix/ws", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer c.CloseNow()
-			var first metricsSnapshot
-			if err := wsjson.Read(ctx, c, &first); err != nil {
-				t.Fatal(err)
-			}
-			if !first.Ready || first.IntervalMS != wantInterval || first.EntryCount != 0 || !first.LatencyEnabled || first.Operations.Get.MeanNS != nil {
-				t.Fatalf("initial snapshot: %+v", first)
-			}
-			// A second viewer shares the same collector and current snapshot.
-			c2, _, err := websocket.Dial(ctx, server.URL+"/prefix/ws", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer c2.CloseNow()
-			var shared metricsSnapshot
-			if err := wsjson.Read(ctx, c2, &shared); err != nil {
-				t.Fatal(err)
-			}
-			h.mu.Lock()
-			clients := len(h.stream.clients)
-			h.mu.Unlock()
-			if clients != 2 {
-				t.Fatalf("shared clients=%d, want 2", clients)
-			}
-			if custom {
-				if err := db.Set("hello", "world"); err != nil {
-					t.Fatal(err)
-				}
-				updateCtx, stop := context.WithTimeout(ctx, 500*time.Millisecond)
-				defer stop()
-				for shared.EntryCount != 1 || shared.Operations.Set.Count != 1 {
-					if err := wsjson.Read(updateCtx, c, &shared); err != nil {
-						t.Fatalf("configured push did not deliver changed metrics: %v", err)
-					}
-				}
-				if shared.Operations.Set.MeanNS == nil || shared.Operations.Set.P99NS == nil || shared.Operations.Set.LatencySamples != 1 {
-					t.Fatalf("missing operation metrics in WebSocket update: %+v", shared.Operations.Set)
-				}
-			}
-			if err := db.Close(); err != nil {
-				t.Fatal(err)
-			}
-			for wsjson.Read(ctx, c, &shared) == nil {
-			}
-			if ctx.Err() != nil {
-				t.Fatal("DB.Close did not close the WebSocket promptly")
-			}
-			_, response, err := websocket.Dial(ctx, server.URL+"/prefix/ws", nil)
-			if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
-				t.Fatalf("closed database: response=%v err=%v", response, err)
-			}
-		})
-	}
-}
-
 func TestMetricsOriginAndDisconnect(t *testing.T) {
 	db := newInternalDB(t)
 	h := db.MetricsHandler(WithMetricsHistory(0), WithMetricsInterval(10*time.Millisecond)).(*metricsHandler)
@@ -305,19 +162,6 @@ func TestMetricsOriginAndDisconnect(t *testing.T) {
 	defer res.Body.Close()
 	if _, err := io.Copy(io.Discard, res.Body); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestMetricsInvalidInterval(t *testing.T) {
-	for _, interval := range []time.Duration{0, -time.Second} {
-		t.Run(interval.String(), func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("nonpositive interval did not panic")
-				}
-			}()
-			WithMetricsInterval(interval)
-		})
 	}
 }
 
@@ -421,5 +265,193 @@ func TestMetricsDiskScanFailure(t *testing.T) {
 	view.path = filepath.Join(t.TempDir(), "missing-again")
 	if got := h.snapshot(cache); !got.Ready || !got.DiskStale || got.DiskBytes != good.DiskBytes {
 		t.Fatalf("failed scan lost previous reading: %+v, previous %+v", got, good)
+	}
+}
+
+func TestMetricsIndexMappedBytes(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	stopTestMaintenance(db)
+	h := db.MetricsHandler(WithMetricsHistory(0)).(*metricsHandler)
+	cache := &metricsCache{shards: make([]metricsShard, 1)}
+	s := &db.shards[0]
+	initial := uint64(len(s.index.memory.current))
+	if got := h.snapshot(cache); !got.Ready || got.IndexMappedBytes != initial || initial == 0 {
+		t.Fatalf("initial mappings: %+v", got)
+	}
+	s.lock.Lock()
+	// Retain both mappings as can happen when unmapping after growth fails.
+	slots, err := s.index.memory.allocate(2 * len(s.index.slots))
+	if err != nil {
+		s.lock.Unlock()
+		t.Fatal(err)
+	}
+	s.index.slots = slots
+	busy := h.snapshot(cache)
+	s.lock.Unlock()
+	if busy.StaleShards != 1 || busy.IndexMappedBytes != initial {
+		t.Fatalf("busy shard should retain its last mapping size: %+v", busy)
+	}
+	if got := h.snapshot(cache); got.IndexMappedBytes != 3*initial {
+		t.Fatalf("current and retained previous mappings: %+v", got)
+	}
+	s.lock.Lock()
+	err = s.index.memory.releasePrevious()
+	s.lock.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.snapshot(cache); got.IndexMappedBytes != 2*initial {
+		t.Fatalf("released previous mapping: %+v", got)
+	}
+	if err := s.compactExpirations(); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.snapshot(cache); got.IndexMappedBytes != initial {
+		t.Fatalf("shrunk index mapping: %+v", got)
+	}
+}
+
+func TestMetricsBuildVersion(t *testing.T) {
+	const revision = "605b593ab9c6546e798b5b9aec099615fbfdf97f"
+	const pseudo = "v0.0.0-20261022182138-605b593ab9c6"
+	vcs := []debug.BuildSetting{
+		{Key: "vcs.revision", Value: revision},
+		{Key: "vcs.modified", Value: "true"},
+	}
+	for _, tc := range []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{name: "unavailable", want: "dev"},
+		{name: "missing module", info: &debug.BuildInfo{}, want: "dev"},
+		{
+			name: "main release",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "v0.1.0"}},
+			want: "v0.1.0",
+		},
+		{
+			name: "main prerelease",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "v0.1.0-rc.1"}},
+			want: "v0.1.0-rc.1",
+		},
+		{
+			name: "main pseudo-version",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: pseudo}},
+			want: "dev · 605b593",
+		},
+		{
+			name: "main devel",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "(devel)"}},
+			want: "dev",
+		},
+		{
+			name: "main devel with revision",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "(devel)"}, Settings: vcs[:1]},
+			want: "dev · 605b593",
+		},
+		{
+			name: "main dirty release",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "v0.1.0"}, Settings: vcs},
+			want: "dev · 605b593 · dirty",
+		},
+		{
+			name: "main dirty pseudo-version without settings",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: pseudo + "+dirty"}},
+			want: "dev · 605b593 · dirty",
+		},
+		{
+			name: "main dirty tag without revision",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath, Version: "v0.1.0+dirty"}},
+			want: "dev · dirty",
+		},
+		{
+			name: "short revision",
+			info: &debug.BuildInfo{Main: debug.Module{Path: dotModulePath}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "abc"}}},
+			want: "dev · abc",
+		},
+		{
+			name: "dependency release ignores host version and dirty state",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Path: "example.com/app", Version: "v9.0.0"}, Settings: vcs,
+				Deps: []*debug.Module{
+					{Path: "example.com/other", Version: "v1.0.0"},
+					{Path: dotModulePath, Version: "v0.1.0"},
+				},
+			},
+			want: "v0.1.0",
+		},
+		{
+			name: "dependency pseudo-version",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{Path: dotModulePath, Version: pseudo}}},
+			want: "dev · 605b593",
+		},
+		{
+			name: "pseudo-version after release",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{Path: dotModulePath, Version: "v0.1.1-0.20261022182138-605b593ab9c6"}}},
+			want: "dev · 605b593",
+		},
+		{
+			name: "pseudo-version after prerelease",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{Path: dotModulePath, Version: "v0.1.0-rc.1.0.20261022182138-605b593ab9c6"}}},
+			want: "dev · 605b593",
+		},
+		{
+			name: "local replacement ignores original version and host revision",
+			info: &debug.BuildInfo{
+				Settings: vcs,
+				Deps:     []*debug.Module{{Path: dotModulePath, Version: "v0.1.0", Replace: &debug.Module{Path: "../dot"}}},
+			},
+			want: "dev",
+		},
+		{
+			name: "versioned replacement",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{Path: dotModulePath, Version: "v0.1.0", Replace: &debug.Module{Path: "example.com/fork", Version: "v0.2.0"}}}},
+			want: "v0.2.0",
+		},
+		{
+			name: "unrelated host revision",
+			info: &debug.BuildInfo{Main: debug.Module{Path: "example.com/app"}, Settings: vcs},
+			want: "dev",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := metricsBuildVersion(tc.info); got != tc.want {
+				t.Fatalf("version = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMetricsIndexVersion(t *testing.T) {
+	for _, tc := range []struct{ version, escaped string }{
+		{"v0.1.0", "v0.1.0"},
+		{"dev · 605b593 · dirty", "dev · 605b593 · dirty"},
+		{`<script>alert("version")</script>`, "&lt;script&gt;alert(&#34;version&#34;)&lt;/script&gt;"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			data, err := renderMetricsIndex(tc.version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `<span class="version">`+tc.escaped+`</span>`) {
+				t.Fatalf("dashboard did not render escaped version %q", tc.escaped)
+			}
+		})
+	}
+}
+
+func TestMetricsHTTPVersion(t *testing.T) {
+	// Serving the version needs neither an open database nor a WebSocket client.
+	var db DB
+	w := httptest.NewRecorder()
+	db.MetricsHandler(WithMetricsHistory(0)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	info, _ := debug.ReadBuildInfo()
+	want := `<span class="version">` + metricsBuildVersion(info) + `</span>`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("dashboard did not render %q", want)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -44,31 +43,6 @@ func reopenBufferedDB(t *testing.T, db *DB) *DB {
 		}
 	})
 	return reopened
-}
-
-func TestDurabilityInvalid(t *testing.T) {
-	for _, d := range []Durability{Sync | Buffer, 255} {
-		path := filepath.Join(t.TempDir(), "invalid")
-		if db, err := Open(path, WithDurability(d)); err == nil || db != nil {
-			t.Fatalf("Open accepted durability %d", d)
-		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("invalid option created database: %v", err)
-		}
-		db := newInternalDB(t)
-		if err := db.Set("key", uint64(1), WithDurability(d)); err == nil {
-			t.Fatal("Set accepted invalid durability")
-		}
-		if err := db.Update("key", func(v uint64, exists bool) (uint64, error) {
-			t.Fatal("invalid Update invoked callback")
-			return v, nil
-		}, WithDurability(d)); err == nil {
-			t.Fatal("Update accepted invalid durability")
-		}
-		if err := db.Delete("missing", WithDurability(d)); err == nil {
-			t.Fatal("Delete accepted invalid durability")
-		}
-	}
 }
 
 func TestBufferReadVisibilityAndOwnership(t *testing.T) {

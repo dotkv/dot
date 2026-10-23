@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -23,38 +24,6 @@ func checkScalarGet[T interface {
 	}
 	if !errors.Is(err, wantErr) || got != want {
 		t.Fatalf("Get[%T]: got %v, error %v; want %v, error %v", want, got, err, want, wantErr)
-	}
-}
-
-func TestDBGetScalarEncodings(t *testing.T) {
-	db := newInternalDB(t)
-	key := []byte("scalar")
-	for _, value := range []int64{0, 42, -42, math.MinInt64, math.MaxInt64} {
-		if err := db.Set(key, value); err != nil {
-			t.Fatal(err)
-		}
-		checkScalarGet(t, db, key, value, nil)
-	}
-	for _, value := range []uint64{0, 42, math.MaxInt64 + 1, math.MaxUint64} {
-		if err := db.Set(key, value); err != nil {
-			t.Fatal(err)
-		}
-		checkScalarGet(t, db, key, value, nil)
-	}
-	for _, bits := range []uint64{0, 1 << 63, 0x3ff8000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042} {
-		if err := db.Set(key, math.Float64frombits(bits)); err != nil {
-			t.Fatal(err)
-		}
-		value, err := db.Get[float64](key)
-		if err != nil || math.Float64bits(value) != bits {
-			t.Fatalf("float64 bits: got %x, want %x, error %v", math.Float64bits(value), bits, err)
-		}
-	}
-	for _, value := range []bool{false, true} {
-		if err := db.Set(key, value); err != nil {
-			t.Fatal(err)
-		}
-		checkScalarGet(t, db, key, value, nil)
 	}
 }
 
@@ -270,29 +239,6 @@ func checkGetMissing(t *testing.T, db *DB, key []byte) {
 	}
 }
 
-func TestDBGetMissingDeletedAndClosed(t *testing.T) {
-	db := newInternalDB(t)
-	key := []byte("absent")
-	for _, deleted := range []bool{false, true} {
-		if deleted {
-			if err := db.Set(key, []byte{1}); err != nil {
-				t.Fatal(err)
-			}
-			if err := db.Delete(key); err != nil {
-				t.Fatal(err)
-			}
-		}
-		checkGetMissing(t, db, key)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	checkScalarGet(t, db, key, int64(0), os.ErrClosed)
-	checkScalarGet(t, db, key, uint64(0), os.ErrClosed)
-	checkScalarGet(t, db, key, float64(0), os.ErrClosed)
-	checkScalarGet(t, db, key, false, os.ErrClosed)
-}
-
 func TestDBGetMissingOccupiedBucket(t *testing.T) {
 	for _, fingerprintMatch := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fingerprint-match=%t", fingerprintMatch), func(t *testing.T) {
@@ -313,45 +259,6 @@ func TestDBGetMissingOccupiedBucket(t *testing.T) {
 			home := int(hash & uint64(len(s.index.slots)-1))
 			s.index.insert(home, tag|logAddress(segment, off))
 			checkGetMissing(t, db, key)
-		})
-	}
-}
-
-func TestDBGetBytesRejectScalarReads(t *testing.T) {
-	db := newInternalDB(t)
-	key := []byte("invalid")
-	for _, size := range []int{0, 1, 7, 9, 2048} {
-		if err := db.Set(key, make([]byte, size)); err != nil {
-			t.Fatal(err)
-		}
-		checkScalarGet(t, db, key, int64(0), ErrTypeMismatch)
-		checkScalarGet(t, db, key, uint64(0), ErrTypeMismatch)
-		checkScalarGet(t, db, key, float64(0), ErrTypeMismatch)
-	}
-	for _, encoded := range [][]byte{nil, {0, 0}, {2}, {255}} {
-		if err := db.Set(key, encoded); err != nil {
-			t.Fatal(err)
-		}
-		checkScalarGet(t, db, key, false, ErrTypeMismatch)
-	}
-	// An expired record reports ErrNotFound before scalar validation.
-	if err := db.Set(key, []byte("invalid-scalar"), WithExpiration(time.Now().Add(-time.Second))); err != nil {
-		t.Fatal(err)
-	}
-	checkGetMissing(t, db, key)
-}
-
-func TestDBGetScalarRecordSizes(t *testing.T) {
-	db := newInternalDB(t)
-	for _, size := range []int{0, 1, 995, 996, 4096} {
-		t.Run(fmt.Sprintf("%d-byte-key", size), func(t *testing.T) {
-			key := bytes.Repeat([]byte{'k'}, size)
-			for _, tc := range typedCases() {
-				if err := tc.set(db, key); err != nil {
-					t.Fatal(err)
-				}
-				tc.check(t, db, key)
-			}
 		})
 	}
 }
@@ -441,5 +348,325 @@ func TestDBGetScalarSealedSegment(t *testing.T) {
 				t.Fatalf("open files: got %d, want %d", got, files)
 			}
 		})
+	}
+}
+
+type typedRecordCase struct {
+	name    string
+	logical string
+	ty      recordType
+	payload int
+	set     func(*DB, []byte, ...Option) error
+	noop    func(*DB, []byte) error
+	check   func(*testing.T, *DB, []byte)
+}
+
+func typedCase[T Value](name, logical string, ty recordType, payload int, value T) typedRecordCase {
+	return typedRecordCase{
+		name: name, logical: logical, ty: ty, payload: payload,
+		set: func(db *DB, key []byte, opts ...Option) error { return db.Set(key, value, opts...) },
+		noop: func(db *DB, key []byte) error {
+			return db.Update(key, func(v T, _ bool) (T, error) { return v, nil })
+		},
+		check: func(t *testing.T, db *DB, key []byte) {
+			t.Helper()
+			got, err := db.Get[T](key)
+			equal := reflect.DeepEqual(got, value)
+			if want, ok := any(value).(float64); ok {
+				equal = math.Float64bits(any(got).(float64)) == math.Float64bits(want)
+			}
+			if want, ok := any(value).(float32); ok {
+				equal = math.Float32bits(any(got).(float32)) == math.Float32bits(want)
+			}
+			if err != nil || !equal {
+				t.Fatalf("Get[%s]: got %v, want %v, error %v", logical, got, value, err)
+			}
+		},
+	}
+}
+
+func typedCases() []typedRecordCase {
+	return []typedRecordCase{
+		typedCase("bytes", "[]byte", typeBytes, 8, make([]byte, 8)),
+		typedCase("int64", "int64", typeInt64, 8, int64(0)),
+		typedCase("uint64", "uint64", typeUint64, 8, uint64(0)),
+		typedCase("float64", "float64", typeFloat64, 8, float64(0)),
+		typedCase("empty-bytes", "[]byte", typeBytes, 0, []byte{}),
+		typedCase("false", "bool", typeBoolFalse, 0, false),
+		typedCase("true", "bool", typeBoolTrue, 0, true),
+		typedCase("string", "string", typeString, 0, ""),
+		typedCase("int", "int", typeInt, 8, int(0)),
+		typedCase("duration", "time.Duration", typeDuration, 8, time.Duration(0)),
+		typedCase("int8", "int8", typeInt8, 1, int8(0)),
+		typedCase("int16", "int16", typeInt16, 2, int16(0)),
+		typedCase("int32", "int32", typeInt32, 4, int32(0)),
+		typedCase("uint", "uint", typeUint, 8, uint(0)),
+		typedCase("uint8", "uint8", typeUint8, 1, uint8(0)),
+		typedCase("uint16", "uint16", typeUint16, 2, uint16(0)),
+		typedCase("uint32", "uint32", typeUint32, 4, uint32(0)),
+		typedCase("float32", "float32", typeFloat32, 4, float32(0)),
+	}
+}
+
+func TestDBSetChangesTypeWithIdenticalPayload(t *testing.T) {
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
+	key := []byte("replacement")
+	s, hash := db.shard(key)
+	cases := typedCases()
+	cases = append(cases, cases[5], cases[4]) // true -> false -> empty bytes
+	for _, tc := range cases {
+		before := s.log.size
+		if err := tc.set(db, key); err != nil {
+			t.Fatal(err)
+		}
+		if want := before + recordSize(len(key), tc.payload); s.log.size != want {
+			t.Fatalf("Set %s: log size %d, want %d", tc.name, s.log.size, want)
+		}
+		_, payload, ty, _, err := s.index.findPayload(s.log, key, hash, nil)
+		if err != nil || ty != tc.ty || len(payload) != tc.payload {
+			t.Fatalf("Set %s: tag=%d payload=%x error=%v", tc.name, ty, payload, err)
+		}
+		tc.check(t, db, key)
+		before = s.log.size
+		if err := tc.set(db, key); err != nil || s.log.size != before {
+			t.Fatalf("unchanged Set %s appended: %v", tc.name, err)
+		}
+	}
+}
+
+// Public value tests check identity updates semantically. This test protects
+// the storage optimization, including NaN payloads and signed floating zero.
+func TestDBUpdateNoOpDoesNotAppend(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	stopTestMaintenance(db)
+	cases := append(typedCases(),
+		typedCase("nan", "float64", typeFloat64, 8, math.Float64frombits(0x7ff8000000000042)),
+		typedCase("negative-zero", "float64", typeFloat64, 8, math.Float64frombits(1<<63)),
+		typedCase("nan32", "float32", typeFloat32, 4, math.Float32frombits(0x7f800001)),
+		typedCase("negative-zero32", "float32", typeFloat32, 4, math.Float32frombits(1<<31)),
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := []byte("identity")
+			if err := tc.set(db, key); err != nil {
+				t.Fatal(err)
+			}
+			s := &db.shards[0]
+			size, count := s.log.size, s.log.recordCount
+			if err := tc.noop(db, key); err != nil || s.log.size != size || s.log.recordCount != count {
+				t.Fatalf("identity Update appended a record: %v", err)
+			}
+			tc.check(t, db, key)
+		})
+	}
+}
+
+func TestDBBoolUpdates(t *testing.T) {
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
+	key := []byte("bool")
+	if err := db.Set(key, false); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.shard(key)
+	for _, want := range []bool{true, false, true, false} {
+		before := s.log.size
+		if err := db.Update(key, func(v bool, found bool) (bool, error) { return !v, nil }); err != nil {
+			t.Fatal(err)
+		}
+		checkScalarGet(t, db, key, want, nil)
+		if s.log.size != before+recordSize(len(key), 0) {
+			t.Fatal("boolean update did not append exactly one payload-free record")
+		}
+		before = s.log.size
+		if err := db.Update(key, func(v bool, found bool) (bool, error) { return v, nil }); err != nil || s.log.size != before {
+			t.Fatalf("unchanged boolean update appended: %v", err)
+		}
+	}
+}
+
+func TestDBTypedCompactionAndRecovery(t *testing.T) {
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
+	s := &db.shards[0]
+	cases := append(typedCases(),
+		typedCase("negative", "int64", typeInt64, 8, int64(math.MinInt64)),
+		typedCase("max-uint", "uint64", typeUint64, 8, uint64(math.MaxUint64)),
+		typedCase("nan", "float64", typeFloat64, 8, math.Float64frombits(0x7ff8000000000042)),
+		typedCase("negative-zero", "float64", typeFloat64, 8, math.Float64frombits(1<<63)),
+		typedCase("min-int", "int", typeInt, 8, int(math.MinInt)),
+		typedCase("min-int8", "int8", typeInt8, 1, int8(math.MinInt8)),
+		typedCase("min-int16", "int16", typeInt16, 2, int16(math.MinInt16)),
+		typedCase("min-int32", "int32", typeInt32, 4, int32(math.MinInt32)),
+		typedCase("max-native-uint", "uint", typeUint, 8, uint(math.MaxUint)),
+		typedCase("max-uint8", "uint8", typeUint8, 1, uint8(math.MaxUint8)),
+		typedCase("max-uint16", "uint16", typeUint16, 2, uint16(math.MaxUint16)),
+		typedCase("max-uint32", "uint32", typeUint32, 4, uint32(math.MaxUint32)),
+		typedCase("nan32", "float32", typeFloat32, 4, math.Float32frombits(0x7fc00042)),
+		typedCase("negative-zero32", "float32", typeFloat32, 4, math.Float32frombits(1<<31)),
+		typedCase("positive-duration", "time.Duration", typeDuration, 8, time.Hour+time.Nanosecond),
+		typedCase("negative-duration", "time.Duration", typeDuration, 8, -time.Hour-time.Nanosecond),
+		typedCase("min-duration", "time.Duration", typeDuration, 8, time.Duration(math.MinInt64)),
+		typedCase("max-duration", "time.Duration", typeDuration, 8, time.Duration(math.MaxInt64)),
+	)
+	keys := keysForShard(db, s, "typed", len(cases))
+	expiration := time.Now().Add(time.Hour)
+	for _, key := range keys {
+		if err := db.Set(key, []byte("old")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.log.openHead(1); err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range cases {
+		if err := tc.set(db, keys[i], WithExpiration(expiration)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.log.openHead(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.compact(); err != nil {
+		t.Fatal(err)
+	}
+	if s.log.recordCount != uint64(len(cases)) || len(s.log.segmentRecordCounts) != 1 {
+		t.Fatal("compaction did not pack the typed records")
+	}
+	check := func() {
+		t.Helper()
+		s := &db.shards[0]
+		for i, tc := range cases {
+			tc.check(t, db, keys[i])
+			_, hash := db.shard(keys[i])
+			_, payload, ty, exp, err := s.index.findPayload(s.log, keys[i], hash, nil)
+			if err != nil || ty != tc.ty || len(payload) != tc.payload || exp != expiration.UnixNano() {
+				t.Fatalf("%s: tag=%d bytes=%d expiration=%d error=%v", tc.name, ty, len(payload), exp, err)
+			}
+		}
+		checkSegmentAccounting(t, s)
+	}
+	check()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	db, err = Open(db.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	stopTestMaintenance(db)
+	check()
+	for _, key := range keys {
+		if err := db.Delete(key); err != nil {
+			t.Fatal(err)
+		}
+		checkGetMissing(t, db, key)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(db.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopTestMaintenance(db)
+	for _, key := range keys {
+		checkGetMissing(t, db, key)
+	}
+}
+
+func TestDBTypeChecksAfterKeyMatch(t *testing.T) {
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
+	key := []byte("target")
+	s, hash := db.shard(key)
+	for _, candidate := range []struct {
+		ty         recordType
+		key, value []byte
+	}{
+		{typeBoolTrue, []byte("decoy"), nil},
+		{typeBytes, bytes.Repeat([]byte{'k'}, 1100), make([]byte, 2048)},
+		{typeInt64, key, []byte{42, 0, 0, 0, 0, 0, 0, 0}},
+	} {
+		segment, off, err := s.log.write(candidate.ty, candidate.key, candidate.value, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.index.insert(int(hash&uint64(len(s.index.slots)-1)), hashtag(hash)|logAddress(segment, off))
+	}
+	checkScalarGet(t, db, key, int64(42), nil)
+	if err := db.Update(key, func(v int64, _ bool) (int64, error) { return v + 1, nil }); err != nil {
+		t.Fatal(err)
+	}
+	checkScalarGet(t, db, key, int64(43), nil)
+}
+
+func TestDBUpdatePreservesExpiration(t *testing.T) {
+	db := newInternalDB(t, WithExpiration(time.Now().Add(-time.Hour)))
+	key := []byte("key")
+	for _, expiration := range []time.Time{{}, time.Now().Add(time.Hour)} {
+		if err := db.Set(key, uint64(1), WithExpiration(expiration)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Update(key, func(v uint64, exists bool) (uint64, error) { return v + 1, nil }); err != nil {
+			t.Fatal(err)
+		}
+		s, hash := db.shard(key)
+		_, _, gotExp, err := s.index.findScalar(s.log, key, hash)
+		wantExp := int64(0)
+		if !expiration.IsZero() {
+			wantExp = expiration.UnixNano()
+		}
+		if err != nil || gotExp != wantExp {
+			t.Fatalf("expiration: got %d, want %d, error %v", gotExp, wantExp, err)
+		}
+	}
+}
+
+func TestDBUpdateWriteFailure(t *testing.T) {
+	db := newInternalDB(t)
+	key := []byte("key")
+	if err := db.Set(key, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.shard(key)
+	if err := s.log.headFile.Truncate(logSegmentSize); err != nil {
+		t.Fatal(err)
+	}
+	s.log.size = logSegmentSize
+	blocker := s.log.segmentPath(s.log.headSegment + 1)
+	if err := os.Mkdir(blocker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	fn := func(v []byte, exists bool) ([]byte, error) {
+		calls++
+		v[0] = 'O'
+		return v, nil
+	}
+	if err := db.Update(key, fn); err == nil {
+		t.Fatal("expected log rotation failure")
+	}
+	if got, err := db.Get[[]byte](key); err != nil || string(got) != "original" {
+		t.Fatalf("failed append changed value: %q, %v", got, err)
+	}
+	if calls != 1 {
+		t.Fatalf("failed write invoked callback %d times", calls)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(key, fn); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.Get[[]byte](key); err != nil || string(got) != "Original" {
+		t.Fatalf("update after rotation: %q, %v", got, err)
 	}
 }

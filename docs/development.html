@@ -44,11 +44,19 @@
 <p>From the repository root:</p>
 
 <pre><code class="language-sh">go test ./...
+go test -race ./...
 node --test metrics_ui/app.test.cjs metrics_ui/app_test.js
 (cd benchmarks &amp;&amp; go test ./...)</code></pre>
 
 <p>The test workflow runs these checks on every pull request, including new commits
 to an open pull request, and on pushes to <code>master</code>.</p>
+
+<p>The public API suite lives in <code>tests/</code>, including deterministic
+model-based workloads, concurrent operations, churn with repeated reopen cycles,
+and process-crash recovery. Focused storage-format and fault tests remain beside
+the implementation. See the
+<a href="https://github.com/dotkv/dot/tree/master/tests">testing guide</a>
+for longer stress runs, fuzzing, and coverage across both suites.</p>
 
 <h2 id="benchmarks">Benchmarks</h2>
 
