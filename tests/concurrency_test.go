@@ -57,7 +57,7 @@ func testDBConcurrentShutdown(t *testing.T, shutdown func(*dot.DB) error) {
 	start := make(chan struct{})
 	var workers sync.WaitGroup
 	for i := range 16 {
-		key := []byte(fmt.Sprintf("shutdown-%d", i))
+		key := fmt.Appendf(nil, "shutdown-%d", i)
 		if err := db.Set(key, []byte("value")); err != nil {
 			t.Fatal(err)
 		}

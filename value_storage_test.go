@@ -94,7 +94,7 @@ func TestDBSmallScalarEncodings(t *testing.T) {
 
 func checkNativeIntegerRange[T interface{ int | uint }](t *testing.T, db *DB, ty recordType, bits uint64, want T, wantErr error) {
 	t.Helper()
-	key := []byte(fmt.Sprintf("%s-%x", ty, bits))
+	key := fmt.Appendf(nil, "%s-%x", ty, bits)
 	s, hash := db.shard(key)
 	var encoded [8]byte
 	binary.LittleEndian.PutUint64(encoded[:], bits)
