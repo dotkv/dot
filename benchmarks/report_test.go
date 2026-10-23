@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,63 +47,12 @@ func TestReportScenarioBudgets(t *testing.T) {
 	}
 }
 
-func TestSavedResultsValidation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "results.jsonl")
-	var data bytes.Buffer
-	for _, name := range []string{"dot", "pebble"} {
-		if err := json.NewEncoder(&data).Encode(reportFixture(name, 1000, 2000)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(path, data.Bytes(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	results, err := loadResults(path)
-	if err != nil || len(results) != 2 {
-		t.Fatalf("load results: %d rows, error %v", len(results), err)
-	}
-	for _, broken := range [][]byte{
-		nil,
-		append(bytes.Clone(data.Bytes()), []byte(`{"config":`)...),
-		bytes.ReplaceAll(data.Bytes(), []byte(`"count":12000`), []byte(`"count":11999`)),
-	} {
-		if err := os.WriteFile(path, broken, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := loadResults(path); err == nil {
-			t.Fatal("accepted an empty, truncated, or incomplete results file")
-		}
-	}
-}
-
-func TestHistoricalWorkerResults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "historical.jsonl")
-	var data bytes.Buffer
-	for _, workers := range []int{1, 16, 128} {
-		r := reportFixture("dot", 1000, 2000)
-		r.Config.Workers = workers
-		if err := json.NewEncoder(&data).Encode(r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(path, data.Bytes(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	results, err := loadResults(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := renderResults(results); err != nil {
-		t.Fatalf("cannot report historical worker counts: %v", err)
-	}
-}
-
 func TestReportMarksMissingConfigurations(t *testing.T) {
 	a := reportFixture("dot", 1000, 2000)
 	b := a
 	b.Config.ValueBytes = 1024
 	b.Config.Scalar = false
-	b.Config.Workers = 1
+	b.Config.Workload = "20/80"
 	data, err := renderResults([]result{a, b})
 	if err != nil {
 		t.Fatal(err)

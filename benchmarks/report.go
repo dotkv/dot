@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,39 +12,6 @@ import (
 
 const resultsStart = "<!-- benchmark-results:start -->"
 const resultsEnd = "<!-- benchmark-results:end -->"
-
-func loadResults(path string) ([]result, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(file)
-	var results []result
-	for {
-		var r result
-		if err := decoder.Decode(&r); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("decode result %d: %w", len(results)+1, err)
-		}
-		if err := r.Config.validate(); err != nil {
-			return nil, fmt.Errorf("result %d: %w", len(results)+1, err)
-		}
-		if r.Config.CalibrationDuration != 0 {
-			return nil, fmt.Errorf("result %d is a calibration probe, not a fixed-work case", len(results)+1)
-		}
-		r.Config.KeyBytes = keyBytes
-		if r.Latency.Count != uint64(r.Config.Operations) {
-			return nil, fmt.Errorf("result %d has %d completed operations, want %d", len(results)+1, r.Latency.Count, r.Config.Operations)
-		}
-		results = append(results, r)
-	}
-	if len(results) == 0 {
-		return nil, fmt.Errorf("results file is empty")
-	}
-	return results, nil
-}
 
 func checkReadme(path string) error {
 	data, err := os.ReadFile(path)
@@ -169,23 +134,6 @@ func renderResults(results []result) ([]byte, error) {
 		}
 		out.WriteString(".\n\n")
 	}
-	fmt.Fprintf(&out, "Configuration: **%s initial keys**, **%d-byte keys**, **%s warmup operations**, seed **%d**. Operation budgets are fixed per configuration and shared across engines and repetitions.\n\n",
-		integerWithCommas(first.Config.Keys), keyBytes, integerWithCommas(first.Config.Warmup), first.Config.Seed)
-	out.WriteString("Dot and Pebble use normal automatic compaction")
-	if first.Config.DotTarget > 0 {
-		fmt.Fprintf(&out, "; budgets estimated from a short Dot probe targeting **%s for Dot**", first.Config.DotTarget)
-	}
-	out.WriteString(".\n\n")
-	e := first.Environment
-	fmt.Fprintf(&out, "Environment: %s, %s/%s, %d logical CPUs, GOMAXPROCS=%d.\n\n", e.GoVersion, e.OS, e.Arch, e.CPUs, e.GOMAXPROCS)
-	if e.CPUModel != "" {
-		fmt.Fprintf(&out, "CPU: %s.\n\n", e.CPUModel)
-	}
-	if version := e.ModuleVersion["github.com/cockroachdb/pebble/v2"]; version != "" {
-		fmt.Fprintf(&out, "Pebble: `%s`. ", version)
-	}
-	out.WriteString("Eight-byte scalar cases use `uint64` in Dot and equivalent little-endian encoding/decoding in the other adapters.\n\n")
-	out.WriteString("Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.\n\n")
 	for _, key := range order {
 		value := fmt.Sprintf("%s B values", integerWithCommas(key.bytes))
 		if key.scalar {
@@ -225,6 +173,19 @@ func renderResults(results []result) ([]byte, error) {
 		}
 		writeResultTable(&out, rows)
 		out.WriteByte('\n')
+	}
+	fmt.Fprintf(&out, "Setup: **%s initial keys**, **%d-byte keys**, **%s warmup operations**, seed **%d**.\n\n",
+		integerWithCommas(first.Config.Keys), keyBytes, integerWithCommas(first.Config.Warmup), first.Config.Seed)
+	if first.Config.DotTarget > 0 {
+		fmt.Fprintf(&out, "Shared operation budgets target approximately **%s for Dot**.\n\n", first.Config.DotTarget)
+	}
+	e := first.Environment
+	fmt.Fprintf(&out, "Environment: %s, %s/%s, %d logical CPUs, GOMAXPROCS=%d.\n\n", e.GoVersion, e.OS, e.Arch, e.CPUs, e.GOMAXPROCS)
+	if e.CPUModel != "" {
+		fmt.Fprintf(&out, "CPU: %s.\n\n", e.CPUModel)
+	}
+	if version := e.ModuleVersion["github.com/cockroachdb/pebble/v2"]; version != "" {
+		fmt.Fprintf(&out, "Pebble: `%s`.\n", version)
 	}
 	return []byte(out.String()), nil
 }
@@ -266,8 +227,7 @@ func writeResultTable(out *strings.Builder, rows [][8]string) {
 	}
 }
 
-// Identify gaps within the workload/value/worker axes present in a saved run.
-// This keeps a snapshot from an interrupted run from looking like a full sweep.
+// Identify gaps within the workload/value/worker axes present in a result set.
 func missingScenarios(order []scenario) []scenario {
 	workloads := make(map[string]bool)
 	values := make(map[scenario]bool)

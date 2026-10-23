@@ -1,6 +1,6 @@
 # Dot
 
-A small, on-disk key-value store embedded in Go applications. Dot supports
+An embedded, on-disk key-value database engine for Go applications. Dot supports
 typed values, atomic updates, expiration, background compaction, and an embedded
 metrics dashboard. Database paths have exclusive single-process access;
 goroutines share a database handle.

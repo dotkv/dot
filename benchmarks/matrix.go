@@ -8,48 +8,25 @@ import (
 
 const calibrationDuration = 500 * time.Millisecond
 
-func buildCases(base caseConfig, engines, workloads []string, sizes, workers []int, repeat int) ([]caseConfig, error) {
-	if len(engines) == 0 || len(workers) == 0 || repeat < 1 {
-		return nil, fmt.Errorf("engines, workers, and repetitions must be nonempty")
-	}
-	if len(workloads) == 0 {
-		workloads = []string{"80/20", "20/80"}
-	}
-	if len(sizes) == 0 {
-		sizes = []int{8, 1024}
-	}
+func buildCases() []caseConfig {
+	engines := []string{"dot", "pebble"}
 	var cases []caseConfig
-	for repetition := range repeat {
-		configuration := 0
-		for _, workload := range workloads {
-			for _, size := range sizes {
-				for _, concurrency := range workers {
-					// Rotate engine order to distribute effects of run order.
-					offset := (configuration + repetition) % len(engines)
-					for i := range engines {
-						c := base
-						c.Engine, c.Workload = engines[(i+offset)%len(engines)], workload
-						c.KeyBytes, c.ValueBytes, c.Workers = keyBytes, size, concurrency
-						c.Scalar, c.Repetition = base.Scalar && size == 8, repetition+1
-						if c.Operations == 0 {
-							// Placeholder validated here; calibrated once per scenario
-							// before any engine runs its measured case.
-							c.Operations = c.Workers
-							if c.DotTarget == 0 {
-								c.DotTarget = 15 * time.Second
-							}
-						}
-						if err := c.validateRun(); err != nil {
-							return nil, err
-						}
-						cases = append(cases, c)
-					}
-					configuration++
-				}
+	configuration := 0
+	for _, workload := range []string{"80/20", "20/80"} {
+		for _, size := range []int{8, 1024} {
+			// Rotate engine order to distribute effects of run order.
+			for i := range engines {
+				cases = append(cases, caseConfig{
+					Engine: engines[(i+configuration)%len(engines)], Workload: workload,
+					KeyBytes: keyBytes, ValueBytes: size, Scalar: size == 8,
+					Workers: 8, Keys: 16384, Warmup: 30000, Seed: 1,
+					DotTarget: 15 * time.Second,
+				})
 			}
+			configuration++
 		}
 	}
-	return cases, nil
+	return cases
 }
 
 func operationBudget(pilot result, target time.Duration, workers int) (int, error) {
@@ -57,7 +34,7 @@ func operationBudget(pilot result, target time.Duration, workers int) (int, erro
 		return 0, fmt.Errorf("invalid Dot calibration measurement")
 	}
 	// Give every worker the same budget. The same count is reused across
-	// engines and repetitions.
+	// engines.
 	quantum := workers * 3
 	units := math.Ceil(float64(pilot.Latency.Count) / pilot.ElapsedSeconds * target.Seconds() / float64(quantum))
 	if units >= float64(math.MaxInt/quantum) {

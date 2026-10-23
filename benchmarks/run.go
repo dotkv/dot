@@ -23,11 +23,10 @@ type caseConfig struct {
 	Operations int           `json:"operations"`
 	DotTarget  time.Duration `json:"dot_target_ns,omitempty"`
 	// Only internal Dot calibration probes stop on time. Reported cases always
-	// execute Operations, identically across engines and repetitions.
+	// execute Operations, identically across engines.
 	CalibrationDuration time.Duration `json:"calibration_duration_ns,omitempty"`
 	Warmup              int           `json:"warmup_operations"`
 	Seed                uint64        `json:"seed"`
-	Repetition          int           `json:"repetition"`
 	Path                string        `json:"data_path"`
 }
 
@@ -38,15 +37,12 @@ func (c caseConfig) validate() error {
 	if _, ok := workloads[c.Workload]; !ok {
 		return fmt.Errorf("unknown workload %q", c.Workload)
 	}
-	// Historical worker counts remain valid when importing saved results.
-	// validateRun restricts all new measurements and calibration to 8 workers.
-	if c.Workers != 1 && c.Workers != 8 && c.Workers != 16 && c.Workers != 128 {
-		return fmt.Errorf("workers must be 8 (or 1, 16, 128 in historical results)")
+	if c.Workers != 8 {
+		return fmt.Errorf("benchmark runs require exactly 8 workers")
 	}
 	if c.ValueBytes < 8 {
 		return fmt.Errorf("value size must be at least 8 bytes")
 	}
-	// Zero key_bytes is accepted for results saved before the field existed.
 	if c.KeyBytes != 0 && c.KeyBytes != keyBytes {
 		return fmt.Errorf("keys must be %d bytes", keyBytes)
 	}
@@ -67,13 +63,6 @@ func (c caseConfig) validate() error {
 		return fmt.Errorf("operations must be >= workers")
 	}
 	return nil
-}
-
-func (c caseConfig) validateRun() error {
-	if c.Workers != 8 {
-		return fmt.Errorf("benchmark runs require exactly 8 workers")
-	}
-	return c.validate()
 }
 
 type latencySummary struct {
@@ -150,7 +139,7 @@ func currentEnvironment() environment {
 }
 
 func runCase(ctx context.Context, c caseConfig) (out result, err error) {
-	if err := c.validateRun(); err != nil {
+	if err := c.validate(); err != nil {
 		return out, err
 	}
 	out.Config = c

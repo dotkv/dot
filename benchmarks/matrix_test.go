@@ -8,44 +8,39 @@ import (
 )
 
 func TestBenchmarkMatrix(t *testing.T) {
-	base := caseConfig{Keys: 256, Warmup: 64, Scalar: true, Seed: 1}
-	cases, err := buildCases(base, []string{"dot", "pebble"}, nil, nil, []int{8}, 2)
-	if err != nil {
-		t.Fatal(err)
+	cases := buildCases()
+	if len(cases) != 8 {
+		t.Fatalf("got %d cases, want 8", len(cases))
 	}
-	if len(cases) != 16 {
-		t.Fatalf("got %d cases, want 16", len(cases))
-	}
-	seen := make(map[scenario]int)
+	seen := make(map[scenario]map[string]bool)
 	for _, c := range cases {
-		if c.KeyBytes != 16 || c.Workers != 8 || c.Scalar != (c.ValueBytes == 8) || c.CalibrationDuration != 0 ||
-			c.DotTarget != 15*time.Second || (c.ValueBytes != 8 && c.ValueBytes != 1024) ||
+		if c.KeyBytes != 16 || c.Workers != 8 || c.Scalar != (c.ValueBytes == 8) ||
+			c.Operations != 0 || c.CalibrationDuration != 0 || c.DotTarget != 15*time.Second ||
+			c.Keys != 16384 || c.Warmup != 30000 || c.Seed != 1 ||
+			(c.ValueBytes != 8 && c.ValueBytes != 1024) ||
 			(c.Workload != "80/20" && c.Workload != "20/80") {
 			t.Fatalf("invalid measured case: %+v", c)
 		}
-		seen[scenarioFor(c)]++
+		key := scenarioFor(c)
+		if seen[key] == nil {
+			seen[key] = make(map[string]bool)
+		}
+		if seen[key][c.Engine] {
+			t.Fatalf("duplicate engine %s in %+v", c.Engine, key)
+		}
+		seen[key][c.Engine] = true
 	}
-	for key, count := range seen {
-		if count != 4 {
-			t.Fatalf("%+v has %d cases, want two engines and two repetitions", key, count)
+	if len(seen) != 4 {
+		t.Fatalf("got %d configurations, want 4", len(seen))
+	}
+	for key, engines := range seen {
+		if !engines["dot"] || !engines["pebble"] {
+			t.Fatalf("%+v must compare Dot and Pebble", key)
 		}
 	}
-	for start := 0; start < len(cases)/2; start += 2 {
-		if cases[start].Engine == cases[start+len(cases)/2].Engine {
-			t.Fatal("engine order did not rotate across repetitions")
-		}
-	}
-	cases, err = buildCases(caseConfig{Keys: 16, Operations: 96}, []string{"dot"}, []string{"20/80"}, []int{1024}, []int{8}, 1)
-	if err != nil || len(cases) != 1 {
-		t.Fatalf("explicit overrides: %d cases, %v", len(cases), err)
-	}
-	c := cases[0]
-	if c.Operations != 96 || c.DotTarget != 0 || c.Workload != "20/80" || c.ValueBytes != 1024 {
-		t.Fatalf("explicit overrides ignored: %+v", c)
-	}
-	for _, workload := range []string{"0/100", "10/90", "50/50", "90/10", "100/0", "mixed", "read-heavy", "write-heavy"} {
-		if _, err := buildCases(base, []string{"dot"}, []string{workload}, nil, []int{8}, 1); err == nil {
-			t.Fatalf("accepted removed workload %q", workload)
+	for start := 2; start < len(cases); start += 2 {
+		if cases[start].Engine == cases[start-2].Engine {
+			t.Fatal("engine order did not rotate across configurations")
 		}
 	}
 }
@@ -115,13 +110,6 @@ func TestWorkloadRatios(t *testing.T) {
 func TestOnlyEightWorkersRun(t *testing.T) {
 	for _, workers := range []int{0, 1, 4, 16, 128} {
 		c := caseConfig{Engine: "dot", Workload: "80/20", ValueBytes: 8, Workers: workers, Keys: 256, Operations: 3840}
-		if _, err := buildCases(c, []string{"dot"}, nil, nil, []int{workers}, 1); err == nil {
-			t.Fatalf("matrix accepted %d workers", workers)
-		}
-		if _, err := buildCases(c, []string{"dot"}, nil, nil, []int{8, workers}, 1); err == nil {
-			t.Fatalf("matrix accepted mixed worker counts including %d", workers)
-		}
-		// The internal -case path calls runCase directly, bypassing buildCases.
 		if _, err := runCase(context.Background(), c); err == nil {
 			t.Fatalf("isolated case accepted %d workers", workers)
 		}
