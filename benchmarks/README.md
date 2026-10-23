@@ -1,6 +1,6 @@
 # Engine comparisons
 
-Compare Dot, Pebble, Pogreb, and Bitcask on Linux using 16-byte keys and 8 workers.
+Compare Dot and Pebble on Linux using 16-byte keys and 8 workers.
 This directory is a separate Go module: its engine and histogram dependencies do
 not enter Dot's root `go.mod` or `go.sum`. Root `go test ./...` does not run this
 suite.
@@ -13,7 +13,7 @@ cd benchmarks
 go test ./...
 go build -o dot-bench .
 
-# Default matrix: all four engines, both read/write ratios, both value sizes.
+# Default matrix: both engines, both read/write ratios, both value sizes.
 ./dot-bench
 
 # Repeat with one shared operation budget per configuration and save JSON.
@@ -39,7 +39,7 @@ Writes are equal shares of inserts, updates, and deletes.
 
 | Setting                   | Default                          |
 | ------------------------- | -------------------------------- |
-| Engines                   | `dot,pebble,pogreb,bitcask`        |
+| Engines                   | `dot,pebble`                     |
 | Read/write ratios         | `80/20,20/80`                    |
 | Value sizes               | 8 B scalars, 1,024 B byte slices |
 | Workers                   | 8                                |
@@ -48,7 +48,7 @@ Writes are equal shares of inserts, updates, and deletes.
 | Seed                      | 1                                |
 | Dot time target           | 15 seconds                       |
 
-This gives **16 cases** across four configurations before repetitions. Use
+This gives **8 cases** across four configurations before repetitions. Use
 `-engines`, `-workloads`, and `-sizes` to select a subset or override sizes.
 Every new workload and calibration probe runs with **exactly 8 workers**;
 `-workers` accepts only `8`. Importing historical JSON results with 1, 16, or 128
@@ -83,7 +83,7 @@ process, including preparation and drain, to 10 minutes by default.
 
 <!-- benchmark-results:start -->
 
-Completed cases: **72**, covering **12 configurations**.
+Completed cases: **8**, covering **4 configurations**.
 
 Configuration: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**. Operation budgets are fixed per configuration and shared across engines and repetitions.
 
@@ -97,113 +97,41 @@ Pebble: `v2.1.7`. Eight-byte scalar cases use `uint64` in Dot and equivalent lit
 
 Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.
 
-### 80/20 · 8 B uint64 values · 1 worker
+### 80/20 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **8,217,657**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  14.745 |     1.705 |    6.111 |            557,315 |           33.1 |      12.33 |
-| Pebble         |    3 |  16.428 |     1.914 |    9.535 |            500,213 |           38.0 |      18.41 |
-
-### 80/20 · 8 B uint64 values · 16 workers
-
-Measured operations per engine: **60,267,888**. Ratios are reads/writes.
+Measured operations per engine: **94,278,480**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  18.333 |     4.727 |   38.399 |          3,287,435 |           40.6 |      40.80 |
-| Pebble         |    3 |  30.980 |     8.053 |  133.119 |          1,945,406 |           46.8 |      18.64 |
+| Dot            |    1 |  20.440 |     1.635 |   23.295 |          4,612,541 |           46.9 |      32.12 |
+| Pebble         |    1 |  57.052 |     4.715 |   74.751 |          1,652,512 |           43.6 |      18.75 |
 
-### 80/20 · 8 B uint64 values · 128 workers
+### 80/20 · 1,024 B values · 8 workers
 
-Measured operations per engine: **72,707,328**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  17.512 |    30.435 |  561.151 |          4,151,887 |           85.9 |      20.97 |
-| Pebble         |    3 |  23.385 |    37.874 |  675.839 |          3,109,107 |           97.8 |      18.71 |
-
-### 80/20 · 1,024 B values · 1 worker
-
-Measured operations per engine: **5,069,916**. Ratios are reads/writes.
+Measured operations per engine: **13,002,912**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  20.707 |     3.972 |   10.559 |            244,845 |           35.9 |      41.76 |
-| Pebble         |    3 |  39.491 |     7.653 |   22.655 |            128,381 |           45.2 |      34.49 |
+| Dot            |    1 |  19.135 |    11.591 |   48.127 |            679,527 |           50.6 |      47.18 |
+| Pebble         |    1 |  55.592 |    33.907 |  221.183 |            233,898 |           47.8 |      37.44 |
 
-### 80/20 · 1,024 B values · 16 workers
+### 20/80 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **13,095,120**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  19.462 |    23.544 |   86.527 |            672,840 |           48.9 |      52.12 |
-| Pebble         |    3 |  49.444 |    60.068 |  342.015 |            264,846 |           54.3 |      36.42 |
-
-### 80/20 · 1,024 B values · 128 workers
-
-Measured operations per engine: **29,230,080**. Ratios are reads/writes.
+Measured operations per engine: **50,957,016**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  18.195 |    76.615 |  589.823 |          1,606,508 |           93.1 |      48.82 |
-| Pebble         |    3 |  90.394 |   394.209 | 1761.279 |            323,362 |          105.7 |      37.08 |
+| Dot            |    1 |  23.071 |     3.502 |   29.055 |          2,208,715 |           49.3 |      12.87 |
+| Pebble         |    1 |  30.439 |     4.643 |   35.327 |          1,674,079 |           44.8 |      18.23 |
 
-### 20/80 · 8 B uint64 values · 1 worker
+### 20/80 · 1,024 B values · 8 workers
 
-Measured operations per engine: **4,009,002**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  16.188 |     3.945 |    7.359 |            247,649 |           32.7 |      20.79 |
-| Pebble         |    3 |   4.396 |     1.021 |    6.751 |            912,027 |           37.5 |      18.16 |
-
-### 20/80 · 8 B uint64 values · 16 workers
-
-Measured operations per engine: **29,739,456**. Ratios are reads/writes.
+Measured operations per engine: **3,164,160**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  23.628 |    12.519 |   62.975 |          1,258,670 |           40.4 |      19.66 |
-| Pebble         |    3 |  15.686 |     8.288 |   67.071 |          1,895,944 |           46.7 |      18.20 |
-
-### 20/80 · 8 B uint64 values · 128 workers
-
-Measured operations per engine: **29,046,912**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  18.241 |    79.257 | 1540.095 |          1,592,433 |           84.1 |      24.23 |
-| Pebble         |    3 |  15.656 |    68.504 |  827.391 |          1,855,308 |           92.4 |      18.61 |
-
-### 20/80 · 1,024 B values · 1 worker
-
-Measured operations per engine: **2,367,228**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  22.423 |     9.351 |   12.031 |            105,569 |           34.7 |      53.02 |
-| Pebble         |    3 |  19.319 |     8.035 |   36.095 |            122,536 |           40.2 |      40.82 |
-
-### 20/80 · 1,024 B values · 16 workers
-
-Measured operations per engine: **3,969,072**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  18.414 |    73.257 |  165.887 |            215,546 |           43.2 |      51.86 |
-| Pebble         |    3 |  32.793 |   131.131 |  372.735 |            121,034 |           54.1 |      39.70 |
-
-### 20/80 · 1,024 B values · 128 workers
-
-Measured operations per engine: **13,792,896**. Ratios are reads/writes.
-
-| Implementation | Runs | Seconds | Mean (µs) |  p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
-| -------------- | ---: | ------: | --------: | --------: | -----------------: | -------------: | ---------: |
-| Dot            |    3 |  16.575 |   146.513 |  6389.759 |            832,163 |           90.3 |      40.97 |
-| Pebble         |    3 | 125.219 |  1150.380 | 53739.519 |            110,150 |          113.0 |      37.61 |
+| Dot            |    1 |  14.684 |    36.877 |   63.487 |            215,479 |           48.8 |      54.98 |
+| Pebble         |    1 |  26.556 |    66.613 |  212.991 |            119,153 |           49.9 |      38.95 |
 
 
 <!-- benchmark-results:end -->
@@ -213,7 +141,7 @@ Measured operations per engine: **13,792,896**. Ratios are reads/writes.
 On 2026-10-22, the generated tables above were refreshed from `e2f04c9` with local
 changes making metrics history opt-in. The full workload/value-size matrix ran
 at all three then-supported worker counts, with three repetitions. This historical
-run predates the current four-engine, 8-worker matrix:
+run predates the current 8-worker matrix:
 
 ```sh
 ./dot-bench -workers 1,16,128 -repeat 3 -json > results.jsonl
@@ -247,9 +175,7 @@ slices with pseudorandom payloads generated before measurement and a per-key
 revision in the first eight bytes. Every read checks size and revision outside
 latency timing. Byte-slice reads return caller-owned bytes in every engine;
 necessary copying and release are included in latency. Dot and Pebble
-decode scalars without copying a result slice. Pogreb and Bitcask decode the
-caller-owned slice returned by their native `Get` APIs, including that allocation
-in scalar latency.
+decode scalars without copying a result slice.
 
 ## Engine and maintenance configuration
 
@@ -280,30 +206,6 @@ enabled, compression disabled, and `pebble.NoSync` mutations. Other defaults,
 including cache and memtable sizes, remain in effect. Memtables are flushed after
 preload and warmup so reads exercise SSTables as well as caches. The final drain
 flushes and closes without forcing a full compaction.
-
-**Pogreb** uses `github.com/akrylysov/pogreb` v0.10.2 with its default mmap
-filesystem and `BackgroundSyncInterval: 0`, disabling both per-write and periodic
-fsync. Native writes go to the OS page cache before returning. Automatic
-compaction remains disabled, its native default; the adapter does not call
-`Compact`. `Flush` is a no-op because there are no pending userspace write
-buffers; `Close` saves metadata and closes the database. See
-[Pogreb's Options](https://pkg.go.dev/github.com/akrylysov/pogreb@v0.10.2#Options).
-
-**Bitcask** uses `git.mills.io/prologic/bitcask` v1.0.2 with `WithSync(false)`
-and otherwise native defaults. Its value-size limit is raised when needed to
-accommodate `-sizes`. The native encoder flushes each record to the OS page cache
-before returning. The 1 MiB data-file rotation limit remains in effect; rotation
-and close still sync the active file. Automatic merging is absent and the adapter
-does not call `Merge`. `Flush` is a no-op, and `Close` saves indexes and metadata
-and closes the database. See
-[Bitcask's WithSync](https://pkg.go.dev/git.mills.io/prologic/bitcask@v1.0.2#WithSync).
-
-All four adapters acknowledge ordinary mutations without a per-operation fsync
-guarantee. Pogreb and Bitcask provide OS-buffered writes, but their public APIs
-do not offer Pebble-style userspace buffering across calls. Their native write,
-rotation, and maintenance behavior remains part of the measurement. In
-particular, their disk usage includes obsolete records retained without automatic
-compaction or a forced final merge.
 
 Preload and workload warmup are untimed for every engine. The final untimed flush
 and close materializes pending writes for disk accounting. `drain_seconds` is

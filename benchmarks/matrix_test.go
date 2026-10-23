@@ -9,12 +9,12 @@ import (
 
 func TestBenchmarkMatrix(t *testing.T) {
 	base := caseConfig{Keys: 256, Warmup: 64, Scalar: true, Seed: 1}
-	cases, err := buildCases(base, []string{"dot", "pebble", "pogreb", "bitcask"}, nil, nil, []int{8}, 2)
+	cases, err := buildCases(base, []string{"dot", "pebble"}, nil, nil, []int{8}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cases) != 32 {
-		t.Fatalf("got %d cases, want 32", len(cases))
+	if len(cases) != 16 {
+		t.Fatalf("got %d cases, want 16", len(cases))
 	}
 	seen := make(map[scenario]int)
 	for _, c := range cases {
@@ -26,11 +26,11 @@ func TestBenchmarkMatrix(t *testing.T) {
 		seen[scenarioFor(c)]++
 	}
 	for key, count := range seen {
-		if count != 8 {
-			t.Fatalf("%+v has %d cases, want four engines and two repetitions", key, count)
+		if count != 4 {
+			t.Fatalf("%+v has %d cases, want two engines and two repetitions", key, count)
 		}
 	}
-	for start := 0; start < len(cases)/2; start += 4 {
+	for start := 0; start < len(cases)/2; start += 2 {
 		if cases[start].Engine == cases[start+len(cases)/2].Engine {
 			t.Fatal("engine order did not rotate across repetitions")
 		}

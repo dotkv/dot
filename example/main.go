@@ -10,6 +10,8 @@ import (
 	"github.com/dotkv/dot"
 )
 
+const workers = 1 << 4
+
 func check(err error) {
 	if err != nil && err != dot.ErrNotFound {
 		panic(err)
@@ -17,10 +19,7 @@ func check(err error) {
 }
 
 func main() {
-	db, err := dot.Open("db",
-		dot.WithShardCount(16),
-		dot.WithCompactionThreshold(0.33, 32<<10),
-	)
+	db, err := dot.Open("db")
 	check(err)
 	defer db.Destroy()
 
@@ -32,27 +31,52 @@ func main() {
 		log.Printf("Dashboard: http://%s%s/", addr, uipath)
 		check(http.ListenAndServe(addr, mux))
 	}()
-	value := make([]byte, 1024)
-	for i := range uint64(1<<64 - 1) {
-		key := fmt.Sprintf("demo-%d", rand.IntN(1<<16))
-		switch i % 10 {
-		case 0, 1, 2, 3, 4, 5, 6:
-			_, err := db.Get[[]byte](key)
-			check(err)
-		case 7:
-			ext := time.Second.Nanoseconds() + rand.Int64N(time.Second.Nanoseconds())
-			exp := time.Now().Add(time.Duration(ext))
-			check(db.Set(key, value, dot.WithExpiration(exp)))
-		case 8:
-			check(db.Delete(key))
-		case 9:
-			check(db.Update(key, func(v []byte, exists bool) ([]byte, error) {
-				if !exists {
-					return value, nil
-				}
-				v[0]++
-				return v, nil
-			}))
-		}
+	for range workers - 1 {
+		go work(db)
+	}
+	work(db)
+}
+
+func work(db *dot.DB) {
+	go sets(db)
+	go deletes(db)
+	go updates(db)
+	gets(db)
+}
+
+func updates(db *dot.DB) {
+	for {
+		key := fmt.Sprintf("demo-%d", rand.IntN(1<<18))
+		check(db.Update(key, func(v uint64, exists bool) (uint64, error) {
+			if !exists {
+				return 0, dot.ErrNotFound // Abort instead of inserting an empty value.
+			}
+			return v + 1, nil
+		}))
+	}
+}
+
+func deletes(db *dot.DB) {
+	for {
+		key := fmt.Sprintf("demo-%d", rand.IntN(1<<18))
+		check(db.Delete(key))
+	}
+}
+
+func gets(db *dot.DB) {
+	for {
+		key := fmt.Sprintf("demo-%d", rand.IntN(1<<18))
+		_, err := db.Get[uint64](key)
+		check(err)
+	}
+}
+
+func sets(db *dot.DB) {
+	for {
+		n := rand.Uint64N(1 << 18)
+		key := fmt.Sprintf("demo-%d", n)
+		ext := time.Second.Nanoseconds() + rand.Int64N(time.Second.Nanoseconds())
+		exp := time.Now().Add(time.Duration(ext))
+		check(db.Set(key, n, dot.WithExpiration(exp)))
 	}
 }

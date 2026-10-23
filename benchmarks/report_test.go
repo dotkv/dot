@@ -51,7 +51,7 @@ func TestReportScenarioBudgets(t *testing.T) {
 func TestSavedResultsValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.jsonl")
 	var data bytes.Buffer
-	for _, name := range []string{"dot", "pebble", "pogreb", "bitcask"} {
+	for _, name := range []string{"dot", "pebble"} {
 		if err := json.NewEncoder(&data).Encode(reportFixture(name, 1000, 2000)); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ func TestSavedResultsValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	results, err := loadResults(path)
-	if err != nil || len(results) != 4 {
+	if err != nil || len(results) != 2 {
 		t.Fatalf("load results: %d rows, error %v", len(results), err)
 	}
 	for _, broken := range [][]byte{
@@ -96,28 +96,6 @@ func TestHistoricalWorkerResults(t *testing.T) {
 	}
 	if _, err := renderResults(results); err != nil {
 		t.Fatalf("cannot report historical worker counts: %v", err)
-	}
-}
-
-func TestNewEngineReports(t *testing.T) {
-	var results []result
-	for _, name := range []string{"dot", "pebble", "pogreb", "bitcask"} {
-		r := reportFixture(name, 1000, 2000)
-		r.Environment.ModuleVersion = map[string]string{
-			"github.com/cockroachdb/pebble/v2": "v2.1.7",
-			"github.com/akrylysov/pogreb":      "v0.10.2",
-			"git.mills.io/prologic/bitcask":    "v1.0.2",
-		}
-		results = append(results, r)
-	}
-	data, err := renderResults(results)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"| Pogreb ", "| Bitcask ", "Pogreb: `v0.10.2`", "Bitcask: `v1.0.2`", "8 workers"} {
-		if !bytes.Contains(data, []byte(want)) {
-			t.Fatalf("missing %q in report:\n%s", want, data)
-		}
 	}
 }
 

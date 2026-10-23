@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"git.mills.io/prologic/bitcask"
-	"github.com/akrylysov/pogreb"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/dotkv/dot"
 )
@@ -40,25 +38,6 @@ var engines = map[string]func(caseConfig) (engine, error){
 			return nil, err
 		}
 		return &pebbleEngine{db}, nil
-	},
-	"pogreb": func(c caseConfig) (engine, error) {
-		// Keep the native mmap filesystem and maintenance defaults. Writes use
-		// the OS page cache without per-write or periodic fsync.
-		db, err := pogreb.Open(c.Path, &pogreb.Options{BackgroundSyncInterval: 0})
-		if err != nil {
-			return nil, err
-		}
-		return &pogrebEngine{db}, nil
-	},
-	"bitcask": func(c caseConfig) (engine, error) {
-		// Like Pebble's NoSync, acknowledge writes without per-write fsync.
-		// Bitcask still syncs when rotating or closing its active file.
-		db, err := bitcask.Open(c.Path, bitcask.WithSync(false),
-			bitcask.WithMaxValueSize(max(bitcask.DefaultMaxValueSize, uint64(c.ValueBytes))))
-		if err != nil {
-			return nil, err
-		}
-		return &bitcaskEngine{db}, nil
 	},
 }
 
@@ -131,60 +110,3 @@ func (e *pebbleEngine) GetUint64(key []byte) (uint64, bool, error) {
 func (e *pebbleEngine) Delete(key []byte) error { return e.db.Delete(key, pebble.NoSync) }
 func (e *pebbleEngine) Flush() error            { return e.db.Flush() }
 func (e *pebbleEngine) Close() error            { return e.db.Close() }
-
-type pogrebEngine struct{ db *pogreb.DB }
-
-func (e *pogrebEngine) Set(key, value []byte) error { return e.db.Put(key, value) }
-func (e *pogrebEngine) Get(key []byte) ([]byte, bool, error) {
-	// Pogreb already copies values out of its mmap before releasing the lock.
-	v, err := e.db.Get(key)
-	return v, v != nil && err == nil, err
-}
-func (e *pogrebEngine) SetUint64(key []byte, value uint64) error {
-	var encoded [8]byte
-	binary.LittleEndian.PutUint64(encoded[:], value)
-	return e.Set(key, encoded[:])
-}
-func (e *pogrebEngine) GetUint64(key []byte) (uint64, bool, error) {
-	return decodeUint64(e.Get(key))
-}
-func (e *pogrebEngine) Delete(key []byte) error { return e.db.Delete(key) }
-
-// Native writes are already in the OS page cache; Sync would force fsync.
-func (e *pogrebEngine) Flush() error { return nil }
-func (e *pogrebEngine) Close() error { return e.db.Close() }
-
-type bitcaskEngine struct{ db *bitcask.Bitcask }
-
-func (e *bitcaskEngine) Set(key, value []byte) error { return e.db.Put(key, value) }
-func (e *bitcaskEngine) Get(key []byte) ([]byte, bool, error) {
-	v, err := e.db.Get(key)
-	if errors.Is(err, bitcask.ErrKeyNotFound) {
-		return nil, false, nil
-	}
-	// Bitcask returns an owned allocation, including for mmap-backed reads.
-	return v, err == nil, err
-}
-func (e *bitcaskEngine) SetUint64(key []byte, value uint64) error {
-	var encoded [8]byte
-	binary.LittleEndian.PutUint64(encoded[:], value)
-	return e.Set(key, encoded[:])
-}
-func (e *bitcaskEngine) GetUint64(key []byte) (uint64, bool, error) {
-	return decodeUint64(e.Get(key))
-}
-func (e *bitcaskEngine) Delete(key []byte) error { return e.db.Delete(key) }
-
-// The native encoder flushes each record to the OS page cache without fsync.
-func (e *bitcaskEngine) Flush() error { return nil }
-func (e *bitcaskEngine) Close() error { return e.db.Close() }
-
-func decodeUint64(value []byte, found bool, err error) (uint64, bool, error) {
-	if err != nil || !found {
-		return 0, false, err
-	}
-	if len(value) != 8 {
-		return 0, false, fmt.Errorf("scalar has %d bytes, want 8", len(value))
-	}
-	return binary.LittleEndian.Uint64(value), true, nil
-}

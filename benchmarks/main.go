@@ -28,7 +28,7 @@ func main() {
 }
 
 func command(ctx context.Context) error {
-	engineList := flag.String("engines", "dot,pebble,pogreb,bitcask", "comma-separated engines: dot, pebble, pogreb, bitcask")
+	engineList := flag.String("engines", "dot,pebble", "comma-separated engines: dot, pebble")
 	workloadList := flag.String("workloads", "80/20,20/80", "comma-separated read/write ratios: 80/20, 20/80")
 	sizeList := flag.String("sizes", "8,1024", "comma-separated value sizes in bytes")
 	workerList := flag.String("workers", "8", "worker count (only 8 is supported)")
@@ -120,11 +120,10 @@ func command(ctx context.Context) error {
 		defer cancel()
 		return isolatedCase(caseCtx, executable, parentDir, c)
 	}
-	for i, c := range cases {
+	for _, c := range cases {
 		if *ops == 0 {
 			key := scenarioFor(c)
 			if budgets[key] == 0 {
-				fmt.Fprintf(os.Stderr, "Calibrating Dot: %s %dB workers=%d target=%s\n", c.Workload, c.ValueBytes, c.Workers, c.DotTarget)
 				probe := c
 				probe.Engine, probe.Operations, probe.CalibrationDuration = "dot", 0, calibrationDuration
 				pilot, err := run(probe)
@@ -138,7 +137,6 @@ func command(ctx context.Context) error {
 			}
 			c.Operations = budgets[key]
 		}
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s %s %dB scalar=%v workers=%d repeat=%d ops=%d\n", i+1, len(cases), c.Engine, c.Workload, c.ValueBytes, c.Scalar, c.Workers, c.Repetition, c.Operations)
 		out, err := run(c)
 		if err != nil {
 			return err
