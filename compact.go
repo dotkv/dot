@@ -63,6 +63,11 @@ func (s *Shard) compactLocked() error {
 	if !l.compactPending && !s.needsCompaction(0) {
 		return nil
 	}
+	// Materialize the indexed snapshot before inspecting file sizes, replacing
+	// the head, or syncing newer mutations that justify retiring older history.
+	if err := l.flush(); err != nil {
+		return err
+	}
 	l.compactPending = true
 	segments := make([]uint64, 0, len(l.segmentRecordCounts))
 	for seg := range l.segmentRecordCounts {

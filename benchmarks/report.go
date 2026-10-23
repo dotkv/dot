@@ -171,7 +171,7 @@ func renderResults(results []result) ([]byte, error) {
 	}
 	fmt.Fprintf(&out, "Configuration: **%s initial keys**, **%d-byte keys**, **%s warmup operations**, seed **%d**. Operation budgets are fixed per configuration and shared across engines and repetitions.\n\n",
 		integerWithCommas(first.Config.Keys), keyBytes, integerWithCommas(first.Config.Warmup), first.Config.Seed)
-	out.WriteString("Dot and Pebble use normal automatic compaction")
+	out.WriteString("Dot and Pebble use normal automatic compaction; Pogreb and Bitcask use their defaults without automatic compaction")
 	if first.Config.DotTarget > 0 {
 		fmt.Fprintf(&out, "; budgets estimated from a short Dot probe targeting **%s for Dot**", first.Config.DotTarget)
 	}
@@ -181,8 +181,14 @@ func renderResults(results []result) ([]byte, error) {
 	if e.CPUModel != "" {
 		fmt.Fprintf(&out, "CPU: %s.\n\n", e.CPUModel)
 	}
-	if version := e.ModuleVersion["github.com/cockroachdb/pebble/v2"]; version != "" {
-		fmt.Fprintf(&out, "Pebble: `%s`. ", version)
+	for _, dep := range []struct{ name, path string }{
+		{"Pebble", "github.com/cockroachdb/pebble/v2"},
+		{"Pogreb", "github.com/akrylysov/pogreb"},
+		{"Bitcask", "git.mills.io/prologic/bitcask"},
+	} {
+		if version := e.ModuleVersion[dep.path]; version != "" {
+			fmt.Fprintf(&out, "%s: `%s`. ", dep.name, version)
+		}
 	}
 	out.WriteString("Eight-byte scalar cases use `uint64` in Dot and equivalent little-endian encoding/decoding in the other adapters.\n\n")
 	out.WriteString("Columns summarize all operation types. Each cell is the median across the indicated runs; p99 is the median of run p99s, not a pooled percentile. Peak RSS includes preparation. Disk usage is measured after the final drain. These are closed-loop saturation results.\n\n")
@@ -212,6 +218,10 @@ func renderResults(results []result) ([]byte, error) {
 				name = "Dot"
 			case "pebble":
 				name = "Pebble"
+			case "pogreb":
+				name = "Pogreb"
+			case "bitcask":
+				name = "Bitcask"
 			}
 			rows = append(rows, [8]string{
 				name, fmt.Sprint(len(runs)),

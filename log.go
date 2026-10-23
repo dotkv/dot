@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 )
@@ -26,6 +27,8 @@ const (
 	logAlignmentBits   = 4
 	logAlignment       = 1 << logAlignmentBits
 	logWriteBufferSize = 4 << 10
+	logPendingSize     = 64 << 10
+	logFlushInterval   = 100 * time.Millisecond
 	logHeaderSize      = 21
 	// Segment IDs form a ring independently of the byte range within a segment.
 	segmentIDBits = 20
@@ -51,6 +54,10 @@ type Log struct {
 	// Writes and their index lookups share this buffer under the shard's
 	// exclusive lock. Concurrent Get calls use their own read buffers.
 	writeBuffer [logWriteBufferSize]byte
+	// Pending records have final log addresses and are visible through the
+	// index before they reach the file. All access uses the shard lock.
+	pending     []byte
+	bufferStart uint64
 }
 
 func newLog(name string, idx *Index) (*Log, error) {
@@ -361,12 +368,19 @@ func checksumSmall(data []byte) uint32 {
 }
 
 func (l *Log) write(ty recordType, key []byte, val []byte, expiration int64) (uint64, uint64, error) {
+	return l.writeDurability(ty, key, val, expiration, Write)
+}
+
+func (l *Log) writeDurability(ty recordType, key []byte, val []byte, expiration int64, durability Durability) (uint64, uint64, error) {
 	if l.writeErr != nil {
 		return 0, 0, l.writeErr
 	}
 	// Rotate before appending so a failed rotation leaves the record unwritten
 	// and every record starts at an offset that fits in the index.
 	if l.size >= logSegmentSize {
+		if err := l.flush(); err != nil {
+			return 0, 0, err
+		}
 		if err := l.headFile.Sync(); err != nil {
 			return 0, 0, fmt.Errorf("sync file: %w", err)
 		}
@@ -374,7 +388,72 @@ func (l *Log) write(ty recordType, key []byte, val []byte, expiration int64) (ui
 			return 0, 0, fmt.Errorf("open head: %w", err)
 		}
 	}
+	if durability == Buffer && recordSize(len(key), len(val)) <= logPendingSize {
+		return l.bufferRecord(ty, key, val, expiration)
+	}
+	if err := l.flush(); err != nil {
+		return 0, 0, err
+	}
 	return l.appendRecord(ty, key, val, expiration)
+}
+
+func (l *Log) bufferRecord(ty recordType, key, val []byte, expiration int64) (uint64, uint64, error) {
+	if err := ty.validate(uint64(len(val)), expiration); err != nil {
+		return 0, 0, err
+	}
+	segment, off := l.headSegment, l.size
+	if off&(logAlignment-1) != 0 {
+		return 0, 0, fmt.Errorf("unaligned record offset %d", off)
+	}
+	size := int(recordSize(len(key), len(val)))
+	if l.pending == nil {
+		l.pending = make([]byte, 0, logPendingSize)
+	}
+	if size > cap(l.pending)-len(l.pending) {
+		if err := l.flush(); err != nil {
+			return 0, 0, err
+		}
+	}
+	if len(l.pending) == 0 {
+		l.bufferStart = off
+	}
+	previous := len(l.pending)
+	l.pending = l.pending[:previous+size]
+	encodeRecord(l.pending[previous:], ty, key, val, expiration)
+	if len(l.pending) == cap(l.pending) {
+		if err := l.flush(); err != nil {
+			// Earlier acknowledged records remain readable and queued. The new
+			// record is not published after an unsuccessful full-buffer flush.
+			l.pending = l.pending[:previous]
+			return 0, 0, err
+		}
+	}
+	l.recordAppend(uint64(size))
+	return segment, off, nil
+}
+
+// flush preserves pending bytes on failure. Partial file writes are rolled back
+// before retrying, so both the buffer and the published index remain valid.
+func (l *Log) flush() error {
+	if len(l.pending) == 0 {
+		return nil
+	}
+	if l.writeErr != nil {
+		return l.writeErr
+	}
+	if err := l.writeBytes(l.pending, l.bufferStart); err != nil {
+		return fmt.Errorf("flush log buffer: %w", err)
+	}
+	l.pending = l.pending[:0]
+	return nil
+}
+
+func (l *Log) recordAppend(size uint64) {
+	l.size += size
+	l.segmentRecordCounts[l.headSegment]++
+	l.recordCount++
+	l.recordBytes += size
+	l.segmentBytes[l.headSegment] += size
 }
 
 // appendRecord writes directly to the head file. The caller ensures the next
@@ -396,7 +475,18 @@ func (l *Log) appendRecord(ty recordType, key []byte, val []byte, expiration int
 		record = make([]byte, alignedSize)
 	}
 	encodeRecord(record, ty, key, val, expiration)
+	if err := l.writeBytes(record, off); err != nil {
+		return 0, 0, err
+	}
+	l.recordAppend(uint64(len(record)))
+	return segment, off, nil
+}
+
+func (l *Log) writeBytes(record []byte, off uint64) error {
 	n, err := l.headFile.Write(record)
+	if err == nil && n != len(record) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
 		err = fmt.Errorf("write record: %w", err)
 		if n > 0 {
@@ -410,17 +500,12 @@ func (l *Log) appendRecord(ty recordType, key []byte, val []byte, expiration int
 			}
 			if rollbackErr != nil {
 				l.writeErr = errors.Join(err, fmt.Errorf("rollback failed; log requires recovery: %w", rollbackErr))
-				return 0, 0, l.writeErr
+				return l.writeErr
 			}
 		}
-		return 0, 0, err
+		return err
 	}
-	l.size = off + uint64(n)
-	l.segmentRecordCounts[l.headSegment]++
-	l.recordCount++
-	l.recordBytes += uint64(n)
-	l.segmentBytes[l.headSegment] += uint64(n)
-	return segment, off, nil
+	return nil
 }
 
 // encodeRecord fills a complete, aligned record. Callers validate the type and
@@ -447,9 +532,24 @@ func alignRecordSize(size uint64) uint64 {
 	return (size + logAlignment - 1) &^ (logAlignment - 1)
 }
 
+// bufferedPrefix locates pending bytes by their final address. There is no
+// second key index, and no record straddles the file/buffer boundary.
+func (l *Log) bufferedPrefix(seg, off uint64) []byte {
+	if len(l.pending) != 0 && seg == l.headSegment && off >= l.bufferStart && off-l.bufferStart < uint64(len(l.pending)) {
+		return l.pending[off-l.bufferStart:]
+	}
+	return nil
+}
+
 // readPayload reads and verifies a record, returning its key, value, type, and
 // expiration. It borrows buf when the payload fits; passing nil returns owned slices.
 func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, recordType, int64, error) {
+	if prefix := l.bufferedPrefix(seg, off); prefix != nil {
+		if len(prefix) < logHeaderSize {
+			return nil, nil, 0, 0, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
+		}
+		return l.readFromPrefix(nil, off, prefix, buf)
+	}
 	f := l.headFile
 	if l.headSegment != seg {
 		var err error
@@ -487,6 +587,9 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 	}
 	copied := copy(buf, prefix[logHeaderSize:])
 	if copied < size {
+		if f == nil {
+			return nil, nil, 0, 0, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
+		}
 		if _, err := f.ReadAt(
 			buf[copied:], int64(off)+logHeaderSize+int64(copied),
 		); err != nil {
@@ -507,6 +610,30 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 // length, type, and expiration when the key matches. Key comparison stays here to keep
 // record bytes on the stack. DB.Get validates the scalar type and decodes the returned bits.
 func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64, bool, error) {
+	if record := l.bufferedPrefix(seg, off); record != nil {
+		if len(record) < logHeaderSize {
+			return scalarValue{}, 0, false, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
+		}
+		keylen := uint64(binary.BigEndian.Uint32(record[5:]))
+		vallen := uint64(binary.BigEndian.Uint32(record[9:]))
+		end := logHeaderSize + keylen + vallen
+		if end > uint64(len(record)) {
+			return scalarValue{}, 0, false, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
+		}
+		storedKey, value := record[logHeaderSize:logHeaderSize+keylen], record[logHeaderSize+keylen:end]
+		if binary.BigEndian.Uint32(record[:]) != l.crc(record[:logHeaderSize], storedKey, value) {
+			return scalarValue{}, 0, false, fmt.Errorf("crc mismatch")
+		}
+		expiration := int64(binary.BigEndian.Uint64(record[13:]))
+		ty := recordType(record[4])
+		if err := ty.validate(vallen, expiration); err != nil {
+			return scalarValue{}, 0, false, err
+		}
+		if !bytes.Equal(storedKey, key) {
+			return scalarValue{}, 0, false, nil
+		}
+		return scalarBytes(ty, value), expiration, true, nil
+	}
 	f := l.headFile
 	if l.headSegment != seg {
 		var err error

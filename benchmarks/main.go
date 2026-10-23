@@ -28,10 +28,10 @@ func main() {
 }
 
 func command(ctx context.Context) error {
-	engineList := flag.String("engines", "dot,pebble", "comma-separated engines: dot, pebble")
+	engineList := flag.String("engines", "dot,pebble,pogreb,bitcask", "comma-separated engines: dot, pebble, pogreb, bitcask")
 	workloadList := flag.String("workloads", "80/20,20/80", "comma-separated read/write ratios: 80/20, 20/80")
 	sizeList := flag.String("sizes", "8,1024", "comma-separated value sizes in bytes")
-	workerList := flag.String("workers", "16", "comma-separated worker counts (1, 16, 128)")
+	workerList := flag.String("workers", "8", "worker count (only 8 is supported)")
 	keys := flag.Int("keys", 16384, "total preloaded live keys per case")
 	ops := flag.Int("ops", 0, "fixed measured operations per case; overrides Dot calibration")
 	target := flag.Duration("target", 0, "Dot time target for shared operation budgets (default 15s)")

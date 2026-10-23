@@ -4,13 +4,13 @@ import (
 	"testing"
 )
 
-// WithSync is a durability switch; these tests exercise the option plumbing
+// WithDurability(Sync) enables durable writes; these tests exercise the option plumbing
 // on every write path. Actual crash durability is not testable without fault
 // injection.
 func TestSyncOpenDefault(t *testing.T) {
 	db := newSyncInternalDB(t)
-	if !db.syncWrites {
-		t.Fatal("syncWrites = false, want true")
+	if db.durability != Sync {
+		t.Fatal("durability is not Sync")
 	}
 	if err := db.Set([]byte("k"), uint64(1)); err != nil {
 		t.Fatal(err)
@@ -33,10 +33,10 @@ func TestSyncOpenDefault(t *testing.T) {
 	if err := db.Set([]byte("u"), uint64(1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("u"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
+	if err := db.Update([]byte("u"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil }); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("w"), func(v uint64, exists bool) (uint64, error) { return 7, nil}); err != nil {
+	if err := db.Update([]byte("w"), func(v uint64, exists bool) (uint64, error) { return 7, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if v, err := db.Get[uint64]([]byte("u")); err != nil || v != 2 {
@@ -49,7 +49,7 @@ func TestSyncOpenDefault(t *testing.T) {
 
 func newSyncInternalDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir(), WithSync(true))
+	db, err := Open(t.TempDir(), WithDurability(Sync))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,34 +63,34 @@ func newSyncInternalDB(t *testing.T) *DB {
 
 func TestSyncPerOperation(t *testing.T) {
 	db := newInternalDB(t)
-	if db.syncWrites {
-		t.Fatal("syncWrites = true, want false")
+	if db.durability != Write {
+		t.Fatal("test fixture durability is not Write")
 	}
 	// Per-operation opt-in on a non-sync database.
-	if err := db.Set([]byte("k"), uint64(1), WithSync(true)); err != nil {
+	if err := db.Set([]byte("k"), uint64(1), WithDurability(Sync)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}, WithSync(true)); err != nil {
+	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil }, WithDurability(Sync)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil}, WithSync(true)); err != nil {
+	if err := db.Update([]byte("k"), func(v uint64, exists bool) (uint64, error) { return v + 1, nil }, WithDurability(Sync)); err != nil {
 		t.Fatal(err)
 	}
 	if v, err := db.Get[uint64]([]byte("k")); err != nil || v != 3 {
 		t.Fatalf("k = %d, %v; want 3, nil", v, err)
 	}
-	if err := db.Delete([]byte("k"), WithSync(true)); err != nil {
+	if err := db.Delete([]byte("k"), WithDurability(Sync)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSyncPerOperationOverride(t *testing.T) {
 	db := newSyncInternalDB(t)
-	// WithSync(false) disables the database default for a single call.
-	if err := db.Set([]byte("k"), uint64(1), WithSync(false)); err != nil {
+	// WithDurability(Write) disables the database default for a single call.
+	if err := db.Set([]byte("k"), uint64(1), WithDurability(Write)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Delete([]byte("k"), WithSync(false)); err != nil {
+	if err := db.Delete([]byte("k"), WithDurability(Write)); err != nil {
 		t.Fatal(err)
 	}
 	if v, err := db.Get[uint64]([]byte("k")); err == nil {

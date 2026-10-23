@@ -38,8 +38,10 @@ func (c caseConfig) validate() error {
 	if _, ok := workloads[c.Workload]; !ok {
 		return fmt.Errorf("unknown workload %q", c.Workload)
 	}
-	if c.Workers != 1 && c.Workers != 16 && c.Workers != 128 {
-		return fmt.Errorf("workers must be 1, 16, or 128")
+	// Historical worker counts remain valid when importing saved results.
+	// validateRun restricts all new measurements and calibration to 8 workers.
+	if c.Workers != 1 && c.Workers != 8 && c.Workers != 16 && c.Workers != 128 {
+		return fmt.Errorf("workers must be 8 (or 1, 16, 128 in historical results)")
 	}
 	if c.ValueBytes < 8 {
 		return fmt.Errorf("value size must be at least 8 bytes")
@@ -65,6 +67,13 @@ func (c caseConfig) validate() error {
 		return fmt.Errorf("operations must be >= workers")
 	}
 	return nil
+}
+
+func (c caseConfig) validateRun() error {
+	if c.Workers != 8 {
+		return fmt.Errorf("benchmark runs require exactly 8 workers")
+	}
+	return c.validate()
 }
 
 type latencySummary struct {
@@ -141,7 +150,7 @@ func currentEnvironment() environment {
 }
 
 func runCase(ctx context.Context, c caseConfig) (out result, err error) {
-	if err := c.validate(); err != nil {
+	if err := c.validateRun(); err != nil {
 		return out, err
 	}
 	out.Config = c

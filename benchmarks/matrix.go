@@ -39,7 +39,7 @@ func buildCases(base caseConfig, engines, workloads []string, sizes, workers []i
 								c.DotTarget = 15 * time.Second
 							}
 						}
-						if err := c.validate(); err != nil {
+						if err := c.validateRun(); err != nil {
 							return nil, err
 						}
 						cases = append(cases, c)

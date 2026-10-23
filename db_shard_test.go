@@ -13,6 +13,9 @@ import (
 
 func newInternalDB(t testing.TB, opts ...Option) *DB {
 	t.Helper()
+	// Storage fixtures inspect exact file state and inject synchronous write
+	// failures. Buffered behavior and the public default have dedicated tests.
+	opts = append([]Option{WithDurability(Write)}, opts...)
 	db, err := Open(t.TempDir(), opts...)
 	if err != nil {
 		t.Fatal(err)

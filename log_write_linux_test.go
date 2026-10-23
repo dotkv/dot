@@ -88,3 +88,96 @@ func TestLogPartialWriteRollback(t *testing.T) {
 		t.Fatalf("recovery after partial write and retry: length=%d error=%v", len(got), err)
 	}
 }
+
+func TestBufferPartialFlushRollback(t *testing.T) {
+	const helperEnv = "DOT_TEST_BUFFER_PARTIAL_WRITE"
+	if os.Getenv(helperEnv) == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestBufferPartialFlushRollback$")
+		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, output)
+		}
+		return
+	}
+	signal.Ignore(syscall.SIGXFSZ)
+	for _, trigger := range []string{"flush", "full-buffer", "overflow", "oversized"} {
+		t.Run(trigger, func(t *testing.T) {
+			log, idx := openRecoveryLog(t, t.TempDir())
+			s := &Shard{log: log, index: idx}
+			key := []byte("key")
+			const hash = uint64(42)
+			old := []byte("old")
+			change, err := idx.prepareSet(log, typeBytes, key, old, hash, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Use appendSet directly to keep timers out of fault injection.
+			if err := s.appendSet(typeBytes, key, old, change, Buffer); err != nil {
+				t.Fatal(err)
+			}
+			slots, pending := slices.Clone(idx.slots), bytes.Clone(log.pending)
+			size := log.size
+			newSize := logPendingSize - int(size)
+			if trigger == "overflow" {
+				newSize += logAlignment
+			} else if trigger == "oversized" {
+				newSize = logPendingSize + logAlignment
+			}
+			value := bytes.Repeat([]byte{'v'}, newSize-logHeaderSize-len(key))
+			change, err = idx.prepareSet(log, typeBytes, key, value, hash, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var original syscall.Rlimit
+			if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &original); err != nil {
+				t.Fatal(err)
+			}
+			func() {
+				limited := original
+				limited.Cur = 17 // Fail partway through the first acknowledged record.
+				if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limited); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original); err != nil {
+						t.Fatal(err)
+					}
+				}()
+				var err error
+				if trigger == "flush" {
+					err = log.flush()
+				} else {
+					err = s.appendSet(typeBytes, key, value, change, Buffer)
+				}
+				if !errors.Is(err, syscall.EFBIG) {
+					t.Fatalf("partial buffer flush error=%v, want EFBIG", err)
+				}
+			}()
+			if !slices.Equal(slots, idx.slots) || !bytes.Equal(pending, log.pending) || log.size != size || log.writeErr != nil {
+				t.Fatal("failed flush changed the acknowledged index, bytes, or logical size")
+			}
+			if info, err := log.headFile.Stat(); err != nil || info.Size() != 0 {
+				t.Fatalf("partial file write not rolled back: %v error=%v", info, err)
+			}
+			if _, got, _, _, err := idx.findPayload(log, key, hash, nil); err != nil || !bytes.Equal(got, old) {
+				t.Fatalf("pending value lost after failure: %q error=%v", got, err)
+			}
+			checkSegmentAccounting(t, s)
+			if err := log.flush(); err != nil {
+				t.Fatalf("flush retry: %v", err)
+			}
+			if err := s.appendSet(typeBytes, key, value, change, Buffer); err != nil {
+				t.Fatalf("append retry: %v", err)
+			}
+			if err := log.flush(); err != nil {
+				t.Fatal(err)
+			}
+			checkSegmentAccounting(t, s)
+			if err := log.headFile.Close(); err != nil {
+				t.Fatal(err)
+			}
+			log, idx = openRecoveryLog(t, log.path)
+			checkRecoveredValue(t, log, idx, key, value)
+		})
+	}
+}

@@ -96,7 +96,7 @@ compute the deadline on each write:</p>
 
 <pre><code class="language-go">err := db.Set(&quot;session&quot;, &quot;active&quot;,
     dot.WithExpiration(time.Now().Add(15*time.Minute)),
-    dot.WithSync(true),
+    dot.WithDurability(dot.Sync),
 )</code></pre>
 
 <p>A deadline passed to <code>Open</code> is shared by all writes that use that default;
@@ -105,8 +105,10 @@ it is not recalculated for each key. <code>Set</code> uses the default unless ov
 Pass <code>WithExpiration</code> to override either, or
 <code>dot.WithExpiration(time.Time{})</code> to clear expiration.</p>
 
-<p>Writes use the OS page cache by default. <code>WithSync(true)</code> syncs changed
-writes before returning. A per-call <code>WithSync(false)</code> overrides a database
+<p>Writes use <code>dot.Buffer</code> by default: each active shard buffers up to
+64 KiB and writes to the file without fsync within 100 ms or when full. Reads see
+buffered records immediately. <code>WithDurability(dot.Sync)</code> writes and fsyncs
+before returning. A per-call <code>WithDurability(dot.Write)</code> overrides a database
 opened with synchronous writes.</p>
 
 <h2 id="atomic-updates">Atomic updates</h2>

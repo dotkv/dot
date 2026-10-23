@@ -49,15 +49,28 @@ database closes or the process exits.</p>
 
 <h2 id="durability">Durability</h2>
 
-<p>By default, successful writes reach the OS page cache. Use
-<code>WithSync(true)</code> when writes must be synced to storage before returning:</p>
+<p>By default, <code>dot.Buffer</code> copies writes into a 64 KiB buffer per active
+shard. Pending records reach the file without fsync when the buffer fills or
+within 100 ms of the first pending write, subject to scheduling and storage delays.
+Later writes do not postpone the deadline; oversized records write directly. Use
+<code>WithDurability(dot.Sync)</code> when writes must be synced to storage before returning:</p>
 
-<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithSync(true))</code></pre>
+<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
 
 <p>This default applies to <code>Set</code>, <code>Update</code>, and <code>Delete</code>.
-You can also choose it per call. Syncing costs a storage flush for each changed
-write, so expect lower throughput. <code>Close</code> releases resources; it does
-not replace choosing synchronous writes.</p>
+You can also choose it per call. Choose one mode: <code>dot.Buffer</code>, <code>dot.Write</code>, or <code>dot.Sync</code>.
+<code>Write</code> reaches the OS page cache before returning; <code>Sync</code> also
+fsyncs. Both drain earlier buffered writes in the same shard, even for unchanged
+values or missing deletes. Syncing costs a storage flush per call.
+<code>Close</code> drains pending buffers without fsync; log rotation and cleanup
+can also drain buffers early.</p>
+
+<p>Reads, atomic updates, and scans see pending records immediately through the
+existing index. There is no separate lookup by key in the buffer. Scans retain
+their per-shard consistency and are not database-wide snapshots. A process crash
+can lose buffered writes. <code>Write</code> and flushed <code>Buffer</code> writes
+still lack a power-loss guarantee. Background flush errors block mutations in the
+affected shard and are returned by subsequent mutations and <code>Close</code>.</p>
 
 <h2 id="recovery">Reopening and recovery</h2>
 

@@ -3,6 +3,7 @@ package dot
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Shard owns a log, an index, and the lock that coordinates access to them.
@@ -12,7 +13,8 @@ type Shard struct {
 	index        *Index
 	lock         sync.RWMutex
 	closed       bool
-	metricsIndex int // Routes operation metrics without hashing the key again.
+	metricsIndex int         // Routes operation metrics without hashing the key again.
+	flushTimer   *time.Timer // Guarded by lock, including its callback.
 
 	compactionThreshold *compactionThreshold
 	compactionQueue     chan<- *Shard
@@ -23,11 +25,11 @@ type Shard struct {
 
 // appendSet requires the shard's exclusive lock. Commit only after the append
 // succeeds, using its actual address because writing may rotate the log.
-func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange) error {
+func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange, durability Durability) error {
 	if change.kind == indexUnchanged {
 		return nil
 	}
-	segment, off, err := s.log.write(ty, key, value, change.expiration)
+	segment, off, err := s.log.writeDurability(ty, key, value, change.expiration, durability)
 	if err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
@@ -38,11 +40,34 @@ func (s *Shard) appendSet(ty recordType, key, value []byte, change indexChange) 
 	return nil
 }
 
-// syncHead fsyncs the shard log's head file. It requires the shard's exclusive
-// lock and follows a successful record append.
-func (s *Shard) syncHead() error {
-	if err := s.log.headFile.Sync(); err != nil {
-		return fmt.Errorf("sync log: %w", err)
+// finishDurability requires the shard's exclusive lock. A timer is armed by
+// the first pending write; later writes never postpone its deadline.
+func (s *Shard) finishDurability(durability Durability) error {
+	if s.log.writeErr != nil {
+		return s.log.writeErr
+	}
+	if durability == Buffer {
+		if len(s.log.pending) != 0 && s.flushTimer == nil {
+			s.flushTimer = time.AfterFunc(logFlushInterval, func() {
+				s.lock.Lock()
+				defer s.lock.Unlock()
+				s.flushTimer = nil
+				if !s.closed {
+					if err := s.log.flush(); err != nil {
+						s.log.writeErr = fmt.Errorf("background buffer flush: %w", err)
+					}
+				}
+			})
+		}
+		return nil
+	}
+	if err := s.log.flush(); err != nil {
+		return err
+	}
+	if durability == Sync {
+		if err := s.log.headFile.Sync(); err != nil {
+			return fmt.Errorf("sync log: %w", err)
+		}
 	}
 	return nil
 }

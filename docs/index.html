@@ -85,13 +85,13 @@ once at a time. <code>Close</code> releases resources and keeps the data.
 <p>Options passed to <code>Open</code> set defaults. Write options can also be set
 on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> calls:</p>
 
-<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithSync(true))</code></pre>
+<pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
 
 <div class="table-scroll" role="region" aria-label="Database options" tabindex="0">
 <table>
 <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Use</th></tr></thead>
 <tbody>
-<tr><td><code>WithSync(enabled)</code></td><td>false</td><td>Sync changed writes before returning.</td></tr>
+<tr><td><code>WithDurability(mode)</code></td><td>dot.Buffer</td><td>Buffer writes, write immediately, or sync before returning.</td></tr>
 <tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>Set a fixed deadline for Set and Update; a zero time clears it.</td></tr>
 <tr><td><code>WithShardCount(count)</code></td><td>64</td><td>Choose a new database's shard count: a power of two from 1 to 1024.</td></tr>
 <tr><td><code>WithCompactionThreshold(ratio, bytes)</code></td><td>0.33, 1 MiB</td><td>Adjust background cleanup thresholds per shard.</td></tr>
@@ -99,7 +99,7 @@ on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> cal
 </table>
 </div>
 
-<p>Start with the defaults, then choose <code>WithSync(true)</code> if each write must
+<p>Start with the defaults, then choose <code>WithDurability(dot.Sync)</code> if each write must
 reach storage before returning. See <a href="storage.html">storage and recovery</a>
 for durability and cleanup, <a href="usage.html">usage</a> for values and atomic
 updates, and <a href="metrics.html">metrics</a> for the embedded dashboard.</p>

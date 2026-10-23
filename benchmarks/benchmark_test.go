@@ -16,9 +16,9 @@ import (
 )
 
 func TestEngineContracts(t *testing.T) {
-	for _, name := range []string{"dot", "pebble"} {
+	for name := range engines {
 		t.Run(name, func(t *testing.T) {
-			db, err := engines[name](caseConfig{Path: t.TempDir()})
+			db, err := engines[name](caseConfig{Path: t.TempDir(), ValueBytes: 131072})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -34,7 +34,7 @@ func TestEngineContracts(t *testing.T) {
 			if _, found, err := db.GetUint64(key); found || err != nil {
 				t.Fatalf("missing scalar: found=%v err=%v", found, err)
 			}
-			for _, size := range []int{8, 128, 4096, 65536} {
+			for _, size := range []int{8, 128, 4096, 65536, 131072} {
 				value := make([]byte, size)
 				for i := range value {
 					value[i] = byte(mix64(uint64(i)))
@@ -52,6 +52,9 @@ func TestEngineContracts(t *testing.T) {
 				got, found, err = db.Get(key)
 				if err != nil || !found || !bytes.Equal(got, want) {
 					t.Fatalf("result ownership for %d bytes: found=%v err=%v", size, found, err)
+				}
+				if _, found, err := db.GetUint64(key); size != 8 && (found || err == nil) {
+					t.Fatalf("accepted %d-byte value as scalar: found=%v err=%v", size, found, err)
 				}
 			}
 			const scalar = uint64(0xfedcba9876543210)
@@ -87,8 +90,60 @@ func TestEngineContracts(t *testing.T) {
 	}
 }
 
+func TestEngineReopen(t *testing.T) {
+	for name, open := range engines {
+		t.Run(name, func(t *testing.T) {
+			c := caseConfig{Path: t.TempDir(), ValueBytes: 1024}
+			db, err := open(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if db != nil {
+					if err := db.Close(); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			value := bytes.Repeat([]byte{0xa5}, c.ValueBytes)
+			if err := db.Set([]byte("bytes"), value); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetUint64([]byte("scalar"), math.MaxUint64); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Set([]byte("deleted"), value); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Delete([]byte("deleted")); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db = nil
+			db, err = open(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, found, err := db.Get([]byte("bytes")); err != nil || !found || !bytes.Equal(got, value) {
+				t.Fatalf("reopened bytes: found=%v err=%v", found, err)
+			}
+			if got, found, err := db.GetUint64([]byte("scalar")); err != nil || !found || got != math.MaxUint64 {
+				t.Fatalf("reopened scalar: got=%x found=%v err=%v", got, found, err)
+			}
+			if _, found, err := db.Get([]byte("deleted")); err != nil || found {
+				t.Fatalf("reopened deleted key: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
 func TestWorkloadSemantics(t *testing.T) {
-	for _, workers := range []int{1, 16, 128} {
+	for _, workers := range []int{8} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			c := caseConfig{Workload: "80/20", ValueBytes: 8, Scalar: true, Workers: workers, Keys: 2*workers + 1, Seed: 42}
 			// Keep all historical keys to catch collisions between workers and
@@ -154,9 +209,9 @@ func TestRunCase(t *testing.T) {
 	for _, mode := range []struct {
 		workers, size int
 		scalar        bool
-	}{{1, 8, true}, {16, 8, false}, {128, 128, false}, {1, 65536, false}} {
+	}{{8, 8, true}, {8, 8, false}, {8, 1024, false}, {8, 65536, false}} {
 		var previous *result
-		for _, name := range []string{"dot", "pebble"} {
+		for name := range engines {
 			t.Run(fmt.Sprintf("%s/%d/%d/scalar=%v", name, mode.workers, mode.size, mode.scalar), func(t *testing.T) {
 				c := caseConfig{
 					Engine: name, Workload: "80/20", ValueBytes: mode.size, Scalar: mode.scalar,

@@ -37,6 +37,12 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if seg == s.log.headSegment && len(s.log.pending) != 0 {
+			if uint64(len(data)) != s.log.bufferStart {
+				t.Fatalf("buffer starts at %d, file ends at %d", s.log.bufferStart, len(data))
+			}
+			data = append(data, s.log.pending...)
+		}
 		if s.log.segmentBytes[seg] != uint64(len(data)) {
 			t.Fatalf("segment %d bytes=%d, want %d", seg, s.log.segmentBytes[seg], len(data))
 		}

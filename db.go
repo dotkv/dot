@@ -49,7 +49,7 @@ type Key interface {
 type DB struct {
 	path             string
 	expiration       int64
-	syncWrites       bool
+	durability       Durability
 	shards           []Shard
 	shardCountBits   uint
 	backgroundCancel context.CancelFunc
@@ -89,7 +89,7 @@ func acquireLock(path string) (*os.File, error) {
 type Options struct {
 	expiration    int64
 	expirationSet bool
-	syncWrites    bool
+	durability    Durability
 	compaction    compactionThreshold
 	shardCount    int
 	shardCountSet bool
@@ -142,34 +142,50 @@ func WithExpiration(t time.Time) Option {
 	}
 }
 
-// WithSync makes writes durable before returning: the shard log is fsynced
-// after the record is appended. When passed to Open it applies to every Set,
-// Delete, and Update on the database; when passed to one of those
-// calls it applies to that call only, overriding the database default.
-// WithSync(false) disables a database default for a single call. Syncing
-// costs a storage flush per write and is much slower than the default, which
-// relies on the OS page cache. The index is rebuilt from the log at open, so
-// syncing the log is sufficient for durability.
-func WithSync(syncWrites bool) Option {
+// Durability controls when an acknowledged mutation reaches storage.
+// Select one mode; these values are alternatives, not bit flags.
+type Durability uint8
+
+const (
+	// Write writes to the log file before returning, without fsync. The OS
+	// may still hold the bytes in its page cache.
+	Write Durability = iota
+	// Sync writes and fsyncs the shard log before returning.
+	Sync
+	// Buffer is the default. It copies records into a 64 KiB buffer per active
+	// shard. Pending bytes are written without fsync when full or after 100 ms.
+	// Reads see buffered mutations immediately. A process crash can lose them.
+	Buffer
+)
+
+func (d Durability) valid() bool { return d <= Buffer }
+
+// WithDurability sets the default for Open or overrides it for one Set,
+// Update, or Delete. Write and Sync also flush earlier buffered writes in the
+// same shard; Sync fsyncs them. This applies even to unchanged values and
+// missing deletes. Other shards are unaffected. Close flushes pending buffers
+// without fsync. Background flush failures block further mutations in that
+// shard and are returned by its subsequent mutations and Close.
+func WithDurability(durability Durability) Option {
 	return func(o *Options) {
-		o.syncWrites = syncWrites
+		o.durability = durability
 	}
 }
 
 // resolveOptions applies opts over the database defaults. expirationSet
 // reports whether any option explicitly set an expiration.
-func (db *DB) resolveOptions(opts []Option) (expiration int64, syncWrites, expirationSet bool) {
-	expiration, syncWrites = db.expiration, db.syncWrites
+func (db *DB) resolveOptions(opts []Option) (expiration int64, durability Durability, expirationSet bool) {
+	expiration, durability = db.expiration, db.durability
 	if len(opts) > 0 {
-		options := Options{expiration: expiration, syncWrites: syncWrites}
+		options := Options{expiration: expiration, durability: durability}
 		for _, opt := range opts {
 			if opt != nil {
 				opt(&options)
 			}
 		}
-		expiration, syncWrites, expirationSet = options.expiration, options.syncWrites, options.expirationSet
+		expiration, durability, expirationSet = options.expiration, options.durability, options.expirationSet
 	}
-	return expiration, syncWrites, expirationSet
+	return expiration, durability, expirationSet
 }
 
 func isExpired(expiration int64) bool {
@@ -180,11 +196,14 @@ func isExpired(expiration int64) bool {
 // WithShardCount selects another count. Existing databases load their layout
 // from META and reject incompatible options before recovering any shard.
 func Open(path string, opts ...Option) (*DB, error) {
-	options := Options{compaction: defaultCompactionThreshold(), shardCount: defaultShardCount}
+	options := Options{durability: Buffer, compaction: defaultCompactionThreshold(), shardCount: defaultShardCount}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&options)
 		}
+	}
+	if !options.durability.valid() {
+		return nil, fmt.Errorf("invalid durability %d", options.durability)
 	}
 	if ratio := options.compaction.ratio; math.IsNaN(ratio) || ratio < 0 || ratio >= 1 {
 		return nil, fmt.Errorf("compaction ratio must be finite and in [0, 1)")
@@ -203,7 +222,7 @@ func Open(path string, opts ...Option) (*DB, error) {
 	db := &DB{
 		path:             path,
 		expiration:       options.expiration,
-		syncWrites:       options.syncWrites,
+		durability:       options.durability,
 		backgroundCancel: cancel,
 		lockFile:         lock,
 		metricsContext:   metricsContext,
@@ -313,7 +332,10 @@ func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 		started := m.begin()
 		defer func() { m.record(operationSet, metricsShard, started) }()
 	}
-	expiration, syncWrites, _ := db.resolveOptions(opts)
+	expiration, durability, _ := db.resolveOptions(opts)
+	if !durability.valid() {
+		return fmt.Errorf("invalid durability %d", durability)
+	}
 	var encoded [8]byte
 	ty, value, err := encodeValue(val, &encoded)
 	if err != nil {
@@ -327,17 +349,17 @@ func (db *DB) Set[T Value, K Key](key K, val T, opts ...Option) error {
 	if s.closed {
 		return os.ErrClosed
 	}
+	if s.log.writeErr != nil {
+		return s.log.writeErr
+	}
 	change, err := s.index.prepareSet(s.log, ty, kb, value, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare set: %w", err)
 	}
-	if err := s.appendSet(ty, kb, value, change); err != nil {
+	if err := s.appendSet(ty, kb, value, change, durability); err != nil {
 		return err
 	}
-	if syncWrites && change.kind != indexUnchanged {
-		return s.syncHead()
-	}
-	return nil
+	return s.finishDurability(durability)
 }
 
 // Get returns the value decoded as T. A missing or expired key returns the zero
@@ -424,7 +446,10 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 		started := m.begin()
 		defer func() { m.record(operationUpdate, metricsShard, started) }()
 	}
-	expiration, syncWrites, expirationSet := db.resolveOptions(opts)
+	expiration, durability, expirationSet := db.resolveOptions(opts)
+	if !durability.valid() {
+		return fmt.Errorf("invalid durability %d", durability)
+	}
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	metricsShard = s
@@ -432,6 +457,9 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 	defer s.lock.Unlock()
 	if s.closed {
 		return os.ErrClosed
+	}
+	if s.log.writeErr != nil {
+		return s.log.writeErr
 	}
 	var value T
 	var pos int
@@ -501,43 +529,40 @@ func (db *DB) Update[T Value, K Key](key K, fn func(v T, exists bool) (T, error)
 			sameValue = scalarBytes(ty, payload) == raw
 		}
 		if sameValue && (!expirationSet || expiration == prevExp) {
-			return nil
+			return s.finishDurability(durability)
 		}
 		previousSize := len(previous)
 		if !byteValue && !stringValue {
 			previousSize = raw.size
 		}
 		change := s.index.prepareUpdate(pos, hash, expiration, prevExp, recordSize(len(kb), previousSize))
-		if err := s.appendSet(ty, kb, payload, change); err != nil {
+		if err := s.appendSet(ty, kb, payload, change, durability); err != nil {
 			return err
 		}
-		if syncWrites && change.kind != indexUnchanged {
-			return s.syncHead()
-		}
-		return nil
+		return s.finishDurability(durability)
 	}
 	change, err := s.index.prepareSet(s.log, ty, kb, payload, hash, expiration)
 	if err != nil {
 		return fmt.Errorf("prepare update: %w", err)
 	}
-	if err := s.appendSet(ty, kb, payload, change); err != nil {
+	if err := s.appendSet(ty, kb, payload, change, durability); err != nil {
 		return err
 	}
-	if syncWrites && change.kind != indexUnchanged {
-		return s.syncHead()
-	}
-	return nil
+	return s.finishDurability(durability)
 }
 
 // Delete removes key. Deleting a missing key succeeds.
-// Options other than WithSync have no effect.
+// Options other than WithDurability have no effect.
 func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	var metricsShard *Shard
 	if m := db.operationMetrics.Load(); m != nil {
 		started := m.begin()
 		defer func() { m.record(operationDelete, metricsShard, started) }()
 	}
-	_, syncWrites, _ := db.resolveOptions(opts)
+	_, durability, _ := db.resolveOptions(opts)
+	if !durability.valid() {
+		return fmt.Errorf("invalid durability %d", durability)
+	}
 	kb := []byte(key)
 	s, hash := db.shard(kb)
 	metricsShard = s
@@ -546,6 +571,9 @@ func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	if s.closed {
 		return os.ErrClosed
 	}
+	if s.log.writeErr != nil {
+		return s.log.writeErr
+	}
 	change, err := s.index.prepareDelete(s.log, kb, hash)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
@@ -553,19 +581,14 @@ func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	if change.kind == indexUnchanged {
 		// Deleting an expired key can prune its index entry without a tombstone.
 		s.maybeScheduleCompaction()
-		return nil
+		return s.finishDurability(durability)
 	}
-	if _, _, err := s.log.write(typeDelete, kb, nil, 0); err != nil {
+	if _, _, err := s.log.writeDurability(typeDelete, kb, nil, 0, durability); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
 	s.index.commit(change)
-	if syncWrites {
-		if err := s.syncHead(); err != nil {
-			return err
-		}
-	}
 	s.maybeScheduleCompaction()
-	return nil
+	return s.finishDurability(durability)
 }
 
 // Scan returns an iterator over every live key/value pair in the database.
@@ -619,7 +642,8 @@ func scanShard(s *Shard, buf *[]byte, yield func([]byte, []byte) bool) bool {
 
 // Close waits for active operations and releases the logs and index mappings
 // without removing the database files. Subsequent operations return os.ErrClosed.
-// Close may be called again to retry an unsuccessful unmap.
+// Pending buffers are written without fsync. Close may be called again to retry
+// an unsuccessful unmap.
 func (db *DB) Close() error {
 	return db.close(false)
 }
@@ -651,6 +675,12 @@ func (db *DB) close(removeFiles bool) error {
 	for i := range db.shards {
 		s := &db.shards[i]
 		if !s.closed && s.log != nil {
+			if s.flushTimer != nil {
+				s.flushTimer.Stop()
+			}
+			if flushErr := s.log.flush(); flushErr != nil {
+				err = errors.Join(err, fmt.Errorf("flush shard %02d: %w", i, flushErr))
+			}
 			if closeErr := s.log.headFile.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
 				err = errors.Join(err, fmt.Errorf("close shard %02d: %w", i, closeErr))
 			}

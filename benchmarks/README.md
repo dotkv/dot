@@ -1,6 +1,6 @@
 # Engine comparisons
 
-Compare Dot and Pebble on Linux using 16-byte keys.
+Compare Dot, Pebble, Pogreb, and Bitcask on Linux using 16-byte keys and 8 workers.
 This directory is a separate Go module: its engine and histogram dependencies do
 not enter Dot's root `go.mod` or `go.sum`. Root `go test ./...` does not run this
 suite.
@@ -13,7 +13,7 @@ cd benchmarks
 go test ./...
 go build -o dot-bench .
 
-# Default matrix: both engines, both read/write ratios, both value sizes.
+# Default matrix: all four engines, both read/write ratios, both value sizes.
 ./dot-bench
 
 # Repeat with one shared operation budget per configuration and save JSON.
@@ -39,19 +39,20 @@ Writes are equal shares of inserts, updates, and deletes.
 
 | Setting                   | Default                          |
 | ------------------------- | -------------------------------- |
-| Engines                   | `dot,pebble`                 |
+| Engines                   | `dot,pebble,pogreb,bitcask`        |
 | Read/write ratios         | `80/20,20/80`                    |
 | Value sizes               | 8 B scalars, 1,024 B byte slices |
-| Workers                   | 16                               |
+| Workers                   | 8                                |
 | Initial live keys         | 16,384                           |
 | Untimed warmup operations | 30,000                           |
 | Seed                      | 1                                |
 | Dot time target           | 15 seconds                       |
 
-This gives **8 cases** across four configurations before repetitions. Use
-`-engines`, `-workloads`, `-sizes`, and `-workers` to select a subset or override
-sizes and concurrency. Supported worker counts are 1, 16, and 128. Keys are always
-16 bytes.
+This gives **16 cases** across four configurations before repetitions. Use
+`-engines`, `-workloads`, and `-sizes` to select a subset or override sizes.
+Every new workload and calibration probe runs with **exactly 8 workers**;
+`-workers` accepts only `8`. Importing historical JSON results with 1, 16, or 128
+workers remains supported. Keys are always 16 bytes.
 
 The target applies **only to Dot's estimated performance**. Each distinct
 workload/value-size/API/worker configuration first runs a fresh-process Dot probe
@@ -211,7 +212,8 @@ Measured operations per engine: **13,792,896**. Ratios are reads/writes.
 
 On 2026-10-22, the generated tables above were refreshed from `e2f04c9` with local
 changes making metrics history opt-in. The full workload/value-size matrix ran
-at all three supported worker counts, with three repetitions:
+at all three then-supported worker counts, with three repetitions. This historical
+run predates the current four-engine, 8-worker matrix:
 
 ```sh
 ./dot-bench -workers 1,16,128 -repeat 3 -json > results.jsonl
@@ -245,7 +247,9 @@ slices with pseudorandom payloads generated before measurement and a per-key
 revision in the first eight bytes. Every read checks size and revision outside
 latency timing. Byte-slice reads return caller-owned bytes in every engine;
 necessary copying and release are included in latency. Dot and Pebble
-decode scalars without copying a result slice.
+decode scalars without copying a result slice. Pogreb and Bitcask decode the
+caller-owned slice returned by their native `Get` APIs, including that allocation
+in scalar latency.
 
 ## Engine and maintenance configuration
 
@@ -256,8 +260,9 @@ Successful mutations queue a shard when more than 33% of its encoded log bytes
 are obsolete and at least 1 MiB is obsolete. Both thresholds include headers,
 keys, values, and padding. A single background worker coalesces requests per shard.
 A 10-second ticker also handles tracked expirations and pending retries. The
-flush adapter is a no-op. Closing cancels its compactor after finishing any
-current shard; the drain does not reclaim all outstanding garbage.
+flush adapter is a no-op; Close drains pending write buffers without fsync.
+Closing cancels its compactor after finishing any current shard; the drain does
+not reclaim all outstanding garbage.
 Replacement writes use a 64 KiB buffer, flushed before syncing and publishing the
 replacement. Single-segment compaction skips syncing the original head before
 replacement; multi-segment compaction still syncs it before removing older history.
@@ -268,7 +273,7 @@ history retention (disabled); positive `WithMetricsHistory` retention opts in.
 An idle default handler also leaves operation recording off until a viewer
 connects. Keep viewers disconnected and history disabled in application
 benchmarks to avoid including dashboard overhead. All recorded comparisons use
-no metrics handler. The harness records latency independently for both engines.
+no metrics handler. The harness records latency independently for every engine.
 
 **Pebble** uses normal automatic compaction and default L0 limits, with WAL
 enabled, compression disabled, and `pebble.NoSync` mutations. Other defaults,
@@ -276,13 +281,41 @@ including cache and memtable sizes, remain in effect. Memtables are flushed afte
 preload and warmup so reads exercise SSTables as well as caches. The final drain
 flushes and closes without forcing a full compaction.
 
+**Pogreb** uses `github.com/akrylysov/pogreb` v0.10.2 with its default mmap
+filesystem and `BackgroundSyncInterval: 0`, disabling both per-write and periodic
+fsync. Native writes go to the OS page cache before returning. Automatic
+compaction remains disabled, its native default; the adapter does not call
+`Compact`. `Flush` is a no-op because there are no pending userspace write
+buffers; `Close` saves metadata and closes the database. See
+[Pogreb's Options](https://pkg.go.dev/github.com/akrylysov/pogreb@v0.10.2#Options).
+
+**Bitcask** uses `git.mills.io/prologic/bitcask` v1.0.2 with `WithSync(false)`
+and otherwise native defaults. Its value-size limit is raised when needed to
+accommodate `-sizes`. The native encoder flushes each record to the OS page cache
+before returning. The 1 MiB data-file rotation limit remains in effect; rotation
+and close still sync the active file. Automatic merging is absent and the adapter
+does not call `Merge`. `Flush` is a no-op, and `Close` saves indexes and metadata
+and closes the database. See
+[Bitcask's WithSync](https://pkg.go.dev/git.mills.io/prologic/bitcask@v1.0.2#WithSync).
+
+All four adapters acknowledge ordinary mutations without a per-operation fsync
+guarantee. Pogreb and Bitcask provide OS-buffered writes, but their public APIs
+do not offer Pebble-style userspace buffering across calls. Their native write,
+rotation, and maintenance behavior remains part of the measurement. In
+particular, their disk usage includes obsolete records retained without automatic
+compaction or a forced final merge.
+
 Preload and workload warmup are untimed for every engine. The final untimed flush
 and close materializes pending writes for disk accounting. `drain_seconds` is
 reported separately from foreground throughput.
 
-Dot syncs at log rotation and issues a file write before returning. Pebble may
-buffer an acknowledged WAL write in userspace. These configurations have no
-per-operation fsync guarantee and differ in acknowledgment and recovery behavior.
+The recorded comparisons in this document used Dot's former default, now named
+`dot.Write`: it issued a file write before returning and synced at log rotation.
+The current adapter follows the new `dot.Buffer` default, with a lazy 64 KiB
+buffer per active shard, flushed without fsync when full or within 100 ms of the
+first pending write. New runs therefore use different acknowledgment behavior
+from the historical results. Pebble may also buffer acknowledged WAL writes in
+userspace. Neither current configuration provides per-operation fsync durability.
 See [Pebble's WriteOptions](https://pkg.go.dev/github.com/cockroachdb/pebble/v2#WriteOptions).
 
 ## Byte threshold comparison

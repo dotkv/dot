@@ -14,7 +14,7 @@ func reportFixture(engine string, mean float64, p99 int64) result {
 	return result{
 		Config: caseConfig{
 			Engine: engine, Workload: "80/20", ValueBytes: 8, Scalar: true,
-			Workers: 16, Keys: 1024, Operations: 12000, Warmup: 1200, Seed: 1,
+			Workers: 8, Keys: 1024, Operations: 12000, Warmup: 1200, Seed: 1,
 		},
 		Latency: latencySummary{Count: 12000, MeanNS: mean, P99NS: p99}, OpsPerSecond: 1000000,
 		RSSFinalBytes: 12 << 20, RSSPeakBytes: 20 << 20,
@@ -51,7 +51,7 @@ func TestReportScenarioBudgets(t *testing.T) {
 func TestSavedResultsValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.jsonl")
 	var data bytes.Buffer
-	for _, name := range []string{"dot", "pebble"} {
+	for _, name := range []string{"dot", "pebble", "pogreb", "bitcask"} {
 		if err := json.NewEncoder(&data).Encode(reportFixture(name, 1000, 2000)); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ func TestSavedResultsValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	results, err := loadResults(path)
-	if err != nil || len(results) != 2 {
+	if err != nil || len(results) != 4 {
 		t.Fatalf("load results: %d rows, error %v", len(results), err)
 	}
 	for _, broken := range [][]byte{
@@ -77,6 +77,50 @@ func TestSavedResultsValidation(t *testing.T) {
 	}
 }
 
+func TestHistoricalWorkerResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "historical.jsonl")
+	var data bytes.Buffer
+	for _, workers := range []int{1, 16, 128} {
+		r := reportFixture("dot", 1000, 2000)
+		r.Config.Workers = workers
+		if err := json.NewEncoder(&data).Encode(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, data.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	results, err := loadResults(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renderResults(results); err != nil {
+		t.Fatalf("cannot report historical worker counts: %v", err)
+	}
+}
+
+func TestNewEngineReports(t *testing.T) {
+	var results []result
+	for _, name := range []string{"dot", "pebble", "pogreb", "bitcask"} {
+		r := reportFixture(name, 1000, 2000)
+		r.Environment.ModuleVersion = map[string]string{
+			"github.com/cockroachdb/pebble/v2": "v2.1.7",
+			"github.com/akrylysov/pogreb":      "v0.10.2",
+			"git.mills.io/prologic/bitcask":    "v1.0.2",
+		}
+		results = append(results, r)
+	}
+	data, err := renderResults(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"| Pogreb ", "| Bitcask ", "Pogreb: `v0.10.2`", "Bitcask: `v1.0.2`", "8 workers"} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("missing %q in report:\n%s", want, data)
+		}
+	}
+}
+
 func TestReportMarksMissingConfigurations(t *testing.T) {
 	a := reportFixture("dot", 1000, 2000)
 	b := a
@@ -87,7 +131,7 @@ func TestReportMarksMissingConfigurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte("**Partial matrix.**")) || !bytes.Contains(data, []byte("80/20 / 1,024 B / 16 workers")) {
+	if !bytes.Contains(data, []byte("**Partial matrix.**")) || !bytes.Contains(data, []byte("80/20 / 1,024 B / 8 workers")) {
 		t.Fatalf("missing configurations were not identified:\n%s", data)
 	}
 }
