@@ -37,11 +37,12 @@ func runDBModel(t *testing.T, trace []byte, opts ...dot.Option) {
 	verify := func() {
 		t.Helper()
 		seen := make(map[string]bool)
-		for k, raw := range db.Scan() {
-			key := string(k)
+		for entry, err := range db.Scan() {
+			check(t, err)
+			key := string(entry.Key)
 			v, exists := want[key]
-			if !exists || seen[key] || !bytes.Equal(raw, v.raw) {
-				t.Fatalf("Scan(%q) = %x; expected live=%t duplicate=%t value=%x", key, raw, exists, seen[key], v.raw)
+			if !exists || seen[key] || !sameValue(entry.Value, v.value) {
+				t.Fatalf("Scan(%q) = %T(%v); expected live=%t duplicate=%t value=%T(%v)", key, entry.Value, entry.Value, exists, seen[key], v.value, v.value)
 			}
 			seen[key] = true
 		}
@@ -211,7 +212,8 @@ func TestDBChurn(t *testing.T) {
 					}
 				}
 				scanned := 0
-				for range db.Scan() {
+				for _, err := range db.Scan() {
+					check(t, err)
 					scanned++
 				}
 				if scanned != count/4 {

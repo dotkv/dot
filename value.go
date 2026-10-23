@@ -263,6 +263,51 @@ func scalarBytes(ty recordType, value []byte) scalarValue {
 	return result
 }
 
+// decodeValue preserves the stored type for Scan. Byte slices borrow the
+// record buffer; strings own their bytes. Scalar decoding shares Get's checks,
+// including native integer overflow on 32-bit hosts.
+func decodeValue(ty recordType, payload []byte) (any, error) {
+	switch ty {
+	case typeBytes:
+		return payload, nil
+	case typeString:
+		return string(payload), nil
+	}
+	raw := scalarBytes(ty, payload)
+	switch ty {
+	case typeInt:
+		return decodeScalar[int](raw)
+	case typeInt8:
+		return decodeScalar[int8](raw)
+	case typeInt16:
+		return decodeScalar[int16](raw)
+	case typeInt32:
+		return decodeScalar[int32](raw)
+	case typeInt64:
+		return decodeScalar[int64](raw)
+	case typeUint:
+		return decodeScalar[uint](raw)
+	case typeUint8:
+		return decodeScalar[uint8](raw)
+	case typeUint16:
+		return decodeScalar[uint16](raw)
+	case typeUint32:
+		return decodeScalar[uint32](raw)
+	case typeUint64:
+		return decodeScalar[uint64](raw)
+	case typeFloat32:
+		return decodeScalar[float32](raw)
+	case typeFloat64:
+		return decodeScalar[float64](raw)
+	case typeDuration:
+		return decodeScalar[time.Duration](raw)
+	case typeBoolFalse, typeBoolTrue:
+		return decodeScalar[bool](raw)
+	default:
+		return nil, fmt.Errorf("%w: invalid value type 0x%02x", ErrInvalidValue, byte(ty))
+	}
+}
+
 func decodeScalar[T Value](raw scalarValue) (T, error) {
 	var value T
 	if err := checkType[T](raw.ty); err != nil {

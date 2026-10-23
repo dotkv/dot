@@ -157,6 +157,47 @@ func TestDBNativeIntegerRange(t *testing.T) {
 	}
 }
 
+func TestDBScanNativeIntegerOverflow(t *testing.T) {
+	for _, ty := range []recordType{typeInt, typeUint} {
+		t.Run(ty.String(), func(t *testing.T) {
+			db := newInternalDB(t, WithShardCount(1))
+			stopTestMaintenance(db)
+			key := []byte("large-native-integer")
+			s, hash := db.shard(key)
+			var payload [8]byte
+			bits := uint64(1 << 32)
+			binary.LittleEndian.PutUint64(payload[:], bits)
+			change, err := s.index.prepareSet(s.log, ty, key, payload[:], hash, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.appendSet(ty, key, payload[:], change, Write); err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for entry, err := range db.Scan() {
+				count++
+				if strconv.IntSize == 32 {
+					if !errors.Is(err, ErrValueOverflow) || entry.Key != nil || entry.Value != nil {
+						t.Fatalf("32-bit scan: entry=%+v error=%v", entry, err)
+					}
+				} else {
+					want := any(int(bits))
+					if ty == typeUint {
+						want = uint(bits)
+					}
+					if err != nil || !bytes.Equal(entry.Key, key) || entry.Value != want {
+						t.Fatalf("64-bit scan: entry=%+v error=%v, want %T(%v)", entry, err, want, want)
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("scan yielded %d results, want one", count)
+			}
+		})
+	}
+}
+
 func TestDBSetScalarEncodings(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("scalar")

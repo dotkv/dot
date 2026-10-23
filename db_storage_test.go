@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,74 @@ func TestDBShards(t *testing.T) {
 			if got, err := db.Get[[]byte](key); err != wantErr || !bytes.Equal(got, want) {
 				t.Fatalf("shard %d key %q: got %q, want %q, error %v", i, key, got, want, err)
 			}
+		}
+	}
+}
+
+func TestDBScanErrors(t *testing.T) {
+	for _, mode := range []Durability{Buffer, Write} {
+		for _, tc := range []struct {
+			name string
+			want error
+		}{
+			{"truncated", io.ErrUnexpectedEOF},
+			{"checksum", nil},
+			{"invalid-type", ErrInvalidValue},
+			{"deleted-record", ErrInvalidValue},
+		} {
+			t.Run(fmt.Sprintf("durability=%d/%s", mode, tc.name), func(t *testing.T) {
+				db := newInternalDB(t, WithShardCount(4), WithDurability(mode))
+				stopTestMaintenance(db)
+				keys := make([][]byte, len(db.shards))
+				for i := range db.shards {
+					keys[i] = keysForShard(db, &db.shards[i], "scan-error", 1)[0]
+					if err := db.Set(keys[i], []byte("value")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// Fail after a successful shard, with later shards still to scan.
+				log := db.shards[1].log
+				record := recoveryRecord(typeBytes, keys[1], []byte("value"), 0)
+				switch tc.name {
+				case "truncated":
+					record = nil
+				case "checksum":
+					record[0] ^= 0xff
+				case "invalid-type":
+					record[4] = 0xff
+				case "deleted-record":
+					record = recoveryRecord(typeDelete, keys[1], nil, 0)
+				}
+				if mode == Buffer {
+					log.pending = record
+				} else {
+					if err := os.WriteFile(log.headFile.Name(), record, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				entries, failures := 0, 0
+				for entry, err := range db.Scan() {
+					if err != nil {
+						failures++
+						if entry.Key != nil || entry.Value != nil || (tc.want != nil && !errors.Is(err, tc.want)) {
+							t.Fatalf("scan failure: entry=%+v error=%v, want %v", entry, err, tc.want)
+						}
+						continue // Accept the error yield to verify that Scan still stops.
+					}
+					if failures != 0 || !bytes.Equal(entry.Key, keys[0]) {
+						t.Fatalf("scan continued past failed shard: %+v", entry)
+					}
+					entries++
+				}
+				if entries != 1 || failures != 1 {
+					t.Fatalf("scan yielded %d entries and %d errors, want one of each", entries, failures)
+				}
+				// A failed scan must also release its read lock.
+				if !db.shards[1].lock.TryLock() {
+					t.Fatal("failed scan retained the shard lock")
+				}
+				db.shards[1].lock.Unlock()
+			})
 		}
 	}
 }

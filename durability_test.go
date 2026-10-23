@@ -115,11 +115,19 @@ func TestBufferReadVisibilityAndOwnership(t *testing.T) {
 	if _, err := db.Get[string]("string"); err != ErrNotFound {
 		t.Fatalf("buffered delete: %v", err)
 	}
-	seen := make(map[string]string)
-	for k, v := range db.Scan() {
-		seen[string(k)] = string(v)
+	seen := make(map[string]any)
+	for entry, err := range db.Scan() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := entry.Value.([]byte); ok {
+			seen[string(entry.Key)] = bytes.Clone(value)
+		} else {
+			seen[string(entry.Key)] = entry.Value
+		}
 	}
-	if len(seen) != 2 || seen["bytes"] != "Original" {
+	value, ok := seen["bytes"].([]byte)
+	if len(seen) != 2 || !ok || string(value) != "Original" || seen["scalar"] != uint64(43) {
 		t.Fatalf("Scan did not see current buffered records: %v", seen)
 	}
 	db = reopenBufferedDB(t, db)

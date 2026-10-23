@@ -596,7 +596,7 @@ func TestScan(t *testing.T) {
 		t.Fatal("empty scan yielded a pair")
 	}
 	const n = 200
-	want := make(map[string]string, n)
+	want := make(map[string]any, n)
 	for i := range n {
 		key := fmt.Sprintf("scan-%04d", i)
 		value := fmt.Sprintf("value-%04d", i)
@@ -605,10 +605,11 @@ func TestScan(t *testing.T) {
 		}
 		want[key] = value
 	}
-	// Scalars and expirations exercise the skip paths.
+	// Scalars retain their type; expired and deleted records are skipped.
 	if err := db.Set("scan-scalar", uint64(7)); err != nil {
 		t.Fatal(err)
 	}
+	want["scan-scalar"] = uint64(7)
 	if err := db.Set("scan-expired", "gone", dot.WithExpiration(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
@@ -617,17 +618,22 @@ func TestScan(t *testing.T) {
 	}
 	delete(want, "scan-0000")
 
-	got := make(map[string]string)
-	for k, v := range db.Scan() {
-		got[string(k)] = string(v)
+	scan := db.Scan()
+	got := make(map[string]any)
+	for entry, err := range scan {
+		check(t, err)
+		key := string(entry.Key)
+		if _, exists := got[key]; exists {
+			t.Fatalf("scan yielded duplicate key %q", key)
+		}
+		got[key] = entry.Value
 	}
-	// The scalar is stored as 8 little-endian bytes; check presence only.
-	if len(got) != len(want)+1 {
-		t.Fatalf("scan yielded %d pairs, want %d", len(got), len(want)+1)
+	if len(got) != len(want) {
+		t.Fatalf("scan yielded %d pairs, want %d", len(got), len(want))
 	}
 	for k, v := range want {
-		if got[k] != v {
-			t.Fatalf("key %q: got %q want %q", k, got[k], v)
+		if !sameValue(got[k], v) {
+			t.Fatalf("key %q: got %T(%v) want %T(%v)", k, got[k], got[k], v, v)
 		}
 	}
 	if _, ok := got["scan-expired"]; ok {
@@ -636,7 +642,8 @@ func TestScan(t *testing.T) {
 
 	// Early termination stops the scan.
 	count := 0
-	for range db.Scan() {
+	for _, err := range scan {
+		check(t, err)
 		count++
 		if count == 3 {
 			break
@@ -647,12 +654,69 @@ func TestScan(t *testing.T) {
 	}
 
 	// A second scan sees the same content: no state leaks between scans.
-	again := make(map[string]string)
-	for k, v := range db.Scan() {
-		again[string(k)] = string(v)
+	again := make(map[string]any)
+	for entry, err := range scan {
+		check(t, err)
+		again[string(entry.Key)] = entry.Value
 	}
 	if len(again) != len(got) {
 		t.Fatalf("second scan: got %d pairs, want %d", len(again), len(got))
+	}
+	// Early termination and completion release every shard lock.
+	check(t, db.Close())
+}
+
+func TestScanClosed(t *testing.T) {
+	for _, populated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("populated=%t", populated), func(t *testing.T) {
+			db := newDB(t)
+			if populated {
+				check(t, db.Set("key", "value"))
+			}
+			scan := db.Scan()
+			check(t, db.Close())
+			count := 0
+			for entry, err := range scan {
+				count++
+				if !errors.Is(err, os.ErrClosed) || entry.Key != nil || entry.Value != nil {
+					t.Fatalf("closed scan: entry=%+v error=%v", entry, err)
+				}
+			}
+			if count != 1 {
+				t.Fatalf("closed scan yielded %d results, want one error", count)
+			}
+		})
+	}
+}
+
+func TestScanSliceOwnership(t *testing.T) {
+	db := newDB(t, dot.WithShardCount(1))
+	for _, key := range []string{"first", "second", "third"} {
+		check(t, db.Set(key, []byte(key)))
+	}
+	var retained []dot.Entry
+	for entry, err := range db.Scan() {
+		check(t, err)
+		value, ok := entry.Value.([]byte)
+		if !ok {
+			t.Fatalf("Scan value has type %T, want []byte", entry.Value)
+		}
+		retained = append(retained, dot.Entry{Key: bytes.Clone(entry.Key), Value: bytes.Clone(value)})
+		// Yielded slices may be changed without changing the stored record.
+		clear(entry.Key)
+		clear(value)
+	}
+	if len(retained) != 3 {
+		t.Fatalf("retained %d entries, want 3", len(retained))
+	}
+	for _, entry := range retained {
+		value := entry.Value.([]byte)
+		if !bytes.Equal(entry.Key, value) {
+			t.Fatalf("retained entry changed: key=%q value=%q", entry.Key, value)
+		}
+		got, err := db.Get[[]byte](entry.Key)
+		check(t, err)
+		compare(t, got, value)
 	}
 }
 

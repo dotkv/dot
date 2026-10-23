@@ -659,21 +659,36 @@ func (db *DB) Delete[K Key](key K, opts ...Option) error {
 	return s.finishDurability(durability)
 }
 
-// Scan returns an iterator over every live key/value pair in the database.
-// Pairs are yielded in shard order; order within a shard is unspecified, and
-// the scan is not a point-in-time snapshot: writes to shards not yet scanned
-// become visible, while writes to scanned shards do not. Each shard's read
-// lock is held while that shard is scanned, so writers on the shard block
-// until its scan completes. Expired entries are skipped.
-// The yielded slices are reused across iterations: copy them to retain.
-// Iteration stops early on a read error, which cannot happen without
-// underlying storage corruption.
-func (db *DB) Scan() iter.Seq2[[]byte, []byte] {
-	return func(yield func([]byte, []byte) bool) {
+// Entry is a live key/value pair returned by Scan. Value has the stored Go
+// type, one of the types listed by Value. Key and any []byte Value are reused
+// by the iterator and must be copied to retain them beyond the current iteration.
+// Strings and scalar values may be retained without copying.
+type Entry struct {
+	Key   []byte
+	Value any
+}
+
+// Scan returns an iterator over every live entry in the database, decoding each
+// value to its stored Go type. Entries are yielded in shard order; order within
+// a shard is unspecified. The scan is not a point-in-time snapshot: writes to
+// shards not yet scanned become visible, while writes to scanned shards do not.
+// Each shard's read lock is held while that shard is scanned, so writers on the
+// shard block until its scan completes. The loop body must not call methods on
+// this DB.
+// Expired entries are skipped. See Entry for the lifetime of yielded values.
+// On a read or decoding error, Scan yields a zero Entry and the error once,
+// then stops. Scanning a closed database yields an error wrapping os.ErrClosed.
+func (db *DB) Scan() iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
 		var buf []byte
 		for i := range db.shards {
 			s := &db.shards[i]
-			if !scanShard(s, &buf, yield) {
+			more, err := scanShard(s, &buf, yield)
+			if err != nil {
+				yield(Entry{}, fmt.Errorf("scan shard %d: %w", i, err))
+				return
+			}
+			if !more {
 				return
 			}
 		}
@@ -682,30 +697,34 @@ func (db *DB) Scan() iter.Seq2[[]byte, []byte] {
 
 // scanShard scans one shard under its read lock, reusing buf across record
 // reads. It reports whether iteration should continue.
-func scanShard(s *Shard, buf *[]byte, yield func([]byte, []byte) bool) bool {
+func scanShard(s *Shard, buf *[]byte, yield func(Entry, error) bool) (bool, error) {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 	if s.closed {
-		return false
+		return false, os.ErrClosed
 	}
 	for _, slot := range s.index.slots {
 		if isEmptySlot(slot) {
 			continue
 		}
 		addr := slot & addressMask
-		key, value, _, expiration, err := s.log.readPayload(addressSegment(addr), addressOffset(addr), *buf)
+		key, raw, ty, expiration, err := s.log.readPayload(addressSegment(addr), addressOffset(addr), *buf)
 		if err != nil {
-			return false
+			return false, fmt.Errorf("read log: %w", err)
 		}
 		*buf = key[:cap(key)]
 		if isExpired(expiration) {
 			continue
 		}
-		if !yield(key, value) {
-			return false
+		value, err := decodeValue(ty, raw)
+		if err != nil {
+			return false, fmt.Errorf("decode key %q: %w", key, err)
+		}
+		if !yield(Entry{Key: key, Value: value}, nil) {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // Close waits for active operations and releases the logs and index mappings

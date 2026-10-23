@@ -16,7 +16,7 @@ The public suite has five files:
 - `api_test.go`: keys, scans, errors, ownership, expiration, relative TTLs,
   conditions, callbacks, and locks.
 - `values_test.go`: every supported type, edge values, type mismatches, updates,
-  arithmetic boundaries, and raw scan encodings checked using the standard library.
+  arithmetic boundaries, and decoded scan values checked for exact types and bits.
 - `concurrency_test.go`: concurrent reads, mutations, atomic updates and
   arithmetic, conditional limits, shutdown, and recovery of concurrent writes.
 - `metrics_test.go`: HTTP assets, prefixed dashboards, WebSocket updates, shared

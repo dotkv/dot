@@ -2,7 +2,6 @@ package dot_test
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -18,7 +17,6 @@ import (
 type valueCase struct {
 	name, kind string
 	value      any
-	raw        []byte
 	set        func(*dot.DB, string, ...dot.Option) error
 	check      func(*testing.T, *dot.DB, string)
 	missing    func(*testing.T, *dot.DB, string)
@@ -29,6 +27,9 @@ type valueCase struct {
 }
 
 func sameValue(got, want any) bool {
+	if reflect.TypeOf(got) != reflect.TypeOf(want) {
+		return false
+	}
 	switch v := want.(type) {
 	case float64:
 		return math.Float64bits(got.(float64)) == math.Float64bits(v)
@@ -41,32 +42,10 @@ func sameValue(got, want any) bool {
 	}
 }
 
-func scanBytes(v any) []byte {
-	switch x := v.(type) {
-	case []byte:
-		return bytes.Clone(x)
-	case string:
-		return []byte(x)
-	case bool:
-		return nil // Boolean values live entirely in the type tag.
-	case int:
-		v = int64(x)
-	case uint:
-		v = uint64(x)
-	case time.Duration:
-		v = int64(x)
-	}
-	var out bytes.Buffer
-	if err := binary.Write(&out, binary.LittleEndian, v); err != nil {
-		panic(err)
-	}
-	return out.Bytes()
-}
-
 func typedValue[T dot.Value](name string, want T) valueCase {
 	kind := reflect.TypeOf(want).String()
 	return valueCase{
-		name: name, kind: kind, value: want, raw: scanBytes(want),
+		name: name, kind: kind, value: want,
 		set: func(db *dot.DB, key string, opts ...dot.Option) error {
 			return db.Set(key, want, opts...)
 		},
@@ -217,10 +196,11 @@ func TestValueContracts(t *testing.T) {
 						v.abort(t, db, key)
 						v.check(t, db, key)
 						found := false
-						for k, raw := range db.Scan() {
-							if string(k) == key {
-								if found || !bytes.Equal(raw, v.raw) {
-									t.Fatalf("Scan: duplicate key or value %x; want %x", raw, v.raw)
+						for entry, err := range db.Scan() {
+							check(t, err)
+							if string(entry.Key) == key {
+								if found || !sameValue(entry.Value, v.value) {
+									t.Fatalf("Scan: duplicate key or value %T(%v); want %T(%v)", entry.Value, entry.Value, v.value, v.value)
 								}
 								found = true
 							}

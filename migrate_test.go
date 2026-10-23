@@ -97,7 +97,10 @@ func TestWithShardCount(t *testing.T) {
 					}
 				}
 				scanned := 0
-				for range reopened.Scan() {
+				for _, err := range reopened.Scan() {
+					if err != nil {
+						t.Fatal(err)
+					}
 					scanned++
 				}
 				if scanned != count {

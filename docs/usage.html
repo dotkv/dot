@@ -225,19 +225,46 @@ reused across operations; the last <code>WithCondition</code> option wins.
 
 <h2 id="scan">Scan</h2>
 
-<pre><code class="language-go">for key, value := range db.Scan() {
-    fmt.Printf(&quot;%s=%x\n&quot;, key, value)
+<pre><code class="language-go">for entry, err := range db.Scan() {
+    if err != nil {
+        return err
+    }
+
+    switch v := entry.Value.(type) {
+    case string:
+        fmt.Printf(&quot;%s: text %q\n&quot;, entry.Key, v)
+    case []byte:
+        fmt.Printf(&quot;%s: bytes %x\n&quot;, entry.Key, v)
+    case bool:
+        fmt.Printf(&quot;%s: flag %t\n&quot;, entry.Key, v)
+    case uint64:
+        fmt.Printf(&quot;%s: counter %d\n&quot;, entry.Key, v)
+    case time.Duration:
+        fmt.Printf(&quot;%s: duration %s\n&quot;, entry.Key, v)
+    default:
+        fmt.Printf(&quot;%s: %T = %v\n&quot;, entry.Key, v, v)
+    }
 }</code></pre>
 
-<p><code>Scan</code> skips expired keys and yields raw record payloads without their
-type tags, rather than the typed values returned by <code>Get[T]</code>. Strings and
-byte slices contain their original bytes; numbers use one, two, four, or eight
-little-endian bytes, and booleans have empty payloads because their value is
-stored in the type tag. Prefer typed reads when you need the logical value.</p>
+<p><code>Scan</code> returns <code>iter.Seq2[dot.Entry, error]</code>. An entry has a
+<code>Key []byte</code> and a <code>Value any</code> decoded to its stored Go type.
+All supported value types retain their identity, including distinct
+<code>string</code> and <code>[]byte</code> values, native <code>int</code> and
+<code>uint</code>, and <code>time.Duration</code>. Expired and deleted keys are
+skipped.</p>
 
-<p>A scan is unordered and is not a snapshot. It holds each shard's read lock
-while visiting it, so do not write to the same database inside the loop.
-Yielded slices are reused; copy them to retain them.</p>
+<p>A read or decoding failure yields a zero entry and an error once, then stops.
+Use <code>errors.Is</code> to inspect wrapped errors. Scanning a closed database
+yields an error wrapping <code>os.ErrClosed</code>. Reading a stored native
+integer that does not fit the host type yields an error wrapping
+<code>dot.ErrValueOverflow</code>.</p>
+
+<p>A scan visits shards in order, with no ordering within a shard, and is not a
+snapshot. Writes to shards not yet scanned become visible; writes to scanned
+shards do not. It holds each shard's read lock while visiting it, so do not call
+methods on the same database inside the loop. Keys and <code>[]byte</code> values
+are reused across iterations; copy them to retain them. Strings and scalar
+values can be retained directly.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="index.html" rel="prev"><span>Previous</span>Getting started</a><a href="storage.html" rel="next"><span>Next</span>Storage &amp; recovery <span aria-hidden="true">→</span></a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/usage.html">Edit this page <span aria-hidden="true">↗</span></a></footer>

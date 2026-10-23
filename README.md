@@ -61,6 +61,43 @@ an `int` or `uint` that cannot fit on a 32-bit host returns an error wrapping
 its own type. Store with `db.Set("timeout", 5*time.Second)` and read with
 `db.Get[time.Duration]("timeout")`.
 
+## Scan typed entries
+
+`Scan` returns `iter.Seq2[dot.Entry, error]`. Each entry contains a `Key []byte`
+and a `Value any` decoded to its stored Go type:
+
+```go
+for entry, err := range db.Scan() {
+	if err != nil {
+		return err
+	}
+	switch v := entry.Value.(type) {
+	case string:
+		fmt.Printf("%s: text %q\n", entry.Key, v)
+	case []byte:
+		fmt.Printf("%s: bytes %x\n", entry.Key, v)
+	case bool:
+		fmt.Printf("%s: flag %t\n", entry.Key, v)
+	case uint64:
+		fmt.Printf("%s: counter %d\n", entry.Key, v)
+	case time.Duration:
+		fmt.Printf("%s: duration %s\n", entry.Key, v)
+	default:
+		fmt.Printf("%s: %T = %v\n", entry.Key, v, v)
+	}
+}
+```
+
+Expired and deleted keys are skipped. A read or decoding failure yields a zero
+entry and an error once, then stops; errors can be checked with `errors.Is`.
+Scanning a closed database returns an error wrapping `os.ErrClosed`.
+
+Scans visit shards in order, with no ordering within a shard, and are not a
+snapshot. Each shard's read lock is held while visiting it; do not call methods
+on the same database inside the loop. Keys and `[]byte` values are reused across
+iterations, so copy them to retain them. Strings and scalar values can be
+retained directly.
+
 ## Update atomically
 
 ```go
