@@ -7,8 +7,8 @@ go run ./example
 ```
 
 Open <http://localhost:8080/dot/metrics/>. The example opens `db/` in the current
-directory and continuously reads, writes, updates, and deletes random keys,
-using 1 KiB values and short expirations. Press Ctrl+C to stop.
+directory and runs 16 workers that continuously read, write, update, and delete
+random `uint64` keys with 1–2 second expirations. Press Ctrl+C to stop.
 
 To add the dashboard to your own application:
 

@@ -30,7 +30,7 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html">Development</a>
       </nav>
-      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
+      <p class="sidebar-note">An embedded, on-disk<br>key-value database for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
@@ -49,28 +49,35 @@ database closes or the process exits.</p>
 
 <h2 id="durability">Durability</h2>
 
-<p>By default, <code>dot.Buffer</code> copies writes into a 64 KiB buffer per active
-shard. Pending records reach the file without fsync when the buffer fills or
-within 100 ms of the first pending write, subject to scheduling and storage delays.
-Later writes do not postpone the deadline; oversized records write directly. Use
-<code>WithDurability(dot.Sync)</code> when writes must be synced to storage before returning:</p>
+<p><code>WithDurability</code> selects a default mode for <code>Open</code>, or overrides
+it for a single <code>Set</code>, <code>Update</code>, or <code>Delete</code>:</p>
 
 <pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
 
-<p>This default applies to <code>Set</code>, <code>Update</code>, and <code>Delete</code>.
-You can also choose it per call. Choose one mode: <code>dot.Buffer</code>, <code>dot.Write</code>, or <code>dot.Sync</code>.
-<code>Write</code> reaches the OS page cache before returning; <code>Sync</code> also
-fsyncs. Both drain earlier buffered writes in the same shard, even for unchanged
-values or missing deletes. Syncing costs a storage flush per call.
-<code>Close</code> drains pending buffers without fsync; log rotation and cleanup
-can also drain buffers early.</p>
+<div class="table-scroll" role="region" aria-label="Durability modes" tabindex="0">
+<table>
+<thead><tr><th scope="col">Mode</th><th scope="col">Before returning</th></tr></thead>
+<tbody>
+<tr><td><code>dot.Buffer</code> (default)</td><td>Copies the record into a 64 KiB buffer per active shard.</td></tr>
+<tr><td><code>dot.Write</code></td><td>Writes the record to the file, using the OS page cache.</td></tr>
+<tr><td><code>dot.Sync</code></td><td>Writes and fsyncs the shard log.</td></tr>
+</tbody>
+</table>
+</div>
 
-<p>Reads, atomic updates, and scans see pending records immediately through the
-existing index. There is no separate lookup by key in the buffer. Scans retain
-their per-shard consistency and are not database-wide snapshots. A process crash
-can lose buffered writes. <code>Write</code> and flushed <code>Buffer</code> writes
-still lack a power-loss guarantee. Background flush errors block mutations in the
-affected shard and are returned by subsequent mutations and <code>Close</code>.</p>
+<p>Buffered records flush without fsync when the buffer fills or within 100 ms of
+the first pending write. Later writes do not postpone the deadline, and records
+larger than 64 KiB write directly. <code>Close</code>, log rotation, background
+cleanup, and a <code>Write</code> or <code>Sync</code> call on the same shard also
+drain pending bytes (even for unchanged values or missing deletes);
+<code>Sync</code> then fsyncs that shard. A background flush failure blocks
+further mutations in that shard and is returned by subsequent mutations and
+<code>Close</code>.</p>
+
+<p>Reads, atomic updates, and scans see buffered writes immediately. A process
+crash can lose buffered writes, while <code>Write</code> and flushed
+<code>Buffer</code> records still lack a power-loss guarantee. Use
+<code>dot.Sync</code> when writes must survive power loss before returning.</p>
 
 <h2 id="recovery">Reopening and recovery</h2>
 
@@ -89,24 +96,17 @@ metadata and data files together.</p>
 <pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithShardCount(16))</code></pre>
 
 <p>The count must be a power of two from 1 to 1024. Reopening without this option
-uses the stored count; an explicitly different count fails. Changing the count
-or opening an unsupported format requires a data migration, which is not yet
-automatic. <code>Open</code> reports the reason as a migration failure and leaves
-the existing data unchanged. Missing or invalid metadata also fails opening.</p>
-
-<p><code>META</code> is a fixed 64-byte binary header with the eight-byte signature
-<code>DOTMETAD</code>, a numeric database disk-format version, the shard count,
-segment/alignment parameters, and a CRC32 checksum. The checksum covers every
-header field and the reserved bytes. Metadata is validated before log recovery;
-corruption or an unsupported version fails opening without modifying stored
-records. Only the current binary format is supported.</p>
+uses the stored count; passing a different count fails because changing it
+requires rewriting the database. The <code>META</code> file stores and checksums
+the disk-format version, shard count, and segment layout, and is validated before
+any shard log is recovered.</p>
 
 <h2 id="compaction">Background cleanup</h2>
 
-<p>Dot automatically reclaims overwritten, deleted, and expired data. Expired keys
-read as missing immediately, but their disk space is reclaimed later. Cleanup
-can temporarily block operations on the shard being processed and needs room
-for a temporary output file.</p>
+<p>Dot automatically reclaims overwritten, deleted, and expired data, and shrinks
+sparse shard indexes in the background. Expired keys read as missing immediately,
+while their disk space is reclaimed later. Cleanup can temporarily block
+operations on the shard being processed and needs room for a temporary output file.</p>
 
 <p>The defaults suit most applications. To change when overwritten and deleted
 history triggers cleanup:</p>
@@ -115,12 +115,12 @@ history triggers cleanup:</p>
     dot.WithCompactionThreshold(0.4, 1&lt;&lt;20),
 )</code></pre>
 
-<p>This queues cleanup when more than 40% of a shard's retained data is obsolete
-and at least 1 MiB is obsolete. The defaults are 33% and 1 MiB per shard. The ratio
-must be in <code>[0, 1)</code>; the minimum can be zero. Larger thresholds trade
-more disk usage for less frequent cleanup. These are scheduling thresholds,
-not disk-space limits. The <a href="metrics.html">dashboard</a> shows disk usage
-and obsolete bytes.</p>
+<p>This queues cleanup after a write when more than 40% of a shard's retained data is
+obsolete and at least 1 MiB is obsolete. The defaults are 33% and 1 MiB per shard.
+The ratio must be in <code>[0, 1)</code>; the minimum can be zero. Periodic
+expiration sweeps use the ratio without the byte minimum. Larger thresholds trade
+more disk usage for less frequent cleanup. The <a href="metrics.html">dashboard</a>
+shows disk usage and obsolete bytes.</p>
       </article>
       <nav class="pagination" aria-label="Previous and next pages"><a href="usage.html" rel="prev"><span>Previous</span>Usage</a><a href="metrics.html" rel="next"><span>Next</span>Metrics dashboard <span aria-hidden="true">→</span></a></nav>
       <footer>Dot · Embedded storage for Go <a href="https://github.com/dotkv/dot/blob/master/docs/storage.html">Edit this page <span aria-hidden="true">↗</span></a></footer>

@@ -7,6 +7,7 @@ goroutines share a database handle.
 
 [Documentation](https://dotkv.github.io/dot/) ·
 [Usage](https://dotkv.github.io/dot/usage.html) ·
+[Storage](https://dotkv.github.io/dot/storage.html) ·
 [Metrics](https://dotkv.github.io/dot/metrics.html) · [Benchmarks](benchmarks/README.md)
 
 ## Get started
@@ -82,35 +83,23 @@ The key becomes unreadable at the given time. Compute `time.Now().Add(ttl)` on
 each write for a fresh TTL; a deadline passed to `dot.Open` is shared by all
 writes that use that default.
 
-`WithDurability` selects one mode for `Open`, or overrides it for one `Set`,
+`WithDurability` sets the default for `Open` or overrides it for a single `Set`,
 `Update`, or `Delete`:
 
 | Mode | Before returning |
 | --- | --- |
+| `dot.Buffer` (default) | Copies the record into a 64 KiB buffer per active shard. |
 | `dot.Write` | Writes the record to the file, using the OS page cache. |
 | `dot.Sync` | Writes and fsyncs the shard log. |
-| `dot.Buffer` (default) | Copies the record into a bounded 64 KiB buffer per active shard. |
 
-These are alternative modes, not flags to combine with `|`. Buffered records are
-written to the file without fsync when the buffer fills or within 100 ms of the
-first pending write, subject to scheduling and storage delays. Later writes do
-not reset the deadline. Records larger than the buffer write directly. Close,
-log rotation, compaction, and a `Write` or `Sync` operation on the same shard
-also drain pending bytes. A `Sync` operation then fsyncs that shard, even if the
-requested value was unchanged. A background flush error blocks further mutations
-in that shard and is returned by subsequent mutations and `Close`.
+Buffered records flush without fsync when the buffer fills, within 100 ms of the
+first pending write, on `Close`, or when a `Write` or `Sync` call runs on the
+same shard. All modes provide immediate read-after-write visibility across
+`Get`, `Update`, and `Scan`. A process crash can lose buffered writes, while
+`dot.Sync` ensures writes reach storage before returning. See
+[Storage & recovery](https://dotkv.github.io/dot/storage.html) for details.
 
-All modes preserve immediate read-after-write visibility, including `Update`
-and scans: the existing index points at the newest record, and reads use pending
-bytes when its address is still buffered. There is no separate key lookup in the
-buffer. Returned values remain caller-owned. A process crash can lose buffered
-writes; `Write` and flushed `Buffer` records still lack a power-loss guarantee.
-`Sync` provides durability before acknowledgment. Scans retain their existing
-per-shard consistency and are not database-wide snapshots.
-
-See [example/](example/) for a runnable workload and metrics dashboard.
-`db.MetricsHandler()` collects only while viewers are connected and keeps live
-history in the browser until reload. Persistent history defaults to zero
-(disabled). Opt in with `db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))`
-to retain seven days, including without viewers and across database restarts
-(about 21.1 MiB per retained day).
+See [example/](example/) for a runnable workload and embedded metrics dashboard.
+By default, `db.MetricsHandler()` collects only while viewers are connected. Pass
+`dot.WithMetricsHistory(7*24*time.Hour)` to retain seven days of one-second
+snapshots across restarts (about 21.1 MiB per day).

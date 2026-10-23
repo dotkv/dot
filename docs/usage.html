@@ -30,7 +30,7 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html">Development</a>
       </nav>
-      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
+      <p class="sidebar-note">An embedded, on-disk<br>key-value database for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
@@ -99,7 +99,7 @@ default:
 </table>
 </div>
 
-<h2 id="expiration-and-sync">Expiration and sync</h2>
+<h2 id="expiration-and-sync">Expiration and durability</h2>
 
 <p><code>WithExpiration</code> takes a fixed <code>time.Time</code>: the key becomes unreadable
 at that time, even before cleanup removes its data. For a fresh 15-minute lifetime,
@@ -118,9 +118,10 @@ Pass <code>WithExpiration</code> to override either, or
 
 <p>Writes use <code>dot.Buffer</code> by default: each active shard buffers up to
 64 KiB and writes to the file without fsync within 100 ms or when full. Reads see
-buffered records immediately. <code>WithDurability(dot.Sync)</code> writes and fsyncs
-before returning. A per-call <code>WithDurability(dot.Write)</code> overrides a database
-opened with synchronous writes.</p>
+buffered records immediately. Pass <code>WithDurability</code> (<code>dot.Buffer</code>,
+<code>dot.Write</code>, or <code>dot.Sync</code>) on any <code>Set</code>,
+<code>Update</code>, or <code>Delete</code> call to override the database default
+for that write.</p>
 
 <h2 id="atomic-updates">Atomic updates</h2>
 
@@ -153,10 +154,11 @@ returned bytes are copied. Returning nil bytes with no error stores an empty val
     fmt.Printf(&quot;%s=%x\n&quot;, key, value)
 }</code></pre>
 
-<p><code>Scan</code> skips expired keys and yields raw encoded values, rather than the
-typed values returned by <code>Get[T]</code>. Strings and byte slices contain their
-original bytes; numbers use eight little-endian bytes, and booleans have empty
-payloads. Prefer typed reads when you need the logical value.</p>
+<p><code>Scan</code> skips expired keys and yields raw record payloads without their
+type tags, rather than the typed values returned by <code>Get[T]</code>. Strings and
+byte slices contain their original bytes; numbers use one, two, four, or eight
+little-endian bytes, and booleans have empty payloads because their value is
+stored in the type tag. Prefer typed reads when you need the logical value.</p>
 
 <p>A scan is unordered and is not a snapshot. It holds each shard's read lock
 while visiting it, so do not write to the same database inside the loop.
@@ -170,7 +172,7 @@ Yielded slices are reused; copy them to retain them.</p>
       <nav aria-label="On this page">
         <a href="#typed-values">Typed values</a>
         <a href="#delete-and-handle-errors">Delete and handle errors</a>
-        <a href="#expiration-and-sync">Expiration and sync</a>
+        <a href="#expiration-and-sync">Expiration and durability</a>
         <a href="#atomic-updates">Atomic updates</a>
         <a href="#scan">Scan</a>
       </nav>

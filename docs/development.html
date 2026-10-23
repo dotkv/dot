@@ -30,7 +30,7 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html" aria-current="page">Development</a>
       </nav>
-      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
+      <p class="sidebar-note">An embedded, on-disk<br>key-value database for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
@@ -54,14 +54,10 @@ to an open pull request, and on pushes to <code>master</code>.</p>
 
 <p>Run the library benchmarks with <code>go test -run '^$' -bench . -benchmem</code>.
 The <a href="https://github.com/dotkv/dot/tree/master/benchmarks">comparison suite</a>
-is a separate module; its README describes workloads, commands, and results.</p>
-
-<p>Persistent metrics history is opt-in and defaults to zero (disabled). The
-comparison suite creates no metrics handler, so it performs no dashboard
-collection. For application benchmarks, keep viewers disconnected and history
-disabled to avoid measuring dashboard overhead. The library's
-<code>BenchmarkOperationMetrics</code> compares recording disabled, an idle default
-handler, counts only, and latency timing.</p>
+is a separate module; its README describes the workloads, how to run them, and the
+latest results. When benchmarking your own application, keep dashboard viewers
+disconnected and persistent metrics history disabled unless measuring metrics
+collection overhead (see <code>BenchmarkOperationMetrics</code>).</p>
 
 <h2 id="releases">Releases</h2>
 

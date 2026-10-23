@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A small, on-disk key-value store embedded in your Go application.">
+  <meta name="description" content="An embedded, on-disk key-value database engine for Go applications.">
   <meta name="color-scheme" content="light dark">
   <title>Getting started · Dot</title>
   <link rel="icon" href="dot128.png" type="image/png" sizes="128x128">
@@ -30,13 +30,13 @@
         <a href="metrics.html">Metrics dashboard</a>
         <a href="development.html">Development</a>
       </nav>
-      <p class="sidebar-note">A small, on-disk<br>key-value store for Go.</p>
+      <p class="sidebar-note">An embedded, on-disk<br>key-value database for Go.</p>
     </aside>
     <main id="content" tabindex="-1">
       <div class="page-heading">
         <p class="eyebrow">Dot / Documentation</p>
         <h1>Getting started</h1>
-        <p class="lead">A small, on-disk key-value store embedded in your Go application.</p>
+        <p class="lead">An embedded, on-disk key-value database engine for Go applications.</p>
       </div>
       <article aria-label="Getting started">
 <p>Dot adds persistent typed values, atomic updates, and expiration to your Go
@@ -80,9 +80,9 @@ Share one <code>*dot.DB</code> across goroutines; a database path can only be op
 once at a time. <code>Close</code> releases resources and keeps the data.
 <code>Destroy</code> closes the database and removes its directory.</p>
 
-<h2 id="configure-writes">Configure writes</h2>
+<h2 id="configure-writes">Configure the database</h2>
 
-<p>Options passed to <code>Open</code> set defaults. Write options can also be set
+<p>Options passed to <code>Open</code> set database defaults. Write options can also be set
 on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> calls:</p>
 
 <pre><code class="language-go">db, err := dot.Open(&quot;data&quot;, dot.WithDurability(dot.Sync))</code></pre>
@@ -91,7 +91,7 @@ on individual <code>Set</code>, <code>Update</code>, and <code>Delete</code> cal
 <table>
 <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Use</th></tr></thead>
 <tbody>
-<tr><td><code>WithDurability(mode)</code></td><td>dot.Buffer</td><td>Buffer writes, write immediately, or sync before returning.</td></tr>
+<tr><td><code>WithDurability(mode)</code></td><td><code>dot.Buffer</code></td><td>Buffer writes, write immediately, or sync before returning.</td></tr>
 <tr><td><code>WithExpiration(time)</code></td><td>No expiration</td><td>Set a fixed deadline for Set and Update; a zero time clears it.</td></tr>
 <tr><td><code>WithShardCount(count)</code></td><td>64</td><td>Choose a new database's shard count: a power of two from 1 to 1024.</td></tr>
 <tr><td><code>WithCompactionThreshold(ratio, bytes)</code></td><td>0.33, 1 MiB</td><td>Adjust background cleanup thresholds per shard.</td></tr>
@@ -111,7 +111,7 @@ updates, and <a href="metrics.html">metrics</a> for the embedded dashboard.</p>
       <p class="nav-label">On this page</p>
       <nav aria-label="On this page">
         <a href="#open-a-database">Open a database</a>
-        <a href="#configure-writes">Configure writes</a>
+        <a href="#configure-writes">Configure the database</a>
       </nav>
     </aside>
   </div>
