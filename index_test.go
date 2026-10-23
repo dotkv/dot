@@ -512,6 +512,56 @@ func TestDBExpirationLogAndIndexBehavior(t *testing.T) {
 	}
 }
 
+func TestDBExpirationMapReclamation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(*DB, string) error
+	}{
+		{"delete", func(db *DB, key string) error { return db.Delete(key) }},
+		{"clear-expiration", func(db *DB, key string) error { return db.Set(key, uint64(1)) }},
+		{"prune", func(db *DB, key string) error {
+			if err := db.Set(key, uint64(1), WithExpiration(time.Now().Add(-time.Hour))); err != nil {
+				return err
+			}
+			db.shards[0].index.prune()
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newInternalDB(t, WithShardCount(1))
+			stopTestMaintenance(db)
+			future := WithExpiration(time.Now().Add(time.Hour))
+			for _, key := range []string{"first", "last"} {
+				if err := db.Set(key, uint64(1), future); err != nil {
+					t.Fatal(err)
+				}
+			}
+			idx := db.shards[0].index
+			if err := tc.remove(db, "first"); err != nil {
+				t.Fatal(err)
+			}
+			if len(idx.expirations) != 1 {
+				t.Fatalf("remaining expirations: got %d, want 1", len(idx.expirations))
+			}
+			if err := tc.remove(db, "last"); err != nil {
+				t.Fatal(err)
+			}
+			if idx.expirations != nil {
+				t.Fatal("empty expiration map retains its backing storage")
+			}
+			if err := db.Set("last", uint64(2), future); err != nil {
+				t.Fatal(err)
+			}
+			if len(idx.expirations) != 1 {
+				t.Fatal("expiration tracking did not restart after reclamation")
+			}
+			if got, err := db.Get[uint64]("last"); err != nil || got != 2 {
+				t.Fatalf("get after reclamation: got %d, error %v; want 2", got, err)
+			}
+		})
+	}
+}
+
 func TestDBExpirationPruneOnGrow(t *testing.T) {
 	// Verify that Get on an expired key skips log reads via the sidecar, even
 	// when the underlying log file is closed.

@@ -47,6 +47,24 @@ func TestDBMutationAllocations(t *testing.T) {
 	}
 }
 
+func TestDBTTLReplacementAllocations(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1), WithTTL(time.Hour))
+	key := []byte("key")
+	var value uint64
+	if err := db.Set(key, value); err != nil {
+		t.Fatal(err)
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		value++
+		if err := db.Set(key, value); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("replacing the only expiring key: got %g allocations, want 0", allocations)
+	}
+}
+
 func TestIndexFindPayloadCollisionAllocations(t *testing.T) {
 	for _, size := range []int{128, 2 * logWriteBufferSize} {
 		for _, hit := range []bool{false, true} {

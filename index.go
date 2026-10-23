@@ -107,7 +107,7 @@ func (idx *Index) setExpiration(addr uint64, at int64, hash uint64, recordBytes 
 func (idx *Index) deleteExpiration(addr uint64) {
 	delete(idx.expirations, addr)
 	if len(idx.expirations) == 0 {
-		clear(idx.expirations)
+		idx.expirations = nil
 	}
 }
 
@@ -139,7 +139,7 @@ func (idx *Index) prune() {
 		}
 	}
 	if len(idx.expirations) == 0 {
-		clear(idx.expirations)
+		idx.expirations = nil
 	}
 }
 
@@ -524,7 +524,12 @@ func (idx *Index) commit(change indexChange) {
 			idx.segmentRefCounts[addressSegment(change.slot)]++
 		}
 		if change.hasPrevExp {
-			idx.deleteExpiration(change.prevAddr)
+			if change.expiration != 0 {
+				// Reuse the map when replacing its last expiring record.
+				delete(idx.expirations, change.prevAddr)
+			} else {
+				idx.deleteExpiration(change.prevAddr)
+			}
 		}
 		idx.slots[change.pos] = change.slot
 		if change.expiration != 0 {
