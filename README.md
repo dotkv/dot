@@ -48,14 +48,18 @@ func main() {
 
 Keys accept `string` or `[]byte`. Values support `[]byte`, `string`, `bool`,
 `int`, `int8`, `int16`, `int32`, `int64`, `uint`, `uint8`, `uint16`, `uint32`,
-`uint64`, `float32`, and `float64`. Reads require the stored type. Check missing or
-expired keys with `err == dot.ErrNotFound`; use `errors.Is(err, dot.ErrTypeMismatch)`
-for type mismatches.
+`uint64`, `float32`, `float64`, and `time.Duration`. Reads require the stored type.
+Check missing or expired keys with `err == dot.ErrNotFound`; use
+`errors.Is(err, dot.ErrTypeMismatch)` for type mismatches.
 
 Fixed-width numbers use their natural byte widths. `int` and `uint` always use
 eight bytes on disk and retain distinct types from `int64` and `uint64`. Reading
 an `int` or `uint` that cannot fit on a 32-bit host returns an error wrapping
 `dot.ErrValueOverflow`.
+
+`time.Duration` stores signed nanoseconds in eight little-endian bytes and retains
+its own type. Store with `db.Set("timeout", 5*time.Second)` and read with
+`db.Get[time.Duration]("timeout")`.
 
 ## Update atomically
 

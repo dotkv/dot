@@ -112,6 +112,7 @@ func TestLogTypedRecordTags(t *testing.T) {
 		{typeFloat32, 0x0f, make([]byte, 4)},
 		{typeInt, 0x10, make([]byte, 8)},
 		{typeUint, 0x11, make([]byte, 8)},
+		{typeDuration, 0x12, make([]byte, 8)},
 	} {
 		log, _ := openRecoveryLog(t, t.TempDir())
 		if _, _, err := log.write(tc.ty, nil, tc.value, 0); err != nil {

@@ -5,21 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 )
 
 // Value lists the types supported by Get, Set, and Update. Records
 // retain their type: Get and Update require the stored type, while Set may
 // replace it. Fixed-width integers use one, two, four, or eight little-endian
 // bytes; int and uint always use eight bytes on disk. Float32 and float64 use
-// their IEEE 754 bits in the same byte order. Boolean values are encoded
-// entirely in the record's type tag. Strings are stored as their bytes under a
-// distinct tag: a string value is not readable as []byte and vice versa.
+// their IEEE 754 bits in the same byte order. time.Duration uses eight bytes
+// of signed nanoseconds under its own tag, distinct from int64. Boolean values
+// are encoded entirely in the record's type tag. Strings are stored as bytes
+// under a distinct tag: a string value is not readable as []byte and vice versa.
 // Reading an int or uint that does not fit the host type returns ErrValueOverflow.
 type Value interface {
 	[]byte | string | bool |
 		int | int8 | int16 | int32 | int64 |
 		uint | uint8 | uint16 | uint32 | uint64 |
-		float32 | float64
+		float32 | float64 | time.Duration
 }
 
 // ErrInvalidValue indicates a malformed record type or value encoding.
@@ -54,6 +56,7 @@ const (
 	typeFloat32   recordType = 0x0f
 	typeInt       recordType = 0x10
 	typeUint      recordType = 0x11
+	typeDuration  recordType = 0x12
 )
 
 func (ty recordType) String() string {
@@ -86,6 +89,8 @@ func (ty recordType) String() string {
 		return "float32"
 	case typeFloat64:
 		return "float64"
+	case typeDuration:
+		return "time.Duration"
 	case typeBoolFalse, typeBoolTrue:
 		return "bool"
 	case typeDelete:
@@ -108,7 +113,7 @@ func (ty recordType) validate(size uint64, expiration int64) error {
 		want = 2
 	case typeInt32, typeUint32, typeFloat32:
 		want = 4
-	case typeInt, typeUint, typeInt64, typeUint64, typeFloat64:
+	case typeInt, typeUint, typeInt64, typeUint64, typeFloat64, typeDuration:
 		want = 8
 	case typeBoolFalse, typeBoolTrue, typeDelete:
 	default:
@@ -155,6 +160,8 @@ func checkType[T Value](stored recordType) error {
 		requested = typeFloat32
 	case float64:
 		requested = typeFloat64
+	case time.Duration:
+		requested = typeDuration
 	case bool:
 		requested = typeBoolFalse
 	}
@@ -219,6 +226,9 @@ func encodeValue[T Value](value T, buf *[8]byte) (recordType, []byte, error) {
 	case float64:
 		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
 		return typeFloat64, buf[:], nil
+	case time.Duration:
+		binary.LittleEndian.PutUint64(buf[:], uint64(v))
+		return typeDuration, buf[:], nil
 	case bool:
 		if v {
 			return typeBoolTrue, nil, nil
@@ -284,6 +294,8 @@ func decodeScalar[T Value](raw scalarValue) (T, error) {
 		*out = math.Float32frombits(uint32(raw.bits))
 	case *float64:
 		*out = math.Float64frombits(raw.bits)
+	case *time.Duration:
+		*out = time.Duration(raw.bits)
 	case *bool:
 		*out = raw.ty == typeBoolTrue
 	default:

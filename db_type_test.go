@@ -51,6 +51,7 @@ func typedCases() []typedRecordCase {
 		typedCase("true", "bool", typeBoolTrue, 0, true),
 		typedCase("string", "string", typeString, 0, ""),
 		typedCase("int", "int", typeInt, 8, int(0)),
+		typedCase("duration", "time.Duration", typeDuration, 8, time.Duration(0)),
 		typedCase("int8", "int8", typeInt8, 1, int8(0)),
 		typedCase("int16", "int16", typeInt16, 2, int16(0)),
 		typedCase("int32", "int32", typeInt32, 4, int32(0)),
@@ -114,6 +115,7 @@ func TestDBTypeChecks(t *testing.T) {
 			checkTypeAccess[uint64](t, db, key, tc.logical, "uint64")
 			checkTypeAccess[float32](t, db, key, tc.logical, "float32")
 			checkTypeAccess[float64](t, db, key, tc.logical, "float64")
+			checkTypeAccess[time.Duration](t, db, key, tc.logical, "time.Duration")
 			checkTypeAccess[bool](t, db, key, tc.logical, "bool")
 			if s.log.size != size || s.log.recordCount != count || s.index.slots[pos] != slot {
 				t.Fatal("type checks or identity updates changed the stored record")
@@ -193,6 +195,10 @@ func TestDBTypedCompactionAndRecovery(t *testing.T) {
 		typedCase("max-uint32", "uint32", typeUint32, 4, uint32(math.MaxUint32)),
 		typedCase("nan32", "float32", typeFloat32, 4, math.Float32frombits(0x7fc00042)),
 		typedCase("negative-zero32", "float32", typeFloat32, 4, math.Float32frombits(1<<31)),
+		typedCase("positive-duration", "time.Duration", typeDuration, 8, time.Hour+time.Nanosecond),
+		typedCase("negative-duration", "time.Duration", typeDuration, 8, -time.Hour-time.Nanosecond),
+		typedCase("min-duration", "time.Duration", typeDuration, 8, time.Duration(math.MinInt64)),
+		typedCase("max-duration", "time.Duration", typeDuration, 8, time.Duration(math.MaxInt64)),
 	)
 	keys := keysForShard(db, s, "typed", len(cases))
 	expiration := time.Now().Add(time.Hour)

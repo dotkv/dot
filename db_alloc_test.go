@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // Race instrumentation adds allocations, so measure only ordinary builds.
@@ -140,6 +141,7 @@ func TestDBGetScalarAllocations(t *testing.T) {
 			checkScalarAllocations(t, db, key, uint64(42))
 			checkScalarAllocations(t, db, key, float32(1.5))
 			checkScalarAllocations(t, db, key, float64(1.5))
+			checkScalarAllocations(t, db, key, time.Second)
 			checkScalarAllocations(t, db, key, true)
 		})
 	}
@@ -206,6 +208,7 @@ func TestDBGetMissingAllocations(t *testing.T) {
 	checkGetMissingAllocations[uint64](t, db, key)
 	checkGetMissingAllocations[float32](t, db, key)
 	checkGetMissingAllocations[float64](t, db, key)
+	checkGetMissingAllocations[time.Duration](t, db, key)
 	checkGetMissingAllocations[bool](t, db, key)
 }
 
@@ -284,13 +287,16 @@ func TestDBSetScalarAllocations(t *testing.T) {
 	t.Run("float64", func(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, -1.5, 1.5)
 	})
+	t.Run("duration", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, -time.Second, time.Second)
+	})
 	t.Run("bool", func(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, false, true)
 	})
 }
 
 func checkScalarUpdateAllocations[T interface {
-	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64
+	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64 | time.Duration
 }](t *testing.T, db *DB, initial T) {
 	t.Helper()
 	key := []byte("counter")
@@ -331,6 +337,7 @@ func TestDBUpdateScalarAllocations(t *testing.T) {
 	checkScalarUpdateAllocations(t, db, uint64(0))
 	checkScalarUpdateAllocations(t, db, float32(1.5))
 	checkScalarUpdateAllocations(t, db, float64(1.5))
+	checkScalarUpdateAllocations(t, db, time.Second)
 }
 
 func TestOperationMetricsAllocations(t *testing.T) {

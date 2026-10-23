@@ -46,7 +46,7 @@
 <code>string</code>, <code>bool</code>, <code>int</code>, <code>int8</code>,
 <code>int16</code>, <code>int32</code>, <code>int64</code>, <code>uint</code>,
 <code>uint8</code>, <code>uint16</code>, <code>uint32</code>, <code>uint64</code>,
-<code>float32</code>, and <code>float64</code>.</p>
+<code>float32</code>, <code>float64</code>, and <code>time.Duration</code>.</p>
 
 <pre><code class="language-go">if err := db.Set(&quot;counter&quot;, uint64(42)); err != nil {
     return err
@@ -66,6 +66,10 @@ floating-point values preserve their IEEE 754 bits. <code>int</code> and
 host's <code>int</code> or <code>uint</code> returns an error wrapping
 <code>ErrValueOverflow</code>. For example, <code>db.Set("count", 42)</code> stores
 an <code>int</code> that is read with <code>db.Get[int]("count")</code>.</p>
+
+<p><code>time.Duration</code> stores signed nanoseconds in eight little-endian bytes
+and retains its own type. Store with <code>db.Set("timeout", 5*time.Second)</code>
+and read with <code>db.Get[time.Duration]("timeout")</code>.</p>
 
 <h2 id="delete-and-handle-errors">Delete and handle errors</h2>
 

@@ -74,7 +74,7 @@ func TestDBUpdateScalars(t *testing.T) {
 }
 
 func checkSmallScalarUpdate[T interface {
-	int | int8 | int16 | int32 | uint | uint8 | uint16 | uint32 | float32
+	int | int8 | int16 | int32 | uint | uint8 | uint16 | uint32 | float32 | time.Duration
 }](t *testing.T, db *DB, initial, replacement T, payloadSize int) {
 	t.Helper()
 	key := []byte(fmt.Sprintf("%T", initial))
@@ -117,6 +117,7 @@ func TestDBUpdateSmallScalars(t *testing.T) {
 			checkSmallScalarUpdate(t, db, uint16(42), math.MaxUint16, 2)
 			checkSmallScalarUpdate(t, db, uint32(42), math.MaxUint32, 4)
 			checkSmallScalarUpdate(t, db, float32(1.5), 3, 4)
+			checkSmallScalarUpdate(t, db, -time.Second, time.Hour+time.Nanosecond, 8)
 		})
 	}
 }

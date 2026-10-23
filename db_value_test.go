@@ -151,6 +151,24 @@ func checkNativeIntegerRange[T interface{ int | uint }](t *testing.T, db *DB, ty
 	}
 }
 
+func TestDBDurationEncodings(t *testing.T) {
+	for _, durability := range []Durability{Write, Buffer} {
+		for _, keySize := range []int{3, 1100} {
+			t.Run(fmt.Sprintf("durability=%d/key=%d", durability, keySize), func(t *testing.T) {
+				db := newInternalDB(t, WithDurability(durability))
+				stopTestMaintenance(db)
+				key := bytes.Repeat([]byte{'k'}, keySize)
+				for _, value := range []time.Duration{0, time.Nanosecond, -time.Nanosecond, time.Hour + time.Nanosecond, math.MinInt64, math.MaxInt64} {
+					var encoded [8]byte
+					binary.LittleEndian.PutUint64(encoded[:], uint64(value))
+					checkScalarSet(t, db, key, value, encoded[:])
+					checkScalarGet(t, db, key, value, nil)
+				}
+			})
+		}
+	}
+}
+
 func TestDBNativeIntegerRange(t *testing.T) {
 	db := newInternalDB(t)
 	stopTestMaintenance(db)
@@ -223,6 +241,7 @@ func TestDBSetScalarEncodings(t *testing.T) {
 	for _, err := range []error{
 		db.Set(key, int64(42)), db.Set(key, uint64(42)),
 		db.Set(key, 1.5), db.Set(key, true),
+		db.Set(key, time.Second),
 	} {
 		if !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("Set after Close: got %v, want os.ErrClosed", err)
@@ -244,6 +263,7 @@ func checkGetMissing(t *testing.T, db *DB, key []byte) {
 	checkScalarGet(t, db, key, uint64(0), ErrNotFound)
 	checkScalarGet(t, db, key, float32(0), ErrNotFound)
 	checkScalarGet(t, db, key, float64(0), ErrNotFound)
+	checkScalarGet(t, db, key, time.Duration(0), ErrNotFound)
 	checkScalarGet(t, db, key, false, ErrNotFound)
 	if got, err := db.Get[[]byte](key); err != ErrNotFound || got != nil {
 		t.Fatalf("Get[[]byte]: got %v, error %v; want nil and the direct ErrNotFound sentinel", got, err)
