@@ -109,8 +109,9 @@ type wireSnapshot struct {
 	EntryCount     uint64 `json:"entry_count"`
 	LatencyEnabled bool   `json:"latency_enabled"`
 	Operations     struct {
-		Get wireOperation `json:"get"`
-		Set wireOperation `json:"set"`
+		Get  wireOperation `json:"get"`
+		Set  wireOperation `json:"set"`
+		Scan wireOperation `json:"scan"`
 	} `json:"operations"`
 }
 
@@ -157,15 +158,23 @@ func TestMetricsWebSocket(t *testing.T) {
 				if err := db.Set("hello", "world"); err != nil {
 					t.Fatal(err)
 				}
+				for _, err := range db.Scan() {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				updateCtx, stop := context.WithTimeout(ctx, 500*time.Millisecond)
 				defer stop()
-				for shared.EntryCount != 1 || shared.Operations.Set.Count != 1 {
+				for shared.EntryCount != 1 || shared.Operations.Set.Count != 1 || shared.Operations.Scan.Count != 1 {
 					if err := wsjson.Read(updateCtx, c, &shared); err != nil {
 						t.Fatalf("configured push did not deliver changed metrics: %v", err)
 					}
 				}
 				if shared.Operations.Set.MeanNS == nil || shared.Operations.Set.P99NS == nil || shared.Operations.Set.LatencySamples != 1 {
 					t.Fatalf("missing operation metrics in WebSocket update: %+v", shared.Operations.Set)
+				}
+				if shared.Operations.Scan.MeanNS == nil || shared.Operations.Scan.P99NS == nil || shared.Operations.Scan.LatencySamples != 1 {
+					t.Fatalf("missing scan metrics in WebSocket update: %+v", shared.Operations.Scan)
 				}
 			}
 			if err := db.Close(); err != nil {

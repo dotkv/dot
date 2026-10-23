@@ -13,8 +13,8 @@
     entry_count: { label: "Entries", color: "--entries", unit: "count" },
     index_mapped_bytes: { label: "Index mmap", color: "--update", unit: "bytes" },
   };
-  const operations = ["get", "set", "delete", "update"];
-  const operationColors = { get: "--accent", set: "--obsolete", delete: "--entries", update: "--update" };
+  const operations = ["get", "set", "delete", "update", "scan"];
+  const operationColors = { get: "--accent", set: "--obsolete", delete: "--entries", update: "--update", scan: "--scan" };
   const tooltip = byID("tooltip");
   for (const op of operations) {
     const name = op[0].toUpperCase() + op.slice(1);

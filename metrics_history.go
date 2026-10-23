@@ -21,13 +21,15 @@ import (
 )
 
 const (
-	metricsHistoryName          = "METRICS"
-	metricsHistoryMagic         = "DOTMETRX"
-	metricsHistoryFormatVersion = 1
-	metricsHistoryTempName      = "METRICS.tmp"
-	metricsHistoryHeaderSize    = 64
-	metricsHistoryRecordSize    = 256
-	metricsHistoryBuckets       = 500 // At most 17,000 samples for all sixteen series.
+	metricsHistoryName           = "METRICS"
+	metricsHistoryMagic          = "DOTMETRX"
+	metricsHistoryFormatVersion  = 2
+	metricsHistoryTempName       = "METRICS.tmp"
+	metricsHistoryHeaderSize     = 64
+	metricsHistoryRecordSize     = 64 + operationCount*40 + 8
+	metricsHistoryChecksumOffset = metricsHistoryRecordSize - 4
+	metricsHistorySeries         = 4 + operationCount*3
+	metricsHistoryBuckets        = 500 // At most 20,000 samples for all nineteen series.
 )
 
 // Each wall-clock second owns one slot. Timestamp and checksum validation let
@@ -105,7 +107,7 @@ func resizeMetricsHistory(path string, source *os.File, oldSlots, slots, created
 		for i := int64(0); i < n; i++ {
 			record := data[i*metricsHistoryRecordSize : (i+1)*metricsHistoryRecordSize]
 			at := int64(binary.LittleEndian.Uint64(record))
-			if at/1000 != second+i || at < cutoff || at > now.UnixMilli() || binary.LittleEndian.Uint32(record[252:]) != crc32.ChecksumIEEE(record[:252]) {
+			if at/1000 != second+i || at < cutoff || at > now.UnixMilli() || binary.LittleEndian.Uint32(record[metricsHistoryChecksumOffset:]) != crc32.ChecksumIEEE(record[:metricsHistoryChecksumOffset]) {
 				continue
 			}
 			offset := metricsHistoryHeaderSize + (at/1000%slots)*metricsHistoryRecordSize
@@ -287,7 +289,7 @@ func encodeMetricsHistory(s metricsSnapshot) [metricsHistoryRecordSize]byte {
 			record[60] |= 1 << i
 		}
 	}
-	for i, op := range []operationMetric{s.Operations.Get, s.Operations.Set, s.Operations.Delete, s.Operations.Update} {
+	for i, op := range []operationMetric{s.Operations.Get, s.Operations.Set, s.Operations.Delete, s.Operations.Update, s.Operations.Scan} {
 		mean, p99 := math.NaN(), math.NaN()
 		if op.MeanNS != nil {
 			mean = *op.MeanNS
@@ -299,13 +301,13 @@ func encodeMetricsHistory(s metricsSnapshot) [metricsHistoryRecordSize]byte {
 			binary.LittleEndian.PutUint64(record[64+i*40+j*8:], field)
 		}
 	}
-	binary.LittleEndian.PutUint32(record[252:], crc32.ChecksumIEEE(record[:252]))
+	binary.LittleEndian.PutUint32(record[metricsHistoryChecksumOffset:], crc32.ChecksumIEEE(record[:metricsHistoryChecksumOffset]))
 	return record
 }
 
 func decodeMetricsHistory(record []byte) (metricsSnapshot, bool) {
 	var s metricsSnapshot
-	if binary.LittleEndian.Uint32(record[252:]) != crc32.ChecksumIEEE(record[:252]) {
+	if binary.LittleEndian.Uint32(record[metricsHistoryChecksumOffset:]) != crc32.ChecksumIEEE(record[:metricsHistoryChecksumOffset]) {
 		return s, false
 	}
 	s.Time = int64(binary.LittleEndian.Uint64(record))
@@ -321,7 +323,7 @@ func decodeMetricsHistory(record []byte) (metricsSnapshot, bool) {
 	if s.Time <= 0 || s.IntervalMS != 1000 || !validNumber(s.OperationWindowMS) {
 		return s, false
 	}
-	for i, op := range []*operationMetric{&s.Operations.Get, &s.Operations.Set, &s.Operations.Delete, &s.Operations.Update} {
+	for i, op := range []*operationMetric{&s.Operations.Get, &s.Operations.Set, &s.Operations.Delete, &s.Operations.Update, &s.Operations.Scan} {
 		data := record[64+i*40:]
 		op.Count = binary.LittleEndian.Uint64(data)
 		op.OpsPerSecond = math.Float64frombits(binary.LittleEndian.Uint64(data[8:]))
@@ -366,7 +368,7 @@ type metricsHistoryResponse struct {
 	Samples      []metricsSnapshot `json:"samples"`
 }
 
-// historyRecordValue follows the sixteen series in the UI. Compare encoded
+// historyRecordValue follows the series in the UI. Compare encoded
 // values so a week-wide query only allocates latency pointers for retained rows.
 func historyRecordValue(record []byte, key int) float64 {
 	if key < 4 {
@@ -380,7 +382,14 @@ func historyRecordValue(record []byte, key int) float64 {
 	return math.Float64frombits(binary.LittleEndian.Uint64(record[offset:]))
 }
 
-var metricsHistoryKeys = []string{"disk_bytes", "obsolete_bytes", "entry_count", "index_mapped_bytes", "get_ops", "get_mean_ns", "get_p99_ns", "set_ops", "set_mean_ns", "set_p99_ns", "delete_ops", "delete_mean_ns", "delete_p99_ns", "update_ops", "update_mean_ns", "update_p99_ns"}
+var metricsHistoryKeys = []string{
+	"disk_bytes", "obsolete_bytes", "entry_count", "index_mapped_bytes",
+	"get_ops", "get_mean_ns", "get_p99_ns",
+	"set_ops", "set_mean_ns", "set_p99_ns",
+	"delete_ops", "delete_mean_ns", "delete_p99_ns",
+	"update_ops", "update_mean_ns", "update_p99_ns",
+	"scan_ops", "scan_mean_ns", "scan_p99_ns",
+}
 
 func (h *metricsHandler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	if h.db.metricsContext.Err() != nil {
@@ -430,8 +439,8 @@ func (h *metricsHistory) query(ctx context.Context, start, end int64, keys []int
 		gaps   uint64
 	}
 	var bucket []reading
-	var minima, maxima [16]int
-	var lowValues, highValues [16]float64
+	var minima, maxima [metricsHistorySeries]int
+	var lowValues, highValues [metricsHistorySeries]float64
 	var previousTime int64
 	var gaps, previousGaps uint64
 	bucketID := int64(-1)
@@ -478,7 +487,7 @@ func (h *metricsHistory) query(ctx context.Context, start, end int64, keys []int
 		for i := int64(0); i < n; i++ {
 			record := data[i*metricsHistoryRecordSize : (i+1)*metricsHistoryRecordSize]
 			at := int64(binary.LittleEndian.Uint64(record))
-			if at/1000 != second+i || at < start || at > end || binary.LittleEndian.Uint32(record[252:]) != crc32.ChecksumIEEE(record[:252]) {
+			if at/1000 != second+i || at < start || at > end || binary.LittleEndian.Uint32(record[metricsHistoryChecksumOffset:]) != crc32.ChecksumIEEE(record[:metricsHistoryChecksumOffset]) {
 				continue
 			}
 			if previousTime > 0 && at-previousTime > 3000 {

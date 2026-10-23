@@ -141,6 +141,8 @@ func TestDBScanErrors(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				m := db.acquireOperationMetrics(true)
+				defer db.releaseOperationMetrics(m, true)
 				entries, failures := 0, 0
 				for entry, err := range db.Scan() {
 					if err != nil {
@@ -157,6 +159,10 @@ func TestDBScanErrors(t *testing.T) {
 				}
 				if entries != 1 || failures != 1 {
 					t.Fatalf("scan yielded %d entries and %d errors, want one of each", entries, failures)
+				}
+				metrics, _ := m.snapshot(time.Now(), true)
+				if metrics.Scan.Count != 1 || metrics.Scan.LatencySamples != 1 || metrics.Scan.MeanNS == nil || metrics.Scan.P99NS == nil {
+					t.Fatalf("failed scan was not recorded: %+v", metrics.Scan)
 				}
 				// A failed scan must also release its read lock.
 				if !db.shards[1].lock.TryLock() {

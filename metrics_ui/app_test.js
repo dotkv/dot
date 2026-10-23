@@ -98,7 +98,7 @@ function snapshot(time = Date.now()) {
     time, interval_ms: 1000, disk_bytes: 4096, obsolete_bytes: 512, entry_count: 10,
     index_mapped_bytes: 8 << 20,
     ready: true, disk_stale: false, latency_enabled: true, operation_window_ms: 10_000,
-    operations: Object.fromEntries(["get", "set", "delete", "update"].map((op) => [op, { ...reading }])),
+    operations: Object.fromEntries(["get", "set", "delete", "update", "scan"].map((op) => [op, { ...reading }])),
   };
 }
 
@@ -110,6 +110,7 @@ test("operation values, prefix-safe WebSocket, and removal of graph footer notes
   Object.assign(sample.operations.set, { ops_per_second: 4400, mean_ns: 2000 });
   Object.assign(sample.operations.delete, { ops_per_second: 1000, mean_ns: 1_000_000 });
   Object.assign(sample.operations.update, { ops_per_second: 1_000_000, mean_ns: 0 });
+  Object.assign(sample.operations.scan, { ops_per_second: 0.5, mean_ns: 2_500_000, p99_ns: 4_194_303 });
   ui.receive(sample);
   ui.draw();
   assert.equal(ui.elements.get("status").textContent, "Connected");
@@ -117,11 +118,14 @@ test("operation values, prefix-safe WebSocket, and removal of graph footer notes
   assert.equal(ui.elements.get("value-set_ops").textContent, "4.4K");
   assert.equal(ui.elements.get("value-delete_ops").textContent, "1.0K");
   assert.equal(ui.elements.get("value-update_ops").textContent, "1.0M");
+  assert.equal(ui.elements.get("value-scan_ops").textContent, "0.50");
   assert.equal(ui.elements.get("value-get_mean_ns").textContent, "1.50 µs");
   assert.equal(ui.elements.get("value-set_mean_ns").textContent, "2.00 µs");
   assert.equal(ui.elements.get("value-delete_mean_ns").textContent, "1.00 ms");
   assert.equal(ui.elements.get("value-update_mean_ns").textContent, "0.00 ns");
   assert.equal(ui.elements.get("value-get_p99_ns").textContent, "≈ 2.05 µs");
+  assert.equal(ui.elements.get("value-scan_mean_ns").textContent, "2.50 ms");
+  assert.equal(ui.elements.get("value-scan_p99_ns").textContent, "≈ 4.19 ms");
   assert(!ui.html.includes("history-footer"));
   assert(!ui.html.includes('id="cadence"'));
   assert(ui.html.indexOf('id="notice"') < ui.html.indexOf('class="history"'));
@@ -166,6 +170,9 @@ test("empty latency is unavailable, produces a graph gap, and works before stora
   assert.equal(ui.elements.get("value-get_mean_ns").textContent, "—");
   assert.equal(ui.elements.get("value-get_p99_ns").textContent, "—");
   assert.equal(ui.elements.get("value-get_ops").textContent, "0.00");
+  assert.equal(ui.elements.get("value-scan_mean_ns").textContent, "—");
+  assert.equal(ui.elements.get("value-scan_p99_ns").textContent, "—");
+  assert.equal(ui.elements.get("value-scan_ops").textContent, "0.00");
   ui.draw();
   assert.match(ui.elements.get("chart").attributes["aria-label"], /On-disk size: —/);
   ui.button("get_mean_ns").click();
@@ -186,6 +193,29 @@ test("counts-only collection shows latency as unavailable", () => {
   ui.receive(counts);
   ui.draw();
   assert.equal(ui.elements.get("value-update_mean_ns").textContent, "—");
+  assert.equal(ui.elements.get("value-scan_mean_ns").textContent, "—");
+  assert.equal(ui.elements.get("value-scan_p99_ns").textContent, "—");
+});
+
+test("Scan throughput and latency graph alongside operations with matching units", () => {
+  const ui = dashboard();
+  ui.receive(snapshot());
+  ui.button("scan_ops").click();
+  ui.button("get_ops").click();
+  ui.draw();
+  assert.equal(ui.button("scan_ops").attributes["aria-pressed"], "true");
+  assert.equal(ui.button("get_ops").attributes["aria-pressed"], "true");
+  assert.match(ui.elements.get("chart").attributes["aria-label"], /Scan ops\/sec: 2\.50/);
+  ui.button("scan_mean_ns").click();
+  ui.button("scan_p99_ns").click();
+  ui.draw();
+  assert.equal(ui.button("scan_ops").attributes["aria-pressed"], "false");
+  assert.equal(ui.button("get_ops").attributes["aria-pressed"], "false");
+  assert.match(ui.elements.get("chart").attributes["aria-label"], /Scan mean latency: 1\.50 µs/);
+  ui.elements.get("chart").listeners.pointermove({ clientX: 980, clientY: 100 });
+  assert.equal(ui.elements.get("tooltip-value-scan_mean_ns").textContent, "1.50 µs (1,500.00 ns)");
+  assert.equal(ui.elements.get("tooltip-value-scan_p99_ns").textContent, "≈ 2.05 µs (2,047.00 ns)");
+  assert.equal(ui.elements.get("point-scan_mean_ns").hidden, false);
 });
 
 test("index mmap shares the byte scale and exposes its exact mapping size", () => {

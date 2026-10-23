@@ -21,11 +21,15 @@ import (
 
 func historySample(at time.Time, value uint64) metricsSnapshot {
 	mean, p99 := 1234.5, 2047.0
+	scanMean, scanP99 := 123456.0, 131071.0
 	return metricsSnapshot{
 		Time: at.UnixMilli(), IntervalMS: 1000, DiskBytes: value, ObsoleteBytes: 12,
 		EntryCount: 34, IndexMappedBytes: 56, Ready: true, StaleShards: 2,
 		DiskStale: true, LatencyEnabled: true, OperationWindowMS: 10_000,
-		Operations: operationMetrics{Get: operationMetric{Count: 100, OpsPerSecond: 10, LatencySamples: 100, MeanNS: &mean, P99NS: &p99}},
+		Operations: operationMetrics{
+			Get:  operationMetric{Count: 100, OpsPerSecond: 10, LatencySamples: 100, MeanNS: &mean, P99NS: &p99},
+			Scan: operationMetric{Count: 3, OpsPerSecond: 0.3, LatencySamples: 3, MeanNS: &scanMean, P99NS: &scanP99},
+		},
 	}
 }
 
@@ -53,6 +57,11 @@ func TestMetricsHistoryEncoding(t *testing.T) {
 	record[24] ^= 1
 	if _, ok := decodeMetricsHistory(record[:]); ok {
 		t.Fatal("corrupt record passed checksum validation")
+	}
+	record = encodeMetricsHistory(want)
+	record[64+operationScan*40+32] ^= 1
+	if _, ok := decodeMetricsHistory(record[:]); ok {
+		t.Fatal("corrupt scan latency passed checksum validation")
 	}
 }
 
@@ -172,7 +181,7 @@ func TestMetricsHistoryRejectsInvalidHeaderFields(t *testing.T) {
 		offset int
 		value  byte
 	}{
-		{"version", 8, 2},
+		{"version", 8, 1},
 		{"reserved-before-time", 12, 1},
 		{"reserved-after-slots", 32, 1},
 	} {
@@ -220,7 +229,7 @@ func TestMetricsHistoryResize(t *testing.T) {
 		t.Fatalf("growth lost readings: samples=%+v err=%v", got.Samples, err)
 	}
 	for i := range samples {
-		if got.Samples[i].Time != samples[i].Time || got.Samples[i].DiskBytes != samples[i].DiskBytes {
+		if got.Samples[i].Time != samples[i].Time || got.Samples[i].DiskBytes != samples[i].DiskBytes || !reflect.DeepEqual(got.Samples[i].Operations, samples[i].Operations) {
 			t.Fatalf("growth changed a reading: %+v", got.Samples)
 		}
 	}
@@ -354,6 +363,55 @@ func TestMetricsHistoryExtremaAndDetail(t *testing.T) {
 	}
 }
 
+func TestMetricsHistoryScanExtrema(t *testing.T) {
+	now := time.Now().Truncate(time.Second).Add(-time.Second)
+	start := now.Add(-time.Hour)
+	h := testHistory(t, start)
+	extrema := map[int]bool{13: false, 14: false, 19: false, 20: false, 26: false, 27: false}
+	for i := range 60 {
+		sample := historySample(start.Add(time.Duration(i)*time.Second), 100)
+		mean, p99 := 100.0, 1000.0
+		sample.Operations.Scan.OpsPerSecond = 10
+		switch i {
+		case 13:
+			sample.Operations.Scan.OpsPerSecond = 1000
+		case 14:
+			sample.Operations.Scan.OpsPerSecond = 0.01
+		case 19:
+			mean = 1_000_000
+		case 20:
+			mean = 1
+		case 26:
+			p99 = 1_000_000_000
+		case 27:
+			p99 = 2
+		}
+		sample.Operations.Scan.MeanNS, sample.Operations.Scan.P99NS = &mean, &p99
+		h.append(sample)
+	}
+	// Select every series to exercise the expanded extrema arrays as well as
+	// each Scan field's position in the encoded record.
+	keys := make([]int, len(metricsHistoryKeys))
+	for key := range keys {
+		keys[key] = key
+	}
+	got, err := h.query(context.Background(), start.UnixMilli(), now.UnixMilli(), keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range got.Samples {
+		second := int((sample.Time - start.UnixMilli()) / 1000)
+		if _, ok := extrema[second]; ok {
+			extrema[second] = true
+		}
+	}
+	for second, retained := range extrema {
+		if !retained {
+			t.Errorf("scan extremum at second %d was lost during downsampling", second)
+		}
+	}
+}
+
 func TestMetricsHistoryGapsSurviveDownsampling(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	start := now.Add(-6 * 24 * time.Hour)
@@ -424,6 +482,9 @@ func TestMetricsHistoryStreamSurvivesRefresh(t *testing.T) {
 		if sample.Time != third.Time || sample.LatencyEnabled || sample.Operations.Get.Count != third.Operations.Get.Count || sample.Operations.Get.MeanNS != nil || sample.Operations.Get.P99NS != nil || sample.Operations.Get.LatencySamples != 0 {
 			t.Fatalf("counts-only view of shared snapshot: %+v", sample)
 		}
+		if sample.Operations.Scan.Count != third.Operations.Scan.Count || sample.Operations.Scan.LatencySamples != 0 || sample.Operations.Scan.MeanNS != nil || sample.Operations.Scan.P99NS != nil {
+			t.Fatalf("counts-only view retained scan latency: %+v", sample.Operations.Scan)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("counts-only viewer did not receive the shared snapshot")
 	}
@@ -449,9 +510,14 @@ func TestMetricsHistoryLifecycleAndHTTP(t *testing.T) {
 	if err := db.Set("before-viewer", uint64(1)); err != nil {
 		t.Fatal(err)
 	}
+	for _, err := range db.Scan() {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	got, _ := db.operationMetrics.Load().snapshot(time.Now(), true)
-	if got.Set.Count != 1 || got.Set.LatencySamples != 1 {
-		t.Fatalf("unattended recording: %+v", got.Set)
+	if got.Set.Count != 1 || got.Set.LatencySamples != 1 || got.Scan.Count != 1 || got.Scan.LatencySamples != 1 {
+		t.Fatalf("unattended recording: %+v", got)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -459,7 +525,7 @@ func TestMetricsHistoryLifecycleAndHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(history.Samples) > 0 && history.Samples[len(history.Samples)-1].Operations.Set.Count == 1 {
+		if len(history.Samples) > 0 && history.Samples[len(history.Samples)-1].Operations.Set.Count == 1 && history.Samples[len(history.Samples)-1].Operations.Scan.Count == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -484,12 +550,19 @@ func TestMetricsHistoryLifecycleAndHTTP(t *testing.T) {
 	if db.operationMetrics.Load() == nil {
 		t.Fatal("disconnect stopped persistent recording")
 	}
-	url := fmt.Sprintf("/history?start=%d&end=%d&metrics=disk_bytes,get_p99_ns", time.Now().Add(-time.Minute).UnixMilli(), time.Now().UnixMilli())
+	url := fmt.Sprintf("/history?start=%d&end=%d&metrics=disk_bytes,get_p99_ns,scan_ops,scan_mean_ns,scan_p99_ns", time.Now().Add(-time.Minute).UnixMilli(), time.Now().UnixMilli())
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest("GET", url, nil))
 	var history metricsHistoryResponse
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &history) != nil {
 		t.Fatalf("history response: %d %s", response.Code, response.Body.String())
+	}
+	var recordedScan bool
+	for _, sample := range history.Samples {
+		recordedScan = recordedScan || (sample.Operations.Scan.Count == 1 && sample.Operations.Scan.MeanNS != nil && sample.Operations.Scan.P99NS != nil)
+	}
+	if !recordedScan {
+		t.Fatal("history response omitted scan metrics")
 	}
 	for _, query := range []string{"start=no&end=1&metrics=disk_bytes", "start=2&end=1&metrics=disk_bytes", "start=0&end=1&metrics=unknown"} {
 		response = httptest.NewRecorder()

@@ -54,7 +54,7 @@ function dashboard() {
   }
   const requests = [];
   let scheduled;
-  const styles = { "--muted": "gray", "--grid": "silver", "--accent": "blue", "--obsolete": "orange", "--entries": "green", "--update": "purple" };
+  const styles = { "--muted": "gray", "--grid": "silver", "--accent": "blue", "--obsolete": "orange", "--entries": "green", "--update": "purple", "--scan": "pink" };
   const environment = {
     document: {
       getElementById: (id) => { assert.ok(elements[id], `Missing HTML element: ${id}`); return elements[id]; },
@@ -83,7 +83,7 @@ function dashboard() {
     elements, labels, paths, requests,
     async completeHistory(index, values, resolution = 1000) {
       const reading = { ops_per_second: 0, latency_samples: 0, mean_ns: null, p99_ns: null };
-      const operations = Object.fromEntries(["get", "set", "delete", "update"].map((op) => [op, reading]));
+      const operations = Object.fromEntries(["get", "set", "delete", "update", "scan"].map((op) => [op, reading]));
       const samples = values.map((value) => ({ interval_ms: 1000, ready: true, disk_bytes: 4096, obsolete_bytes: 0, entry_count: 1, index_mapped_bytes: 0, operations, ...value }));
       requests[index].resolve({ ok: true, json: async () => ({ resolution_ms: resolution, samples }) });
       await new Promise(setImmediate);
@@ -91,7 +91,7 @@ function dashboard() {
     },
     receive(values = {}) {
       const reading = { ops_per_second: 0, latency_samples: 0, mean_ns: null, p99_ns: null };
-      const operations = Object.fromEntries(["get", "set", "delete", "update"].map((op) => [op, reading]));
+      const operations = Object.fromEntries(["get", "set", "delete", "update", "scan"].map((op) => [op, reading]));
       socket.emit("message", { data: JSON.stringify({ time: now, interval_ms: 1000, ready: true, disk_bytes: 123_456, obsolete_bytes: 32_000, entry_count: 299, index_mapped_bytes: 8 << 20, stale_shards: 0, operations, ...values }) });
     },
     click(key) {
@@ -447,6 +447,7 @@ test("server history bootstraps after refresh and browsing older ranges preserve
     set: { ops_per_second: 0, mean_ns: null, p99_ns: null },
     delete: { ops_per_second: 0, mean_ns: null, p99_ns: null },
     update: { ops_per_second: 0, mean_ns: null, p99_ns: null },
+    scan: { ops_per_second: 0, mean_ns: null, p99_ns: null },
   } });
   await ui.completeHistory(1, [{ time: oldest }, { time: oldest + 1000 }]);
   assert.equal(ui.elements["value-get_ops"].textContent, "123.00");
@@ -454,6 +455,27 @@ test("server history bootstraps after refresh and browsing older ranges preserve
   ui.elements.chart.emit("pointermove", { clientX: 86, clientY: 100 });
   assert.equal(ui.elements["tooltip-time"].dateTime, new Date(oldest).toISOString());
   assert.equal(ui.elements["loaded-start"].dateTime, new Date(oldest).toISOString());
+});
+
+test("Scan selections load saved throughput and latency with their own series color", async () => {
+  const ui = dashboard();
+  ui.receive({ history_start: now - 86_400_000 }); ui.flush();
+  ui.click("scan_ops");
+  assert.equal(ui.requests.at(-1).url.searchParams.get("metrics"), "scan_ops");
+  const operations = Object.fromEntries(["get", "set", "delete", "update", "scan"].map((op) =>
+    [op, { ops_per_second: 0, mean_ns: null, p99_ns: null }]));
+  operations.scan = { ops_per_second: 12.5, mean_ns: 2_500_000, p99_ns: 4_000_000 };
+  const sample = { time: now - 30_000, operations };
+  await ui.completeHistory(ui.requests.length - 1, [sample]);
+  assert.ok(ui.paths.some((point) => point.color === "pink"));
+  ui.elements.chart.emit("pointermove", pointerEvent(482));
+  assert.equal(ui.elements["tooltip-value-scan_ops"].textContent, "12.50");
+  ui.click("scan_mean_ns");
+  ui.click("scan_p99_ns");
+  assert.equal(ui.requests.at(-1).url.searchParams.get("metrics"), "scan_mean_ns,scan_p99_ns");
+  await ui.completeHistory(ui.requests.length - 1, [sample]);
+  assert.equal(ui.elements["tooltip-value-scan_mean_ns"].textContent, "2.50 ms (2,500,000.00 ns)");
+  assert.equal(ui.elements["tooltip-value-scan_p99_ns"].textContent, "≈ 4.00 ms (4,000,000.00 ns)");
 });
 
 test("refresh history loading retains the first live point when newer updates arrive", async () => {

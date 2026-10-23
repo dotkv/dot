@@ -71,7 +71,7 @@ disable latency timing:</p>
 <table class="options-table">
 <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Use</th></tr></thead>
 <tbody>
-<tr><td><code>WithMetricsHistory(duration)</code></td><td><code>0</code> (disabled)</td><td>Retain one-second snapshots in <code>METRICS</code> across restarts (about 21.1 MiB per day).</td></tr>
+<tr><td><code>WithMetricsHistory(duration)</code></td><td><code>0</code> (disabled)</td><td>Retain one-second snapshots in <code>METRICS</code> across restarts (about 22.4 MiB per day).</td></tr>
 <tr><td><code>WithMetricsInterval(interval)</code></td><td><code>time.Second</code></td><td>Set the live WebSocket snapshot interval (must be positive).</td></tr>
 <tr><td><code>WithMetricsLatency(enabled)</code></td><td><code>true</code></td><td>Record operation latency in addition to throughput counts.</td></tr>
 </tbody>
@@ -106,12 +106,18 @@ sample; they are not a point-in-time snapshot.</p>
 
 <h2 id="operation-metrics">Operation metrics</h2>
 
-<p>The table shows Get, Set, Delete, and Update throughput, mean latency, and
+<p>The table shows Get, Set, Delete, Update, and Scan throughput, mean latency, and
 approximate p99 over a trailing ten-second window. <code>Add</code> and
 <code>Sub</code> count as updates. Initial readings use a shorter
 window. All calls count, including misses and errors; latency includes lock waits,
 update callbacks, and syncs. P99 rounds up by at most 12.5% and is less useful with
 few samples. Empty windows show zero throughput and unavailable latency.</p>
+
+<p>Each execution of a <code>Scan</code> iterator counts as one operation when it
+finishes or stops, including empty scans, early breaks, and errors. Creating an
+unused iterator does not count; iterating it again counts as another scan.
+Scan latency includes the caller's loop body, which runs while the current shard's
+read lock is held. Entries yielded by scans do not count as Get operations.</p>
 
 <p>Select table values or metric buttons to graph them. Multiple series can share
 a graph when their units match; selecting a different unit replaces the selection.
@@ -133,7 +139,7 @@ crash gaps longer than three seconds break the line rather than interpolating
 across outages.</p>
 
 <p>The <code>METRICS</code> file stores one snapshot per second in a fixed-size
-ring (approximately 21.1 MiB per retained day) and is excluded from the on-disk
+ring (approximately 22.4 MiB per retained day) and is excluded from the on-disk
 database size shown in the dashboard. History writes run in the background and
 sync every minute and on <code>db.Close()</code>; torn or corrupt records are
 skipped, and history errors appear in the dashboard without affecting database

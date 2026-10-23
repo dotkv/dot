@@ -34,6 +34,7 @@ func main() {
 	for range workers - 1 {
 		go work(db)
 	}
+	go scans(db)
 	work(db)
 }
 
@@ -68,6 +69,20 @@ func gets(db *dot.DB) {
 		key := fmt.Sprintf("demo-%d", rand.IntN(1<<18))
 		_, err := db.Get[uint64](key)
 		check(err)
+	}
+}
+
+func scans(db *dot.DB) {
+	for {
+		for entry, err := range db.Scan() {
+			check(err)
+			switch v := entry.Value.(type) {
+			case uint64:
+				if v > 1<<18 {
+					panic("invalid val")
+				}
+			}
+		}
 	}
 }
 

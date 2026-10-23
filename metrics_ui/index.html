@@ -51,6 +51,12 @@
             <td><button type="button" class="operation-value" data-metric="update_mean_ns" aria-pressed="false" aria-label="Graph Update mean latency"><span id="value-update_mean_ns">—</span></button></td>
             <td><button type="button" class="operation-value" data-metric="update_p99_ns" aria-pressed="false" aria-label="Graph Update p99 latency"><span id="value-update_p99_ns">—</span></button></td>
           </tr>
+          <tr>
+            <th scope="row" title="Each iterator execution counts once; latency includes the caller's loop body"><span class="series-dot scan" aria-hidden="true"></span>Scan</th>
+            <td><button type="button" class="operation-value" data-metric="scan_ops" aria-pressed="false" aria-label="Graph Scan ops/sec"><span id="value-scan_ops">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="scan_mean_ns" aria-pressed="false" aria-label="Graph Scan mean latency"><span id="value-scan_mean_ns">—</span></button></td>
+            <td><button type="button" class="operation-value" data-metric="scan_p99_ns" aria-pressed="false" aria-label="Graph Scan p99 latency"><span id="value-scan_p99_ns">—</span></button></td>
+          </tr>
           </tbody>
         </table>
       </div>

@@ -41,7 +41,7 @@ func WithMetricsLatency(enabled bool) MetricsOption {
 // including without viewers.
 // History-enabled handlers sharing a DB must request the same retention. Changing
 // retention after reopening resizes the METRICS ring, preserving samples that fit.
-// Storage is bounded to about 21.1 MiB per retained day.
+// Storage is bounded to about 22.4 MiB per retained day.
 // Latency recording stays enabled until Close once any history handler requests
 // it. Writes are synced every minute and on Close; a crash can lose recent
 // history. History failures are shown in the dashboard and do not fail DB calls.
@@ -98,8 +98,11 @@ func renderMetricsIndex(version string) ([]byte, error) {
 // Operation rates, means, and approximate p99 latencies cover a trailing ten
 // seconds at one-second resolution (a shorter window during initial warm-up).
 // All calls count, including misses, errors, and no-ops. Timings include lock
-// waits, Update callbacks, and synchronous writes. Histograms round p99 up by
-// at most 12.5%. Operation snapshots, like shard readings, are not transactional.
+// waits, Update callbacks, and synchronous writes. Each Scan iterator execution
+// counts once, including empty scans, early exits, and errors; creating an unused
+// iterator does not count. Scan latency includes the caller's loop body.
+// Histograms round p99 up by at most 12.5%. Operation snapshots, like shard
+// readings, are not transactional.
 //
 // On-disk size scans allocated filesystem blocks under the database path,
 // including directories, metadata, and temporary files, excluding the METRICS
@@ -334,7 +337,7 @@ func (h *metricsHandler) collectHistory(s *metricsStream) {
 			lastTime = snapshot.Time
 			if !h.latency {
 				snapshot.LatencyEnabled = false
-				for _, op := range []*operationMetric{&snapshot.Operations.Get, &snapshot.Operations.Set, &snapshot.Operations.Delete, &snapshot.Operations.Update} {
+				for _, op := range []*operationMetric{&snapshot.Operations.Get, &snapshot.Operations.Set, &snapshot.Operations.Delete, &snapshot.Operations.Update, &snapshot.Operations.Scan} {
 					op.LatencySamples, op.MeanNS, op.P99NS = 0, nil, nil
 				}
 			}

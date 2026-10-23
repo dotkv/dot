@@ -179,4 +179,4 @@ same shard. All modes provide immediate read-after-write visibility across
 See [example/](example/) for a runnable workload and embedded metrics dashboard.
 By default, `db.MetricsHandler()` collects only while viewers are connected. Pass
 `dot.WithMetricsHistory(7*24*time.Hour)` to retain seven days of one-second
-snapshots across restarts (about 21.1 MiB per day).
+snapshots across restarts (about 22.4 MiB per day).

@@ -11,6 +11,7 @@
   --entries: #0d9488;
   --grid: #edf1f5;
   --update: #9333ea;
+  --scan: #e11d48;
   --connected: #16a34a;
 }
 
@@ -28,6 +29,7 @@
     --entries: #2dd4bf;
     --grid: #232c38;
     --update: #c084fc;
+    --scan: #fb7185;
     --connected: #4ade80;
   }
 }
@@ -74,6 +76,7 @@ button:focus-visible, .scrubber:focus-visible { outline: 2px solid var(--accent)
 .get { --series-color: var(--accent); }
 .set { --series-color: var(--obsolete); }
 .update { --series-color: var(--update); }
+.scan { --series-color: var(--scan); }
 .index-mmap { --series-color: var(--update); }
 .series-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--series-color); flex-shrink: 0; }
 .metric-options button[aria-pressed="false"] .series-dot { opacity: 0.4; }

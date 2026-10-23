@@ -12,6 +12,7 @@ const (
 	operationSet
 	operationDelete
 	operationUpdate
+	operationScan
 	operationCount
 
 	operationHistogramBuckets = 512
@@ -31,6 +32,7 @@ type operationMetrics struct {
 	Set    operationMetric `json:"set"`
 	Delete operationMetric `json:"delete"`
 	Update operationMetric `json:"update"`
+	Scan   operationMetric `json:"scan"`
 }
 
 type operationCounter struct {
@@ -220,7 +222,7 @@ func (m *operationRecorder) snapshot(now time.Time, latency bool) (operationMetr
 	}
 	window := max(0, now.Sub(baseline.at))
 	var result operationMetrics
-	for kind, metric := range []*operationMetric{&result.Get, &result.Set, &result.Delete, &result.Update} {
+	for kind, metric := range []*operationMetric{&result.Get, &result.Set, &result.Delete, &result.Update, &result.Scan} {
 		total, before := &current.totals[kind], &baseline.totals[kind]
 		metric.Count = total.count - before.count
 		if window > 0 {

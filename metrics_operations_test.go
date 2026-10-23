@@ -166,6 +166,114 @@ func TestOperationLatencyIncludesCallback(t *testing.T) {
 	}
 }
 
+func TestOperationScanMetrics(t *testing.T) {
+	for _, latency := range []bool{false, true} {
+		t.Run(fmt.Sprintf("latency=%t", latency), func(t *testing.T) {
+			db := newInternalDB(t, WithShardCount(4))
+			keys := make([][]byte, len(db.shards))
+			for i := range db.shards {
+				keys[i] = keysForShard(db, &db.shards[i], "metrics-scan", 1)[0]
+				if err := db.Set(keys[i], uint64(i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Recording is selected when iteration starts, even for an iterator
+			// created before collection was enabled.
+			scan := db.Scan()
+			m := db.acquireOperationMetrics(latency)
+			defer db.releaseOperationMetrics(m, latency)
+			check := func(count uint64) {
+				t.Helper()
+				got, window := m.snapshot(time.Now(), true)
+				metric := got.Scan
+				samples := uint64(0)
+				if latency {
+					samples = count
+				}
+				if metric.Count != count || metric.LatencySamples != samples ||
+					(metric.MeanNS != nil) != (samples > 0) || (metric.P99NS != nil) != (samples > 0) {
+					t.Fatalf("scan metrics: %+v, want count=%d samples=%d", metric, count, samples)
+				}
+				if window <= 0 || math.Abs(metric.OpsPerSecond-float64(count)/(window/1000)) > 1e-6 {
+					t.Fatalf("scan rate=%f count=%d window=%f", metric.OpsPerSecond, count, window)
+				}
+				if got.Get.Count != 0 {
+					t.Fatalf("scanned entries counted as gets: %+v", got.Get)
+				}
+			}
+			_ = db.Scan() // Constructing another unused iterator must not count.
+			check(0)
+			for run := range 3 {
+				entries := 0
+				for _, err := range scan {
+					if err != nil {
+						t.Fatal(err)
+					}
+					entries++
+					if run == 1 {
+						break
+					}
+				}
+				wantEntries := len(keys)
+				if run == 1 {
+					wantEntries = 1
+				}
+				if entries != wantEntries {
+					t.Fatalf("scan yielded %d entries, want %d", entries, wantEntries)
+				}
+				check(uint64(run + 1))
+			}
+			for _, key := range keys {
+				if err := db.Delete(key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, err := range scan {
+				t.Fatalf("empty scan yielded an entry or error: %v", err)
+			}
+			check(4)
+		})
+	}
+}
+
+func TestOperationScanLatencyIncludesLoopBody(t *testing.T) {
+	db := newInternalDB(t, WithShardCount(1))
+	if err := db.Set("a", uint64(1)); err != nil {
+		t.Fatal(err)
+	}
+	m := db.acquireOperationMetrics(true)
+	defer db.releaseOperationMetrics(m, true)
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		for _, err := range db.Scan() {
+			if err != nil {
+				done <- err
+				return
+			}
+			close(entered)
+			<-release
+		}
+		done <- nil
+	}()
+	<-entered
+	inProgress, _ := m.snapshot(time.Now(), true)
+	before := time.Now()
+	time.Sleep(10 * time.Millisecond)
+	wait := time.Since(before)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if inProgress.Scan.Count != 0 || inProgress.Scan.LatencySamples != 0 {
+		t.Fatalf("unfinished scan was recorded: %+v", inProgress.Scan)
+	}
+	got, _ := m.snapshot(time.Now(), true)
+	if got.Scan.Count != 1 || got.Scan.LatencySamples != 1 || got.Scan.MeanNS == nil || *got.Scan.MeanNS < float64(wait) {
+		t.Fatalf("loop body wait missing from scan latency: %+v, waited %s", got.Scan, wait)
+	}
+}
+
 func TestOperationMetricsWindow(t *testing.T) {
 	start := time.Unix(100, 0)
 	m := newOperationRecorder(1, start)
@@ -271,6 +379,12 @@ func TestOperationMetricsConcurrent(t *testing.T) {
 					t.Error(err)
 					return
 				}
+				for _, err := range db.Scan() {
+					if err != nil {
+						t.Error(err)
+						return
+					}
+				}
 			}
 		})
 	}
@@ -280,7 +394,7 @@ func TestOperationMetricsConcurrent(t *testing.T) {
 		select {
 		case <-done:
 			got, _ := m.snapshot(time.Now(), true)
-			for _, metric := range []operationMetric{got.Get, got.Set, got.Delete, got.Update} {
+			for _, metric := range []operationMetric{got.Get, got.Set, got.Delete, got.Update, got.Scan} {
 				if metric.Count != workers*iterations || metric.LatencySamples != workers*iterations {
 					t.Fatalf("concurrent calls lost: %+v", metric)
 				}

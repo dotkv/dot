@@ -680,6 +680,10 @@ type Entry struct {
 // then stops. Scanning a closed database yields an error wrapping os.ErrClosed.
 func (db *DB) Scan() iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
+		if m := db.operationMetrics.Load(); m != nil {
+			started := m.begin()
+			defer m.record(operationScan, nil, started)
+		}
 		var buf []byte
 		for i := range db.shards {
 			s := &db.shards[i]

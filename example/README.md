@@ -22,7 +22,7 @@ while viewers are connected; each browser keeps live history until reload.
 Opt in with `db.MetricsHandler(dot.WithMetricsHistory(7*24*time.Hour))` to retain
 seven days. When enabled, history collects once per second without viewers and
 survives restarts when your application reopens the same database path. Storage
-is bounded to about 21.1 MiB per retained day.
+is bounded to about 22.4 MiB per retained day.
 
 See the [metrics guide](https://dotkv.github.io/dot/metrics.html) for options
 and an explanation of the readings.
