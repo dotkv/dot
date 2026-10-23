@@ -56,8 +56,8 @@ func checkSegmentAccounting(t *testing.T, s *Shard) {
 			}
 			size := int(recordSize(int(binary.BigEndian.Uint32(data[off+5:])), int(binary.BigEndian.Uint32(data[off+9:]))))
 			if addresses[logAddress(seg, uint64(off))] {
-				if exp, ok := s.index.expirations[logAddress(seg, uint64(off))]; ok && exp.recordBytes != uint64(size) {
-					t.Fatalf("expiration bytes=%d, want %d", exp.recordBytes, size)
+				if exp, ok := s.index.expirations[logAddress(seg, uint64(off))]; ok && exp.recordBytes() != uint64(size) {
+					t.Fatalf("expiration bytes=%d, want %d", exp.recordBytes(), size)
 				}
 				liveBytes += uint64(size)
 				delete(addresses, logAddress(seg, uint64(off)))

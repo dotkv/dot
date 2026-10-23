@@ -20,12 +20,25 @@ const (
 	continuationMask  uint64 = 1 << 62
 	shiftedMask       uint64 = 1 << 61
 	metadataMask             = occupiedMask | continuationMask | shiftedMask
+
+	expirationHashBits        = indexBits + fingerprintBits
+	expirationHashMask uint64 = (1 << expirationHashBits) - 1
 )
 
 type indexExpiration struct {
-	at          int64
-	hash        uint64
-	recordBytes uint64
+	at int64
+	// [unused 1][record size in 16-byte units 30][hash 33]
+	// Pruning only needs the hash bits used by the largest index. The disk's
+	// uint32 key/value lengths fit in 30 size bits after removing alignment.
+	packed uint64
+}
+
+func (exp indexExpiration) hash() uint64 {
+	return exp.packed & expirationHashMask
+}
+
+func (exp indexExpiration) recordBytes() uint64 {
+	return exp.packed >> expirationHashBits << logAlignmentBits
 }
 
 type Index struct {
@@ -101,7 +114,10 @@ func (idx *Index) setExpiration(addr uint64, at int64, hash uint64, recordBytes 
 	if idx.expirations == nil {
 		idx.expirations = make(map[uint64]indexExpiration)
 	}
-	idx.expirations[addr] = indexExpiration{at: at, hash: hash, recordBytes: recordBytes}
+	idx.expirations[addr] = indexExpiration{
+		at:     at,
+		packed: hash&expirationHashMask | recordBytes>>logAlignmentBits<<expirationHashBits,
+	}
 }
 
 func (idx *Index) deleteExpiration(addr uint64) {
@@ -120,14 +136,14 @@ func (idx *Index) prune() {
 	for addr, exp := range idx.expirations {
 		if exp.at <= now {
 			delete(idx.expirations, addr)
-			home := int(exp.hash & uint64(mask))
+			home := int(exp.hash() & uint64(mask))
 			if idx.slots[home]&occupiedMask == 0 {
 				continue
 			}
 			pos := idx.run(home)
 			for {
 				if idx.slots[pos]&addressMask == addr {
-					idx.liveBytes -= exp.recordBytes
+					idx.liveBytes -= exp.recordBytes()
 					idx.remove(home, pos)
 					break
 				}

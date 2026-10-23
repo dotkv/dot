@@ -11,39 +11,39 @@ Completed cases: **8**, covering **4 configurations**.
 
 ### 80/20 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **92,527,872**. Ratios are reads/writes.
+Measured operations per engine: **94,069,680**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  21.186 |     1.729 |   24.703 |          4,367,345 |           44.8 |      16.08 |
-| Pebble         |    1 |  56.957 |     4.795 |   75.775 |          1,624,517 |           41.8 |      18.64 |
+| Dot            |    1 |  21.346 |     1.711 |   24.319 |          4,406,937 |           50.3 |      30.20 |
+| Pebble         |    1 |  54.258 |     4.501 |   72.703 |          1,733,755 |           44.3 |      18.20 |
 
 ### 80/20 · 1,024 B values · 8 workers
 
-Measured operations per engine: **13,018,680**. Ratios are reads/writes.
+Measured operations per engine: **13,011,360**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  20.383 |    12.313 |   48.895 |            638,691 |           51.0 |      48.51 |
-| Pebble         |    1 |  55.100 |    33.582 |  220.159 |            236,273 |           50.5 |      34.52 |
+| Dot            |    1 |  19.846 |    12.006 |   46.335 |            655,604 |           53.5 |      47.45 |
+| Pebble         |    1 |  53.160 |    32.440 |  215.039 |            244,759 |           51.4 |      34.99 |
 
 ### 20/80 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **50,686,872**. Ratios are reads/writes.
+Measured operations per engine: **51,072,600**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  23.112 |     3.513 |   29.951 |          2,193,094 |           47.4 |      25.96 |
-| Pebble         |    1 |  29.331 |     4.491 |   35.327 |          1,728,101 |           43.8 |      18.98 |
+| Dot            |    1 |  22.245 |     3.385 |   27.903 |          2,295,891 |           51.5 |      16.10 |
+| Pebble         |    1 |  28.707 |     4.367 |   34.047 |          1,779,096 |           44.3 |      18.24 |
 
 ### 20/80 · 1,024 B values · 8 workers
 
-Measured operations per engine: **3,254,304**. Ratios are reads/writes.
+Measured operations per engine: **3,129,048**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  15.443 |    37.655 |   66.047 |            210,728 |           50.5 |      48.70 |
-| Pebble         |    1 |  27.002 |    65.937 |  204.799 |            120,520 |           51.3 |      41.96 |
+| Dot            |    1 |  14.569 |    36.926 |   62.463 |            214,780 |           51.2 |      45.50 |
+| Pebble         |    1 |  25.321 |    64.228 |  204.799 |            123,573 |           50.0 |      45.72 |
 
 Setup: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**.
 

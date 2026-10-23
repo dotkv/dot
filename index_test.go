@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"os"
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 type indexEntry struct {
@@ -562,6 +564,53 @@ func TestDBExpirationMapReclamation(t *testing.T) {
 	}
 }
 
+func TestIndexExpirationPacking(t *testing.T) {
+	if size := unsafe.Sizeof(indexExpiration{}); size != 16 {
+		t.Fatalf("expiration size: got %d, want 16 bytes", size)
+	}
+	maxRecordBytes := alignRecordSize(uint64(logHeaderSize) + 2*math.MaxUint32)
+	idx := &Index{}
+	for _, at := range []int64{math.MinInt64, -1, 1, math.MaxInt64} {
+		for _, hash := range []uint64{0, 1, 1 << 32, 1<<33 - 1, 1 << 33, math.MaxUint64} {
+			for _, size := range []uint64{0, 32, 48, 1<<32 - 16, 1 << 32, 1<<32 + 16, 1 << 33, maxRecordBytes} {
+				idx.setExpiration(0, at, hash, size)
+				exp := idx.expirations[0]
+				if exp.at != at || exp.recordBytes() != size {
+					t.Fatalf("expiration round trip: at=%d hash=%#x size=%d; got at=%d size=%d", at, hash, size, exp.at, exp.recordBytes())
+				}
+				// Verify the home bucket at every supported table size without
+				// allocating the largest index (64 GiB).
+				for bits := indexBits; bits <= indexBits+fingerprintBits; bits++ {
+					mask := uint64(1)<<bits - 1
+					if got, want := exp.hash()&mask, hash&mask; got != want {
+						t.Fatalf("%d-bit bucket: hash=%#x size=%d; got %#x, want %#x", bits, hash, size, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestIndexPruneLargeRecordSizes(t *testing.T) {
+	idx := &Index{slots: make([]uint64, 32), segmentRefCounts: make(map[uint64]uint32)}
+	for i, size := range []uint64{1<<32 + 16, alignRecordSize(uint64(logHeaderSize) + 2*math.MaxUint32)} {
+		hash := uint64(math.MaxUint64)
+		slot := entrySlot(i, hash)
+		idx.insert(int(hash&31), slot)
+		idx.setExpiration(slot&addressMask, 1, hash, size)
+		idx.liveBytes += size
+	}
+	idx.prune()
+	if idx.entryCount != 0 || idx.liveBytes != 0 || idx.expirations != nil {
+		t.Fatalf("prune: entries=%d liveBytes=%d expirations=%d; want empty index", idx.entryCount, idx.liveBytes, len(idx.expirations))
+	}
+	for seg, count := range idx.segmentRefCounts {
+		if count != 0 {
+			t.Fatalf("segment %d: got %d references after prune, want 0", seg, count)
+		}
+	}
+}
+
 func TestDBExpirationPruneOnGrow(t *testing.T) {
 	// Verify that Get on an expired key skips log reads via the sidecar, even
 	// when the underlying log file is closed.
@@ -765,7 +814,7 @@ func TestIndexShrink(t *testing.T) {
 				slot := entrySlot(id, hash)
 				idx.insert(int(hash&uint64(n-1)), slot)
 				if id%257 == 0 {
-					idx.expirations[slot&addressMask] = indexExpiration{at: 1 << 62, hash: hash, recordBytes: 48}
+					idx.setExpiration(slot&addressMask, 1<<62, hash, 48)
 				}
 			}
 			idx.liveBytes = uint64(len(entries)) * 48
