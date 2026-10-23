@@ -5,13 +5,116 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 )
+
+func TestLogReadRejectsInvalidLengths(t *testing.T) {
+	const helperEnv = "DOT_TEST_INVALID_LENGTHS"
+	if os.Getenv(helperEnv) == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLogReadRejectsInvalidLengths$", "-test.v")
+		cmd.Env = append(os.Environ(), helperEnv+"=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, output)
+		}
+		return
+	}
+	// A regression must fail in this subprocess rather than allocate several
+	// GiB on the test host. Allow modest growth beyond the runtime's existing
+	// mappings, including the race detector's much larger virtual reservation.
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, err := strconv.ParseUint(string(bytes.Fields(data)[0]), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_AS, &original); err != nil {
+		t.Fatal(err)
+	}
+	limited := original
+	limit := pages*uint64(os.Getpagesize()) + 256<<20
+	if limited.Cur > limit {
+		limited.Cur = limit
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &limited); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Setrlimit(syscall.RLIMIT_AS, &original)
+
+	key := []byte("key")
+	for _, storage := range []string{"head", "sealed", "buffer"} {
+		for _, tc := range []struct {
+			name           string
+			ty             recordType
+			keylen, vallen uint32
+			invalidType    bool
+		}{
+			{"truncated", typeBytes, 3, 9, false},
+			{"beyond-prefix", typeBytes, 3, 1024, false},
+			{"large-value", typeBytes, 3, 16 << 20, false},
+			{"large-key", typeBytes, 16 << 20, 8, false},
+			{"int32-conversion", typeBytes, 1 << 31, 8, false},
+			{"int32-addition", typeBytes, 1<<31 - 1, 1<<31 - 1, false},
+			{"uint32-max", typeBytes, ^uint32(0), ^uint32(0), false},
+			{"scalar-size", typeInt64, 3, 16 << 20, true},
+			{"bool-size", typeBoolTrue, 3, ^uint32(0), true},
+			{"unknown-type", 0xff, ^uint32(0), ^uint32(0), true},
+		} {
+			t.Run(storage+"/"+tc.name, func(t *testing.T) {
+				log, _ := openRecoveryLog(t, t.TempDir())
+				record := recoveryRecord(typeBytes, key, make([]byte, 8), 0)
+				record[4] = byte(tc.ty)
+				binary.BigEndian.PutUint32(record[5:], tc.keylen)
+				binary.BigEndian.PutUint32(record[9:], tc.vallen)
+				if storage == "buffer" {
+					log.pending = record
+				} else {
+					if err := os.WriteFile(log.headFile.Name(), record, 0600); err != nil {
+						t.Fatal(err)
+					}
+					if storage == "sealed" {
+						if err := log.openHead(1); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				for _, read := range []struct {
+					name string
+					run  func() error
+				}{
+					{"payload", func() error { _, _, _, _, err := log.readPayload(0, 0, nil); return err }},
+					{"scratch-payload", func() error { _, _, _, _, err := log.readPayload(0, 0, log.writeBuffer[:]); return err }},
+					{"scalar", func() error { _, _, _, err := log.readScalar(0, 0, key); return err }},
+				} {
+					var before, after runtime.MemStats
+					runtime.ReadMemStats(&before)
+					err := read.run()
+					runtime.ReadMemStats(&after)
+					if tc.invalidType {
+						if !errors.Is(err, ErrInvalidValue) {
+							t.Fatalf("%s: type/length error=%v", read.name, err)
+						}
+					} else if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) && !errors.Is(err, ErrInvalidValue) {
+						t.Fatalf("%s: length error=%v", read.name, err)
+					}
+					if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= 1<<20 {
+						t.Fatalf("%s: allocated %d bytes before rejecting lengths", read.name, allocated)
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestCompactionBufferedWriteFailures(t *testing.T) {
 	const helperEnv = "DOT_TEST_COMPACTION_WRITE"

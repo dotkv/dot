@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -161,7 +162,12 @@ func TestLogReadRejectsCorruption(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, buf := range [][]byte{nil, log.writeBuffer[:]} {
-				if _, _, _, _, err := log.readPayload(0, 0, buf); err == nil || err.Error() != "crc mismatch" {
+				_, _, _, _, err := log.readPayload(0, 0, buf)
+				if tc.name == "type" {
+					if !errors.Is(err, ErrInvalidValue) {
+						t.Fatalf("invalid type/length combination: %v", err)
+					}
+				} else if err == nil || err.Error() != "crc mismatch" {
 					t.Fatalf("corrupt record: got error %v, want crc mismatch", err)
 				}
 			}
@@ -186,6 +192,59 @@ func TestLogBufferedReads(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLogReadLargeRecordCrossesBoundary(t *testing.T) {
+	for _, scalar := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scalar=%t", scalar), func(t *testing.T) {
+			log, _ := openRecoveryLog(t, t.TempDir())
+			key, value, ty := []byte("key"), bytes.Repeat([]byte{'v'}, 2<<20), typeBytes
+			if scalar {
+				key, value, ty = bytes.Repeat([]byte{'k'}, 2048), make([]byte, 8), typeInt64
+			}
+			padLog(t, log, logSegmentSize-logAlignment)
+			seg, off, err := log.write(ty, key, value, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, scratch := range [][]byte{nil, make([]byte, len(key)+len(value))} {
+				k, v, gotType, _, err := log.readPayload(seg, off, scratch)
+				if err != nil || !bytes.Equal(k, key) || !bytes.Equal(v, value) || gotType != ty {
+					t.Fatalf("payload spanning boundary: type=%v error=%v", gotType, err)
+				}
+			}
+			if raw, _, matched, err := log.readScalar(seg, off, key); err != nil || !matched || raw.ty != ty || raw.size != len(value) {
+				t.Fatalf("scalar fallback spanning boundary: raw=%+v matched=%t error=%v", raw, matched, err)
+			}
+		})
+	}
+}
+
+func TestLogReadRejectsInvalidOffsets(t *testing.T) {
+	log, _ := openRecoveryLog(t, t.TempDir())
+	for _, off := range []uint64{logSegmentSize, 1 << 63, ^uint64(0)} {
+		if _, _, _, _, err := log.readPayload(0, off, nil); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("payload offset %d: %v", off, err)
+		}
+		if _, _, _, err := log.readScalar(0, off, []byte("key")); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("scalar offset %d: %v", off, err)
+		}
+	}
+}
+
+func TestLogReadPayloadStatFailure(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "closed-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := recoveryRecord(typeBytes, []byte("key"), make([]byte, 2048), 0)
+	var log Log
+	if _, _, _, _, err := log.readFromPrefix(f, 0, data[:logHeaderSize], nil); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("failed payload stat: %v", err)
 	}
 }
 

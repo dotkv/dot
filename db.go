@@ -291,6 +291,11 @@ func Open(path string, opts ...Option) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("open shard %02d: %w", i, err), db.Close())
 		}
 	}
+	// Shard fsyncs persist their log names, but only the database directory
+	// persists the shard names. Its ancestors must also survive power loss.
+	if err := syncDirectoryTree(path, syncDirectory); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
 	// Recovery may leave eligible history or unfinished packing without any
 	// subsequent writes. Queue it before exposing the DB to callers.
 	for i := range db.shards {

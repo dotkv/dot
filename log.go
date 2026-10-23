@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -544,6 +545,9 @@ func (l *Log) bufferedPrefix(seg, off uint64) []byte {
 // readPayload reads and verifies a record, returning its key, value, type, and
 // expiration. It borrows buf when the payload fits; passing nil returns owned slices.
 func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, recordType, int64, error) {
+	if off >= logSegmentSize {
+		return nil, nil, 0, 0, fmt.Errorf("%w: record offset %d exceeds segment capacity", ErrInvalidValue, off)
+	}
 	if prefix := l.bufferedPrefix(seg, off); prefix != nil {
 		if len(prefix) < logHeaderSize {
 			return nil, nil, 0, 0, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
@@ -575,10 +579,37 @@ func (l *Log) readPayload(seg uint64, off uint64, buf []byte) ([]byte, []byte, r
 // readScalar falling back here only when the record exceeds its local buffer.
 // prefix starts at off and must contain at least the 21-byte record header.
 func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) ([]byte, []byte, recordType, int64, error) {
-	keylen := binary.BigEndian.Uint32(prefix[5:])
-	vallen := binary.BigEndian.Uint32(prefix[9:])
+	keylen := uint64(binary.BigEndian.Uint32(prefix[5:]))
+	vallen := uint64(binary.BigEndian.Uint32(prefix[9:]))
 	expiration := int64(binary.BigEndian.Uint64(prefix[13:]))
-	size := int(keylen) + int(vallen)
+	ty := recordType(prefix[4])
+	if err := ty.validate(vallen, expiration); err != nil {
+		return nil, nil, 0, 0, err
+	}
+	// The uint32 fields cannot overflow uint64. Check their sum before any
+	// conversion to int, allocation, or slice indexing, including on 32-bit hosts.
+	end := uint64(logHeaderSize) + keylen + vallen
+	if off >= logSegmentSize || end > uint64(^uint(0)>>1) {
+		return nil, nil, 0, 0, fmt.Errorf("%w: record extent exceeds address space", ErrInvalidValue)
+	}
+	if end > uint64(len(prefix)) {
+		if f == nil {
+			return nil, nil, 0, 0, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
+		}
+		// Small records already fit in prefix and need no extra syscall. Larger
+		// records must fit the actual file before we allocate their payload. A
+		// final record may extend beyond the nominal segment boundary.
+		var info syscall.Stat_t
+		err := syscall.Fstat(int(f.Fd()), &info)
+		runtime.KeepAlive(f)
+		if err != nil {
+			return nil, nil, 0, 0, fmt.Errorf("stat payload: %w", err)
+		}
+		if info.Size < 0 || off > uint64(info.Size) || end > uint64(info.Size)-off {
+			return nil, nil, 0, 0, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
+		}
+	}
+	size := int(keylen + vallen)
 
 	if buf == nil || cap(buf) < size {
 		buf = make([]byte, size)
@@ -587,9 +618,6 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 	}
 	copied := copy(buf, prefix[logHeaderSize:])
 	if copied < size {
-		if f == nil {
-			return nil, nil, 0, 0, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
-		}
 		if _, err := f.ReadAt(
 			buf[copied:], int64(off)+logHeaderSize+int64(copied),
 		); err != nil {
@@ -599,10 +627,6 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 	if binary.BigEndian.Uint32(prefix[:]) != l.crc(prefix[:logHeaderSize], buf[:keylen], buf[keylen:]) {
 		return nil, nil, 0, 0, fmt.Errorf("crc mismatch")
 	}
-	ty := recordType(prefix[4])
-	if err := ty.validate(uint64(vallen), expiration); err != nil {
-		return nil, nil, 0, 0, err
-	}
 	return buf[:keylen], buf[keylen:], ty, expiration, nil
 }
 
@@ -610,12 +634,20 @@ func (l *Log) readFromPrefix(f *os.File, off uint64, prefix []byte, buf []byte) 
 // length, type, and expiration when the key matches. Key comparison stays here to keep
 // record bytes on the stack. DB.Get validates the scalar type and decodes the returned bits.
 func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64, bool, error) {
+	if off >= logSegmentSize {
+		return scalarValue{}, 0, false, fmt.Errorf("%w: record offset %d exceeds segment capacity", ErrInvalidValue, off)
+	}
 	if record := l.bufferedPrefix(seg, off); record != nil {
 		if len(record) < logHeaderSize {
 			return scalarValue{}, 0, false, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
 		}
 		keylen := uint64(binary.BigEndian.Uint32(record[5:]))
 		vallen := uint64(binary.BigEndian.Uint32(record[9:]))
+		expiration := int64(binary.BigEndian.Uint64(record[13:]))
+		ty := recordType(record[4])
+		if err := ty.validate(vallen, expiration); err != nil {
+			return scalarValue{}, 0, false, err
+		}
 		end := logHeaderSize + keylen + vallen
 		if end > uint64(len(record)) {
 			return scalarValue{}, 0, false, fmt.Errorf("read payload: %w", io.ErrUnexpectedEOF)
@@ -623,11 +655,6 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 		storedKey, value := record[logHeaderSize:logHeaderSize+keylen], record[logHeaderSize+keylen:end]
 		if binary.BigEndian.Uint32(record[:]) != l.crc(record[:logHeaderSize], storedKey, value) {
 			return scalarValue{}, 0, false, fmt.Errorf("crc mismatch")
-		}
-		expiration := int64(binary.BigEndian.Uint64(record[13:]))
-		ty := recordType(record[4])
-		if err := ty.validate(vallen, expiration); err != nil {
-			return scalarValue{}, 0, false, err
 		}
 		if !bytes.Equal(storedKey, key) {
 			return scalarValue{}, 0, false, nil
@@ -646,7 +673,7 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 	var record [1 << 10]byte
 	// A matching scalar needs only the header, caller's key, and at most eight
 	// value bytes. Keep the larger buffer for candidates with different sizes.
-	readSize := min(len(record), logHeaderSize+len(key)+8)
+	readSize := logHeaderSize + min(len(key), len(record)-logHeaderSize-8) + 8
 	n, err := f.ReadAt(record[:readSize], int64(off))
 	if err != nil && err != io.EOF {
 		return scalarValue{}, 0, false, fmt.Errorf("read header: %w", err)
@@ -654,9 +681,15 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 	if n < logHeaderSize {
 		return scalarValue{}, 0, false, fmt.Errorf("read header: %w", io.ErrUnexpectedEOF)
 	}
-	keylen := int(binary.BigEndian.Uint32(record[5:]))
-	vallen := int(binary.BigEndian.Uint32(record[9:]))
-	if keylen+vallen > len(record)-logHeaderSize {
+	keylen := uint64(binary.BigEndian.Uint32(record[5:]))
+	vallen := uint64(binary.BigEndian.Uint32(record[9:]))
+	expiration := int64(binary.BigEndian.Uint64(record[13:]))
+	ty := recordType(record[4])
+	if err := ty.validate(vallen, expiration); err != nil {
+		return scalarValue{}, 0, false, err
+	}
+	end := uint64(logHeaderSize) + keylen + vallen
+	if end > uint64(len(record)) {
 		storedKey, value, ty, expiration, err := l.readFromPrefix(f, off, record[:n], nil)
 		if err != nil {
 			return scalarValue{}, 0, false, err
@@ -666,19 +699,13 @@ func (l *Log) readScalar(seg uint64, off uint64, key []byte) (scalarValue, int64
 		}
 		return scalarBytes(ty, value), expiration, true, nil
 	}
-	end := logHeaderSize + keylen + vallen
-	if n < end {
+	if uint64(n) < end {
 		if _, err := f.ReadAt(record[n:end], int64(off)+int64(n)); err != nil {
 			return scalarValue{}, 0, false, fmt.Errorf("read payload: %w", err)
 		}
 	}
 	if binary.BigEndian.Uint32(record[:]) != checksumSmall(record[4:end]) {
 		return scalarValue{}, 0, false, fmt.Errorf("crc mismatch")
-	}
-	expiration := int64(binary.BigEndian.Uint64(record[13:]))
-	ty := recordType(record[4])
-	if err := ty.validate(uint64(vallen), expiration); err != nil {
-		return scalarValue{}, 0, false, err
 	}
 	if !bytes.Equal(record[logHeaderSize:logHeaderSize+keylen], key) {
 		return scalarValue{}, 0, false, nil
