@@ -43,8 +43,10 @@
 
 <p>Keys accept <code>string</code> or <code>[]byte</code>; <code>"a"</code> and
 <code>[]byte("a")</code> address the same key. Values support <code>[]byte</code>,
-<code>string</code>, <code>int64</code>, <code>uint64</code>, <code>float64</code>, and
-<code>bool</code>.</p>
+<code>string</code>, <code>bool</code>, <code>int</code>, <code>int8</code>,
+<code>int16</code>, <code>int32</code>, <code>int64</code>, <code>uint</code>,
+<code>uint8</code>, <code>uint16</code>, <code>uint32</code>, <code>uint64</code>,
+<code>float32</code>, and <code>float64</code>.</p>
 
 <pre><code class="language-go">if err := db.Set(&quot;counter&quot;, uint64(42)); err != nil {
     return err
@@ -56,6 +58,14 @@ implicit conversions. A mismatch returns an error wrapping <code>ErrTypeMismatch
 check it with <code>errors.Is(err, dot.ErrTypeMismatch)</code>. <code>Set</code> can
 replace a value with a different type. Byte slices returned by <code>Get</code>
 belong to the caller and may be changed or retained.</p>
+
+<p>Fixed-width numbers use their natural byte widths in little-endian order;
+floating-point values preserve their IEEE 754 bits. <code>int</code> and
+<code>uint</code> always use eight bytes on disk and have distinct tags from
+<code>int64</code> and <code>uint64</code>. Reading a value that does not fit the
+host's <code>int</code> or <code>uint</code> returns an error wrapping
+<code>ErrValueOverflow</code>. For example, <code>db.Set("count", 42)</code> stores
+an <code>int</code> that is read with <code>db.Get[int]("count")</code>.</p>
 
 <h2 id="delete-and-handle-errors">Delete and handle errors</h2>
 
@@ -83,6 +93,7 @@ default:
 <tr><td><code>ErrTypeMismatch</code></td><td>The requested type differs from the stored value.</td></tr>
 <tr><td><code>ErrDatabaseLocked</code></td><td>Another Open holds this database path.</td></tr>
 <tr><td><code>ErrInvalidValue</code></td><td>A stored record has invalid data.</td></tr>
+<tr><td><code>ErrValueOverflow</code></td><td>A stored <code>int</code> or <code>uint</code> does not fit the host type.</td></tr>
 <tr><td><code>os.ErrClosed</code></td><td>The database has been closed.</td></tr>
 </tbody>
 </table>

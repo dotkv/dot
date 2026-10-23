@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -76,6 +77,99 @@ func checkScalarSet[T Value](t *testing.T, db *DB, key []byte, value T, encoded 
 	}
 }
 
+func checkIntegerEncodings[T interface {
+	int | int8 | int16 | int32 | uint | uint8 | uint16 | uint32
+}](t *testing.T, db *DB, values []T, size int) {
+	t.Helper()
+	key := []byte("integer")
+	for _, value := range values {
+		encoded := make([]byte, size)
+		for i := range encoded {
+			encoded[i] = byte(uint64(value) >> (8 * i))
+		}
+		checkScalarSet(t, db, key, value, encoded)
+		checkScalarGet(t, db, key, value, nil)
+	}
+}
+
+func TestDBSmallScalarEncodings(t *testing.T) {
+	for _, durability := range []Durability{Write, Buffer} {
+		t.Run(fmt.Sprint(durability), func(t *testing.T) {
+			db := newInternalDB(t, WithDurability(durability))
+			stopTestMaintenance(db)
+			checkIntegerEncodings(t, db, []int{0, 42, -42, math.MinInt, math.MaxInt}, 8)
+			checkIntegerEncodings(t, db, []int8{0, 42, -42, math.MinInt8, math.MaxInt8}, 1)
+			checkIntegerEncodings(t, db, []int16{0, 0x1234, -42, math.MinInt16, math.MaxInt16}, 2)
+			checkIntegerEncodings(t, db, []int32{0, 0x12345678, -42, math.MinInt32, math.MaxInt32}, 4)
+			checkIntegerEncodings(t, db, []uint{0, 42, math.MaxInt + 1, math.MaxUint}, 8)
+			checkIntegerEncodings(t, db, []uint8{0, 42, math.MaxInt8 + 1, math.MaxUint8}, 1)
+			checkIntegerEncodings(t, db, []uint16{0, 0x1234, math.MaxInt16 + 1, math.MaxUint16}, 2)
+			checkIntegerEncodings(t, db, []uint32{0, 0x12345678, math.MaxInt32 + 1, math.MaxUint32}, 4)
+			key := []byte("float32")
+			for _, bits := range []uint32{0, 1, 1 << 31, 0x3fc00000, 0x7f800000, 0xff800000, 0x7fc00042, 0x7f800001} {
+				var encoded [4]byte
+				binary.LittleEndian.PutUint32(encoded[:], bits)
+				checkScalarSet(t, db, key, math.Float32frombits(bits), encoded[:])
+				got, err := db.Get[float32](key)
+				if err != nil || math.Float32bits(got) != bits {
+					t.Fatalf("float32 bits: got %x, want %x, error %v", math.Float32bits(got), bits, err)
+				}
+			}
+			if err := db.Set("literal", 42); err != nil {
+				t.Fatal(err)
+			}
+			checkScalarGet(t, db, []byte("literal"), 42, nil)
+		})
+	}
+}
+
+func checkNativeIntegerRange[T interface{ int | uint }](t *testing.T, db *DB, ty recordType, bits uint64, want T, wantErr error) {
+	t.Helper()
+	key := []byte(fmt.Sprintf("%s-%x", ty, bits))
+	s, hash := db.shard(key)
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], bits)
+	change, err := s.index.prepareSet(s.log, ty, key, encoded[:], hash, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendSet(ty, key, encoded[:], change, Write); err != nil {
+		t.Fatal(err)
+	}
+	checkScalarGet(t, db, key, want, wantErr)
+	size := s.log.size
+	called := false
+	err = db.Update(key, func(v T, exists bool) (T, error) {
+		called = true
+		if !exists || v != want {
+			t.Fatalf("native integer update: got %v, exists=%t, want %v", v, exists, want)
+		}
+		return v, nil
+	})
+	if !errors.Is(err, wantErr) || called != (wantErr == nil) || s.log.size != size {
+		t.Fatalf("native integer update: callback=%t error=%v, want %v; log size=%d, want %d", called, err, wantErr, s.log.size, size)
+	}
+}
+
+func TestDBNativeIntegerRange(t *testing.T) {
+	db := newInternalDB(t)
+	stopTestMaintenance(db)
+	for _, v := range []int64{math.MinInt64, math.MinInt32 - 1, math.MinInt32, math.MaxInt32, math.MaxInt32 + 1, math.MaxInt64} {
+		want, wantErr := int(v), error(nil)
+		if strconv.IntSize == 32 && (v < math.MinInt32 || v > math.MaxInt32) {
+			want, wantErr = 0, ErrValueOverflow
+		}
+		checkNativeIntegerRange(t, db, typeInt, uint64(v), want, wantErr)
+	}
+	for _, v := range []uint64{0, math.MaxUint32, math.MaxUint32 + 1, math.MaxUint64} {
+		want, wantErr := uint(v), error(nil)
+		if strconv.IntSize == 32 && v > math.MaxUint32 {
+			want, wantErr = 0, ErrValueOverflow
+		}
+		checkNativeIntegerRange(t, db, typeUint, v, want, wantErr)
+	}
+}
+
 func TestDBSetScalarEncodings(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("scalar")
@@ -138,8 +232,17 @@ func TestDBSetScalarEncodings(t *testing.T) {
 
 func checkGetMissing(t *testing.T, db *DB, key []byte) {
 	t.Helper()
+	checkScalarGet(t, db, key, int(0), ErrNotFound)
+	checkScalarGet(t, db, key, int8(0), ErrNotFound)
+	checkScalarGet(t, db, key, int16(0), ErrNotFound)
+	checkScalarGet(t, db, key, int32(0), ErrNotFound)
 	checkScalarGet(t, db, key, int64(0), ErrNotFound)
+	checkScalarGet(t, db, key, uint(0), ErrNotFound)
+	checkScalarGet(t, db, key, uint8(0), ErrNotFound)
+	checkScalarGet(t, db, key, uint16(0), ErrNotFound)
+	checkScalarGet(t, db, key, uint32(0), ErrNotFound)
 	checkScalarGet(t, db, key, uint64(0), ErrNotFound)
+	checkScalarGet(t, db, key, float32(0), ErrNotFound)
 	checkScalarGet(t, db, key, float64(0), ErrNotFound)
 	checkScalarGet(t, db, key, false, ErrNotFound)
 	if got, err := db.Get[[]byte](key); err != ErrNotFound || got != nil {
@@ -223,11 +326,12 @@ func TestDBGetScalarRecordSizes(t *testing.T) {
 	for _, size := range []int{0, 1, 995, 996, 4096} {
 		t.Run(fmt.Sprintf("%d-byte-key", size), func(t *testing.T) {
 			key := bytes.Repeat([]byte{'k'}, size)
-			// A 995-byte key puts the end of this record exactly at 1 KiB.
-			if err := db.Set(key, int64(42)); err != nil {
-				t.Fatal(err)
+			for _, tc := range typedCases() {
+				if err := tc.set(db, key); err != nil {
+					t.Fatal(err)
+				}
+				tc.check(t, db, key)
 			}
-			checkScalarGet(t, db, key, int64(42), nil)
 		})
 	}
 }

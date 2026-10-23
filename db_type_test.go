@@ -30,6 +30,9 @@ func typedCase[T Value](name, logical string, ty recordType, payload int, value 
 			if want, ok := any(value).(float64); ok {
 				equal = math.Float64bits(any(got).(float64)) == math.Float64bits(want)
 			}
+			if want, ok := any(value).(float32); ok {
+				equal = math.Float32bits(any(got).(float32)) == math.Float32bits(want)
+			}
 			if err != nil || !equal {
 				t.Fatalf("Get[%s]: got %v, want %v, error %v", logical, got, value, err)
 			}
@@ -46,6 +49,16 @@ func typedCases() []typedRecordCase {
 		typedCase("empty-bytes", "[]byte", typeBytes, 0, []byte{}),
 		typedCase("false", "bool", typeBoolFalse, 0, false),
 		typedCase("true", "bool", typeBoolTrue, 0, true),
+		typedCase("string", "string", typeString, 0, ""),
+		typedCase("int", "int", typeInt, 8, int(0)),
+		typedCase("int8", "int8", typeInt8, 1, int8(0)),
+		typedCase("int16", "int16", typeInt16, 2, int16(0)),
+		typedCase("int32", "int32", typeInt32, 4, int32(0)),
+		typedCase("uint", "uint", typeUint, 8, uint(0)),
+		typedCase("uint8", "uint8", typeUint8, 1, uint8(0)),
+		typedCase("uint16", "uint16", typeUint16, 2, uint16(0)),
+		typedCase("uint32", "uint32", typeUint32, 4, uint32(0)),
+		typedCase("float32", "float32", typeFloat32, 4, float32(0)),
 	}
 }
 
@@ -88,8 +101,18 @@ func TestDBTypeChecks(t *testing.T) {
 			}
 			slot, size, count := s.index.slots[pos], s.log.size, s.log.recordCount
 			checkTypeAccess[[]byte](t, db, key, tc.logical, "[]byte")
+			checkTypeAccess[string](t, db, key, tc.logical, "string")
+			checkTypeAccess[int](t, db, key, tc.logical, "int")
+			checkTypeAccess[int8](t, db, key, tc.logical, "int8")
+			checkTypeAccess[int16](t, db, key, tc.logical, "int16")
+			checkTypeAccess[int32](t, db, key, tc.logical, "int32")
 			checkTypeAccess[int64](t, db, key, tc.logical, "int64")
+			checkTypeAccess[uint](t, db, key, tc.logical, "uint")
+			checkTypeAccess[uint8](t, db, key, tc.logical, "uint8")
+			checkTypeAccess[uint16](t, db, key, tc.logical, "uint16")
+			checkTypeAccess[uint32](t, db, key, tc.logical, "uint32")
 			checkTypeAccess[uint64](t, db, key, tc.logical, "uint64")
+			checkTypeAccess[float32](t, db, key, tc.logical, "float32")
 			checkTypeAccess[float64](t, db, key, tc.logical, "float64")
 			checkTypeAccess[bool](t, db, key, tc.logical, "bool")
 			if s.log.size != size || s.log.recordCount != count || s.index.slots[pos] != slot {
@@ -160,6 +183,16 @@ func TestDBTypedCompactionAndRecovery(t *testing.T) {
 		typedCase("max-uint", "uint64", typeUint64, 8, uint64(math.MaxUint64)),
 		typedCase("nan", "float64", typeFloat64, 8, math.Float64frombits(0x7ff8000000000042)),
 		typedCase("negative-zero", "float64", typeFloat64, 8, math.Float64frombits(1<<63)),
+		typedCase("min-int", "int", typeInt, 8, int(math.MinInt)),
+		typedCase("min-int8", "int8", typeInt8, 1, int8(math.MinInt8)),
+		typedCase("min-int16", "int16", typeInt16, 2, int16(math.MinInt16)),
+		typedCase("min-int32", "int32", typeInt32, 4, int32(math.MinInt32)),
+		typedCase("max-native-uint", "uint", typeUint, 8, uint(math.MaxUint)),
+		typedCase("max-uint8", "uint8", typeUint8, 1, uint8(math.MaxUint8)),
+		typedCase("max-uint16", "uint16", typeUint16, 2, uint16(math.MaxUint16)),
+		typedCase("max-uint32", "uint32", typeUint32, 4, uint32(math.MaxUint32)),
+		typedCase("nan32", "float32", typeFloat32, 4, math.Float32frombits(0x7fc00042)),
+		typedCase("negative-zero32", "float32", typeFloat32, 4, math.Float32frombits(1<<31)),
 	)
 	keys := keysForShard(db, s, "typed", len(cases))
 	expiration := time.Now().Add(time.Hour)

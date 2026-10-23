@@ -108,6 +108,9 @@ func checkScalarAllocations[T interface {
 	comparable
 }](t *testing.T, db *DB, key []byte, want T) {
 	t.Helper()
+	if err := db.Set(key, want); err != nil {
+		t.Fatal(err)
+	}
 	allocations := testing.AllocsPerRun(100, func() {
 		got, err := db.Get[T](key)
 		if err != nil || got != want {
@@ -120,24 +123,26 @@ func checkScalarAllocations[T interface {
 }
 
 func TestDBGetScalarAllocations(t *testing.T) {
-	db := newInternalDB(t)
-	intKey, uintKey, floatKey, boolKey := []byte("int"), []byte("uint"), []byte("float"), []byte("bool")
-	if err := db.Set(intKey, int64(42)); err != nil {
-		t.Fatal(err)
+	for _, durability := range []Durability{Write, Buffer} {
+		t.Run(fmt.Sprint(durability), func(t *testing.T) {
+			db := newInternalDB(t, WithDurability(durability))
+			stopTestMaintenance(db)
+			key := []byte("scalar")
+			checkScalarAllocations(t, db, key, int(-42))
+			checkScalarAllocations(t, db, key, int8(-42))
+			checkScalarAllocations(t, db, key, int16(-42))
+			checkScalarAllocations(t, db, key, int32(-42))
+			checkScalarAllocations(t, db, key, int64(-42))
+			checkScalarAllocations(t, db, key, uint(42))
+			checkScalarAllocations(t, db, key, uint8(42))
+			checkScalarAllocations(t, db, key, uint16(42))
+			checkScalarAllocations(t, db, key, uint32(42))
+			checkScalarAllocations(t, db, key, uint64(42))
+			checkScalarAllocations(t, db, key, float32(1.5))
+			checkScalarAllocations(t, db, key, float64(1.5))
+			checkScalarAllocations(t, db, key, true)
+		})
 	}
-	if err := db.Set(uintKey, uint64(42)); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Set(floatKey, float64(0)); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Set(boolKey, true); err != nil {
-		t.Fatal(err)
-	}
-	checkScalarAllocations(t, db, intKey, int64(42))
-	checkScalarAllocations(t, db, uintKey, uint64(42))
-	checkScalarAllocations(t, db, floatKey, float64(0))
-	checkScalarAllocations(t, db, boolKey, true)
 }
 
 func TestIndexFindScalarCollisionAllocations(t *testing.T) {
@@ -189,8 +194,17 @@ func TestDBGetMissingAllocations(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("missing")
 	checkGetMissingAllocations[[]byte](t, db, key)
+	checkGetMissingAllocations[int](t, db, key)
+	checkGetMissingAllocations[int8](t, db, key)
+	checkGetMissingAllocations[int16](t, db, key)
+	checkGetMissingAllocations[int32](t, db, key)
 	checkGetMissingAllocations[int64](t, db, key)
+	checkGetMissingAllocations[uint](t, db, key)
+	checkGetMissingAllocations[uint8](t, db, key)
+	checkGetMissingAllocations[uint16](t, db, key)
+	checkGetMissingAllocations[uint32](t, db, key)
 	checkGetMissingAllocations[uint64](t, db, key)
+	checkGetMissingAllocations[float32](t, db, key)
 	checkGetMissingAllocations[float64](t, db, key)
 	checkGetMissingAllocations[bool](t, db, key)
 }
@@ -234,11 +248,38 @@ func checkScalarSetAllocations[T Value](t *testing.T, db *DB, key []byte, initia
 func TestDBSetScalarAllocations(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("scalar")
+	t.Run("int", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, int(-42), int(42))
+	})
+	t.Run("int8", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, int8(-42), int8(42))
+	})
+	t.Run("int16", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, int16(-42), int16(42))
+	})
+	t.Run("int32", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, int32(-42), int32(42))
+	})
 	t.Run("int64", func(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, int64(-42), int64(42))
 	})
+	t.Run("uint", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, uint(0), ^uint(0))
+	})
+	t.Run("uint8", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, uint8(0), ^uint8(0))
+	})
+	t.Run("uint16", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, uint16(0), ^uint16(0))
+	})
+	t.Run("uint32", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, uint32(0), ^uint32(0))
+	})
 	t.Run("uint64", func(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, uint64(0), ^uint64(0))
+	})
+	t.Run("float32", func(t *testing.T) {
+		checkScalarSetAllocations(t, db, key, float32(-1.5), float32(1.5))
 	})
 	t.Run("float64", func(t *testing.T) {
 		checkScalarSetAllocations(t, db, key, -1.5, 1.5)
@@ -248,20 +289,22 @@ func TestDBSetScalarAllocations(t *testing.T) {
 	})
 }
 
-func TestDBUpdateUint64Allocations(t *testing.T) {
-	db := newInternalDB(t)
+func checkScalarUpdateAllocations[T interface {
+	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64
+}](t *testing.T, db *DB, initial T) {
+	t.Helper()
 	key := []byte("counter")
-	if err := db.Set(key, uint64(0)); err != nil {
+	if err := db.Set(key, initial); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		name string
-		fn   func(uint64, bool) (uint64, error)
+		fn   func(T, bool) (T, error)
 	}{
-		{"increment", func(v uint64, exists bool) (uint64, error) { return v + 1, nil }},
-		{"unchanged", func(v uint64, exists bool) (uint64, error) { return v, nil }},
+		{"increment", func(v T, exists bool) (T, error) { return v + 1, nil }},
+		{"unchanged", func(v T, exists bool) (T, error) { return v, nil }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%T/%s", initial, tc.name), func(t *testing.T) {
 			allocations := testing.AllocsPerRun(100, func() {
 				if err := db.Update(key, tc.fn); err != nil {
 					t.Fatal(err)
@@ -272,6 +315,22 @@ func TestDBUpdateUint64Allocations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDBUpdateScalarAllocations(t *testing.T) {
+	db := newInternalDB(t)
+	checkScalarUpdateAllocations(t, db, int(-42))
+	checkScalarUpdateAllocations(t, db, int8(-42))
+	checkScalarUpdateAllocations(t, db, int16(-42))
+	checkScalarUpdateAllocations(t, db, int32(-42))
+	checkScalarUpdateAllocations(t, db, int64(-42))
+	checkScalarUpdateAllocations(t, db, uint(0))
+	checkScalarUpdateAllocations(t, db, uint8(0))
+	checkScalarUpdateAllocations(t, db, uint16(0))
+	checkScalarUpdateAllocations(t, db, uint32(0))
+	checkScalarUpdateAllocations(t, db, uint64(0))
+	checkScalarUpdateAllocations(t, db, float32(1.5))
+	checkScalarUpdateAllocations(t, db, float64(1.5))
 }
 
 func TestOperationMetricsAllocations(t *testing.T) {

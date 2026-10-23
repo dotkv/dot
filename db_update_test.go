@@ -3,6 +3,7 @@ package dot
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"sync"
@@ -40,11 +41,11 @@ func checkUpdate[T Value](t *testing.T, db *DB, key []byte, initial, want T, fn 
 func TestDBUpdateScalars(t *testing.T) {
 	db := newInternalDB(t)
 	key := []byte("scalar")
-	checkUpdate(t, db, key, uint64(41), uint64(42), func(v uint64, _ bool) (uint64, error) { return v + 1, nil})
-	checkUpdate(t, db, key, ^uint64(0), uint64(0), func(v uint64, _ bool) (uint64, error) { return v + 1, nil})
-	checkUpdate(t, db, key, int64(-42), int64(42), func(v int64, _ bool) (int64, error) { return -v, nil})
-	checkUpdate(t, db, key, 1.5, 3.0, func(v float64, _ bool) (float64, error) { return v * 2, nil})
-	checkUpdate(t, db, key, false, true, func(v bool, _ bool) (bool, error) { return !v, nil})
+	checkUpdate(t, db, key, uint64(41), uint64(42), func(v uint64, _ bool) (uint64, error) { return v + 1, nil })
+	checkUpdate(t, db, key, ^uint64(0), uint64(0), func(v uint64, _ bool) (uint64, error) { return v + 1, nil })
+	checkUpdate(t, db, key, int64(-42), int64(42), func(v int64, _ bool) (int64, error) { return -v, nil })
+	checkUpdate(t, db, key, 1.5, 3.0, func(v float64, _ bool) (float64, error) { return v * 2, nil })
+	checkUpdate(t, db, key, false, true, func(v bool, _ bool) (bool, error) { return !v, nil })
 	// No-op detection compares encodings, including NaN payloads and signed zero.
 	for _, bits := range []uint64{0x7ff8000000000042, 1 << 63} {
 		value := math.Float64frombits(bits)
@@ -53,10 +54,70 @@ func TestDBUpdateScalars(t *testing.T) {
 		}
 		s, _ := db.shard(key)
 		size := s.log.size
-		checkUpdate(t, db, key, value, value, func(v float64, _ bool) (float64, error) { return v, nil})
+		checkUpdate(t, db, key, value, value, func(v float64, _ bool) (float64, error) { return v, nil })
 		if s.log.size != size {
 			t.Fatal("unchanged scalar appended a record")
 		}
+	}
+	for _, bits := range []uint32{0x7fc00042, 0x7f800001, 1 << 31} {
+		value := math.Float32frombits(bits)
+		if err := db.Set(key, value); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := db.shard(key)
+		size := s.log.size
+		checkUpdate(t, db, key, value, value, func(v float32, _ bool) (float32, error) { return v, nil })
+		if s.log.size != size {
+			t.Fatal("unchanged float32 appended a record")
+		}
+	}
+}
+
+func checkSmallScalarUpdate[T interface {
+	int | int8 | int16 | int32 | uint | uint8 | uint16 | uint32 | float32
+}](t *testing.T, db *DB, initial, replacement T, payloadSize int) {
+	t.Helper()
+	key := []byte(fmt.Sprintf("%T", initial))
+	if err := db.Update(key, func(v T, exists bool) (T, error) {
+		if exists || v != 0 {
+			t.Fatalf("missing %T: got %v, exists=%t", v, v, exists)
+		}
+		return initial, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.shard(key)
+	size := s.log.size
+	checkUpdate(t, db, key, initial, initial, func(v T, _ bool) (T, error) { return v, nil })
+	if s.log.size != size {
+		t.Fatal("unchanged scalar appended a record")
+	}
+	checkUpdate(t, db, key, initial, replacement, func(v T, _ bool) (T, error) {
+		if v != initial {
+			t.Fatalf("callback got %v, want %v", v, initial)
+		}
+		return replacement, nil
+	})
+	if s.log.size != size+recordSize(len(key), payloadSize) {
+		t.Fatal("changed scalar did not append exactly one record")
+	}
+}
+
+func TestDBUpdateSmallScalars(t *testing.T) {
+	for _, durability := range []Durability{Write, Buffer} {
+		t.Run(fmt.Sprint(durability), func(t *testing.T) {
+			db := newInternalDB(t, WithDurability(durability))
+			stopTestMaintenance(db)
+			checkSmallScalarUpdate(t, db, int(-42), math.MaxInt, 8)
+			checkSmallScalarUpdate(t, db, int8(-42), math.MaxInt8, 1)
+			checkSmallScalarUpdate(t, db, int16(-42), math.MaxInt16, 2)
+			checkSmallScalarUpdate(t, db, int32(-42), math.MaxInt32, 4)
+			checkSmallScalarUpdate(t, db, uint(42), math.MaxUint, 8)
+			checkSmallScalarUpdate(t, db, uint8(42), math.MaxUint8, 1)
+			checkSmallScalarUpdate(t, db, uint16(42), math.MaxUint16, 2)
+			checkSmallScalarUpdate(t, db, uint32(42), math.MaxUint32, 4)
+			checkSmallScalarUpdate(t, db, float32(1.5), 3, 4)
+		})
 	}
 }
 
@@ -82,15 +143,15 @@ func TestDBUpdateBytes(t *testing.T) {
 	})
 	s, _ := db.shard(key)
 	size := s.log.size
-	if err := db.Update(key, func(v []byte, _ bool) ([]byte, error) { return bytes.Clone(v), nil}); err != nil {
+	if err := db.Update(key, func(v []byte, _ bool) ([]byte, error) { return bytes.Clone(v), nil }); err != nil {
 		t.Fatal(err)
 	}
 	if s.log.size != size {
 		t.Fatal("unchanged bytes appended a record")
 	}
-	checkUpdate(t, db, key, []byte("abc"), []byte{}, func(v []byte, _ bool) ([]byte, error) { return nil, nil})
+	checkUpdate(t, db, key, []byte("abc"), []byte{}, func(v []byte, _ bool) ([]byte, error) { return nil, nil })
 	size = s.log.size
-	if err := db.Update(key, func(v []byte, _ bool) ([]byte, error) { return []byte{}, nil}); err != nil {
+	if err := db.Update(key, func(v []byte, _ bool) ([]byte, error) { return []byte{}, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if s.log.size != size {
@@ -182,7 +243,7 @@ func TestDBUpdatePreservesExpiration(t *testing.T) {
 		if err := db.Set(key, uint64(1), WithExpiration(expiration)); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Update(key, func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
+		if err := db.Update(key, func(v uint64, exists bool) (uint64, error) { return v + 1, nil }); err != nil {
 			t.Fatal(err)
 		}
 		s, hash := db.shard(key)
@@ -265,7 +326,7 @@ func TestDBUpdateConcurrentIncrements(t *testing.T) {
 		done.Go(func() {
 			<-start
 			for range increments {
-				if err := db.Update(key, func(v uint64, exists bool) (uint64, error) { return v + 1, nil}); err != nil {
+				if err := db.Update(key, func(v uint64, exists bool) (uint64, error) { return v + 1, nil }); err != nil {
 					t.Error(err)
 					return
 				}

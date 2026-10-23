@@ -17,17 +17,27 @@ func TestLogRejectsInvalidTypedRecords(t *testing.T) {
 	}{
 		{"zero-type", 0, nil, 0},
 		{"unknown-type", 0xff, nil, 0},
-		{"int64-empty", typeInt64, nil, 0},
-		{"int64-short", typeInt64, make([]byte, 7), 0},
-		{"int64-long", typeInt64, make([]byte, 9), 0},
-		{"uint64-short", typeUint64, make([]byte, 7), 0},
-		{"uint64-long", typeUint64, make([]byte, 9), 0},
-		{"float64-short", typeFloat64, make([]byte, 7), 0},
-		{"float64-long", typeFloat64, make([]byte, 9), 0},
 		{"false-payload", typeBoolFalse, []byte{0}, 0},
 		{"true-payload", typeBoolTrue, []byte{1}, 0},
 		{"delete-payload", typeDelete, []byte{0}, 0},
 		{"delete-expiration", typeDelete, nil, 1},
+	}
+	for _, tc := range typedCases() {
+		if tc.payload == 0 || tc.logical == "[]byte" {
+			continue
+		}
+		sizes := []int{tc.payload - 1, tc.payload + 1}
+		if tc.payload > 1 {
+			sizes = append(sizes, 0)
+		}
+		for _, size := range sizes {
+			cases = append(cases, struct {
+				name       string
+				ty         recordType
+				value      []byte
+				expiration int64
+			}{fmt.Sprintf("%s-size-%d", tc.name, size), tc.ty, make([]byte, size), 0})
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +103,15 @@ func TestLogTypedRecordTags(t *testing.T) {
 		{typeBoolFalse, 0x06, nil},
 		{typeBoolTrue, 0x07, nil},
 		{typeString, 0x08, nil},
+		{typeInt8, 0x09, make([]byte, 1)},
+		{typeInt16, 0x0a, make([]byte, 2)},
+		{typeInt32, 0x0b, make([]byte, 4)},
+		{typeUint8, 0x0c, make([]byte, 1)},
+		{typeUint16, 0x0d, make([]byte, 2)},
+		{typeUint32, 0x0e, make([]byte, 4)},
+		{typeFloat32, 0x0f, make([]byte, 4)},
+		{typeInt, 0x10, make([]byte, 8)},
+		{typeUint, 0x11, make([]byte, 8)},
 	} {
 		log, _ := openRecoveryLog(t, t.TempDir())
 		if _, _, err := log.write(tc.ty, nil, tc.value, 0); err != nil {
