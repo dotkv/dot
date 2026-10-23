@@ -71,6 +71,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.
 th, td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { background: var(--surface); font-weight: 600; }
 td:first-child { min-width: 125px; }
+.options-table th:nth-child(-n+2), .options-table td:nth-child(-n+2) { white-space: nowrap; }
 .pagination { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); }
 .pagination a { text-decoration: none; font-size: 14px; }
 .pagination a > span:first-child { display: block; margin-bottom: 2px; color: var(--muted); font-size: 11px; }
