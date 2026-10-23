@@ -10,7 +10,7 @@ import (
 	"github.com/dotkv/dot"
 )
 
-const workers = 1 << 4
+const workers = 2
 
 func check(err error) {
 	if err != nil && err != dot.ErrNotFound {
@@ -74,14 +74,8 @@ func gets(db *dot.DB) {
 
 func scans(db *dot.DB) {
 	for {
-		for entry, err := range db.Scan() {
+		for _, err := range db.Scan() {
 			check(err)
-			switch v := entry.Value.(type) {
-			case uint64:
-				if v > 1<<18 {
-					panic("invalid val")
-				}
-			}
 		}
 	}
 }
