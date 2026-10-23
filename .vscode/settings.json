@@ -1,0 +1,6 @@
+{
+  "go.testEnvVars": {
+    "TMPDIR": "~/.cache/dot/tmp"
+  },
+  "go.testTimeout": "5m"
+}

@@ -11,6 +11,48 @@ go test ./...
 go test -race ./...
 ```
 
+Use `go test .` for just the internal storage tests, or `go test ./tests` for
+just the public API suite.
+
+## Local setup
+
+If VS Code's **run package tests** runs `go test dot` and reports "package dot
+is not in std", check `go list .` from the repository root. It should print
+`github.com/dotkv/dot`. Run **Developer: Reload Window** to clear the Go
+extension's cached package paths, then retry. The package declaration `dot`
+is not the import path; there is no need to change `go.mod`.
+
+On Linux, `/tmp` may be a memory-backed filesystem with a per-user quota.
+Storage boundary tests write 64 MiB log segments, so they can hit "disk quota
+exceeded" even when the public suite passes and `df` still shows free space.
+Use an existing directory on disk for temporary build and test files:
+
+```sh
+mkdir -p "$HOME/.cache/dot/tmp"
+TMPDIR="$HOME/.cache/dot/tmp" go test ./...
+TMPDIR="$HOME/.cache/dot/tmp" go test -race ./...
+```
+
+`TMPDIR` applies to both Go's build files and `t.TempDir()`. `GOTMPDIR` alone
+only moves build files. Tests clean up their temporary directories normally.
+
+For VS Code, set `go.testEnvVars` in local workspace settings. Disk-backed
+tests can also need longer than the extension's default 30-second timeout:
+
+```json
+{
+  "go.testEnvVars": { "TMPDIR": "~/.cache/dot/tmp" },
+  "go.testTimeout": "5m"
+}
+```
+
+If Go runs through mise shims, a local `.mise.local.toml` can instead set
+`TMPDIR` under `[env]` to the directory's absolute path. After `mise trust
+.mise.local.toml`, this applies to terminal and editor Go commands in the
+checkout. Keep that machine-specific file in `.git/info/exclude`.
+
+## Suite layout
+
 The public suite has five files:
 
 - `api_test.go`: keys, scans, errors, ownership, expiration, relative TTLs,
