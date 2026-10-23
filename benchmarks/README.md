@@ -11,39 +11,39 @@ Completed cases: **8**, covering **4 configurations**.
 
 ### 80/20 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **94,278,480**. Ratios are reads/writes.
+Measured operations per engine: **92,527,872**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  20.440 |     1.635 |   23.295 |          4,612,541 |           46.9 |      32.12 |
-| Pebble         |    1 |  57.052 |     4.715 |   74.751 |          1,652,512 |           43.6 |      18.75 |
+| Dot            |    1 |  21.186 |     1.729 |   24.703 |          4,367,345 |           44.8 |      16.08 |
+| Pebble         |    1 |  56.957 |     4.795 |   75.775 |          1,624,517 |           41.8 |      18.64 |
 
 ### 80/20 · 1,024 B values · 8 workers
 
-Measured operations per engine: **13,002,912**. Ratios are reads/writes.
+Measured operations per engine: **13,018,680**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  19.135 |    11.591 |   48.127 |            679,527 |           50.6 |      47.18 |
-| Pebble         |    1 |  55.592 |    33.907 |  221.183 |            233,898 |           47.8 |      37.44 |
+| Dot            |    1 |  20.383 |    12.313 |   48.895 |            638,691 |           51.0 |      48.51 |
+| Pebble         |    1 |  55.100 |    33.582 |  220.159 |            236,273 |           50.5 |      34.52 |
 
 ### 20/80 · 8 B uint64 values · 8 workers
 
-Measured operations per engine: **50,957,016**. Ratios are reads/writes.
+Measured operations per engine: **50,686,872**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  23.071 |     3.502 |   29.055 |          2,208,715 |           49.3 |      12.87 |
-| Pebble         |    1 |  30.439 |     4.643 |   35.327 |          1,674,079 |           44.8 |      18.23 |
+| Dot            |    1 |  23.112 |     3.513 |   29.951 |          2,193,094 |           47.4 |      25.96 |
+| Pebble         |    1 |  29.331 |     4.491 |   35.327 |          1,728,101 |           43.8 |      18.98 |
 
 ### 20/80 · 1,024 B values · 8 workers
 
-Measured operations per engine: **3,164,160**. Ratios are reads/writes.
+Measured operations per engine: **3,254,304**. Ratios are reads/writes.
 
 | Implementation | Runs | Seconds | Mean (µs) | p99 (µs) | Throughput (ops/s) | Peak RSS (MiB) | Disk (MiB) |
 | -------------- | ---: | ------: | --------: | -------: | -----------------: | -------------: | ---------: |
-| Dot            |    1 |  14.684 |    36.877 |   63.487 |            215,479 |           48.8 |      54.98 |
-| Pebble         |    1 |  26.556 |    66.613 |  212.991 |            119,153 |           49.9 |      38.95 |
+| Dot            |    1 |  15.443 |    37.655 |   66.047 |            210,728 |           50.5 |      48.70 |
+| Pebble         |    1 |  27.002 |    65.937 |  204.799 |            120,520 |           51.3 |      41.96 |
 
 Setup: **16,384 initial keys**, **16-byte keys**, **30,000 warmup operations**, seed **1**.
 
@@ -65,6 +65,19 @@ go run .
 ```
 
 Requires Linux. Each successful run updates the results above.
+
+If linking fails with "No space left on device" or "disk quota exceeded", check
+`/tmp`. A memory-backed `/tmp` can reach its capacity or per-user quota even when
+the disk has free space. Use a temporary directory on disk for the build:
+
+```sh
+mkdir -p "$HOME/.cache/dot/tmp"
+TMPDIR="$HOME/.cache/dot/tmp" go run .
+```
+
+`TMPDIR` also moves the external linker's temporary files; `GOTMPDIR` alone is
+not enough. See [local setup](../tests/README.md#local-setup) to apply this to
+terminal and editor Go commands through mise.
 
 ## How it works
 
